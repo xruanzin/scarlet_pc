@@ -1,4 +1,4 @@
-// Let's Go Recomp start screen: the game files (picked once, set up and recompiled here: runtime/gamesetup.c), the
+// Scarlet Recomp bootstrap start screen: the game files (picked once, set up and recompiled here: runtime/gamesetup.c), the
 // resolution, fullscreen, anti-aliasing, the translation (mods/, installed from a downloaded file: runtime/mods.c),
 // the keyboard / mouse controls, Play. In English, or in Portuguese when the system's language is (LARECOMP_LANG=en|pt
 // chooses). The choices go to larecomp.ini (settings.c; bind_key_* from runtime/hle/bindings.c).
@@ -273,8 +273,8 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
         // (both hook game functions by address: builds without address tables keep them off, runtime/fnhook.c)
         bool known = !setup_ready() || game_build("extracted/exefs") != GAME_BUILD_OTHER;
-        const char *only = T("Only with version 1.0.0 (the base game) of Eevee or Pikachu for now.",
-                             "Por enquanto só na versão 1.0.0 (o jogo base) do Eevee ou do Pikachu.");
+        const char *only = T("This inherited Let\'s Go option is disabled for Scarlet while Scarlet-specific hooks are developed.",
+                             "Esta opção herdada do Let\'s Go está desativada no Scarlet enquanto os hooks específicos são desenvolvidos.");
         ImGui::BeginDisabled(!known);
         ImGui::Checkbox(T("60 fps (experimental)", "60 fps (experimental)"), &fps60);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
