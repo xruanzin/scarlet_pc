@@ -1,5 +1,5 @@
 // Game file setup (runtime/gamesetup.h). The picked folder is searched a few levels deep (dump tools nest the files):
-// exefs/ is the folder with main and main.npdm, the RomFS either a romfs.bin image or the folder with bin/message.
+// exefs/ is the folder with main and main.npdm; the RomFS is either romfs.bin or an extracted Scarlet RomFS tree.
 // exefs/ is copied into <data root>/extracted (hard links where the file system allows), the RomFS image is copied
 // or built (runtime/romfs_build.c), then the game code is recompiled from exefs/ (runtime/gamebuild.c).
 #include "gamesetup.h"
@@ -24,7 +24,6 @@
 #define ROOT "extracted"  // (in the data root, the working directory)
 // Pokémon Scarlet base program id and the known base-game main Build ID.
 #define TITLE_SCARLET 0x0100A3D008C5C000ull
-static const uint8_t SCARLET_100[8] = {0xca, 0x44, 0xe7, 0xdd, 0x62, 0xe6, 0x1a, 0x2a};
 
 static _Atomic int g_state;
 static _Atomic float g_progress;
