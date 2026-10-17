@@ -27,7 +27,7 @@
 #define GAMELIB_ABI 3  // (3: FN_ENTER calls the function hooks, runtime/fnhook.c)
 #define GAMELIB_MAX_MODULES 4
 
-// One table per recompiled module, in load order (main, sdk, subsdk0, subsdk1: runtime/loader.c).
+// One table per recompiled module, in load order (Scarlet base: main, sdk, subsdk0; runtime/loader.c).
 typedef struct {
     const char *name;
     const uint64_t *addrs;  // sorted guest addresses
