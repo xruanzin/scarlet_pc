@@ -3,11 +3,11 @@
 #include "gamelib.h"
 
 #define MOD(n) extern const uint64_t n##_fn_addrs[], n##_fn_count; extern const GuestFn n##_fn_ptrs[];
-MOD(main) MOD(sdk) MOD(subsdk0) MOD(subsdk1)
+MOD(main) MOD(sdk) MOD(subsdk0)
 #undef MOD
 #define TAB(n) {#n, n##_fn_addrs, n##_fn_ptrs, &n##_fn_count}
 
 GAMELIB_EXPORT const GameLibTables *lasgame_tables(void) {
-    static const GameLibTables t = {GAMELIB_ABI, GAMELIB_ID, 4, {TAB(main), TAB(sdk), TAB(subsdk0), TAB(subsdk1)}};
+    static const GameLibTables t = {GAMELIB_ABI, GAMELIB_ID, 3, {TAB(main), TAB(sdk), TAB(subsdk0)}};
     return &t;
 }
