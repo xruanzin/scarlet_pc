@@ -272,7 +272,7 @@ extern "C" void launcher_lg_run(const char *root) {
         if (ImGui::Checkbox(T("Fullscreen", "Tela cheia"), &full)) SDL_SetWindowFullscreen(win, full);
         ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
         // (both hook game functions by address: builds without address tables keep them off, runtime/fnhook.c)
-        bool known = !setup_ready() || game_build("extracted/exefs") != GAME_BUILD_OTHER;
+        bool known = false;  // Scarlet address-specific 60 fps / battle hooks have not been developed yet;
         const char *only = T("This inherited Let\'s Go option is disabled for Scarlet while Scarlet-specific hooks are developed.",
                              "Esta opção herdada do Let\'s Go está desativada no Scarlet enquanto os hooks específicos são desenvolvidos.");
         ImGui::BeginDisabled(!known);
