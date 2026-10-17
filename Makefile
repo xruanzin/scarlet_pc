@@ -1,4 +1,4 @@
-# Let's Go Recomp build (from LAS Recomp's).
+# Pokémon Scarlet Recomp bootstrap (derived from Let's Go Recomp / LAS Recomp).
 # Windows (the supported platform): MSYS2 UCRT64 shell or Git Bash with MSYS2 on PATH, clang + Vulkan renderer
 # (docs/COMPILAR-WINDOWS.md). The Linux branch is LAS Recomp's, kept but untested here.
 #   make gen           translate your own game files (extracted/exefs) into generated/
@@ -41,7 +41,7 @@ GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibi
 
 # The game code (made by `make gen` from your own game files) is its own library next to the app (runtime/gamelib.h);
 # the app itself holds none of it
-GEN_SRC  := $(wildcard $(GEN)/main/*.c) $(wildcard $(GEN)/sdk/*.c) $(wildcard $(GEN)/subsdk0/*.c) $(wildcard $(GEN)/subsdk1/*.c)
+GEN_SRC  := $(wildcard $(GEN)/main/*.c) $(wildcard $(GEN)/sdk/*.c) $(wildcard $(GEN)/subsdk0/*.c)
 GEN_OBJ  := $(patsubst %.c,$(B)/obj/%.o,$(patsubst $(GEN)/%,%,$(GEN_SRC))) $(B)/obj/tools/gamelib_entry.o
 RT_SRC   := $(wildcard runtime/*.c) $(wildcard runtime/hle/*.c) $(wildcard runtime/services/*.c) \
             $(wildcard runtime/nvn/*.c) $(wildcard runtime/nvn/maxwell/*.c) runtime/platform/$(PLATFORM).c
@@ -174,10 +174,9 @@ $(B)/imgui/imgui_impl_%.o: $(IMGUI)/backends/imgui_impl_%.cpp
 PY := $(firstword $(wildcard .venv/Scripts/python.exe) $(wildcard .venv/bin/python) $(wildcard tools/venv/bin/python) $(wildcard tools/venv/Scripts/python.exe))
 
 gen:
-	cd tools && $(abspath $(PY)) gen.py sdk ../extracted/exefs/sdk 0x7004000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py sdk ../extracted/exefs/sdk 0x7006000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD) $(GENTRACE)
 	cd tools && $(abspath $(PY)) gen.py main ../extracted/exefs/main 0x7000000000 ../$(GEN)/main $(GENSIMD) $(GENTRACE)
-	cd tools && $(abspath $(PY)) gen.py subsdk0 ../extracted/exefs/subsdk0 0x7006000000 ../$(GEN)/subsdk0 $(GENSIMD) $(GENTRACE)
-	cd tools && $(abspath $(PY)) gen.py subsdk1 ../extracted/exefs/subsdk1 0x7008000000 ../$(GEN)/subsdk1 $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py subsdk0 ../extracted/exefs/subsdk0 0x7008000000 ../$(GEN)/subsdk0 $(GENSIMD) $(GENTRACE)
 
 gen-objs: $(GEN_OBJ)
 
