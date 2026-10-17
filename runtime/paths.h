@@ -1,4 +1,4 @@
-// Where Let's Go Recomp keeps its files (runtime/paths.c).
+// Where Scarlet Recomp keeps its files (runtime/paths.c).
 //
 // Data root: everything the app writes or the user brings - extracted/ (game files), mods/ (translations), save/,
 // cache/ (shaders / pipelines), fonts/ (optional), larecomp.ini. rt_paths_init() picks it and makes it the
@@ -22,7 +22,7 @@ extern "C" {
 
 #define RT_BUNDLE_ID "com.peiikai.lasrecomp"  // (data folder on macOS / Linux: kept)
 #define RT_APP_NAME "Let's Go Recomp"         // window title, messages, the launcher
-#define RT_APP_VERSION "0.2.2"                // the release (Makefile `dist` names the zip after it)
+#define RT_APP_VERSION "0.0.1-dev"                // the release (Makefile `dist` names the zip after it)
 
 void rt_paths_init(void);         // first thing in main(), after plat_init
 const char *rt_data_root(void);   // absolute
