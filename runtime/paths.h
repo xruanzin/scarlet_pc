@@ -21,7 +21,7 @@ extern "C" {
 #endif
 
 #define RT_BUNDLE_ID "com.peiikai.lasrecomp"  // (data folder on macOS / Linux: kept)
-#define RT_APP_NAME "Let's Go Recomp"         // window title, messages, the launcher
+#define RT_APP_NAME "Scarlet Recomp"         // window title, messages, the launcher
 #define RT_APP_VERSION "0.0.1-dev"                // the release (Makefile `dist` names the zip after it)
 
 void rt_paths_init(void);         // first thing in main(), after plat_init
