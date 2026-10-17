@@ -4,7 +4,7 @@
 
 #include "rt.h"
 
-Module g_modules[4];
+Module g_modules[3];
 int g_nmodules;
 
 enum { DT_NULL = 0, DT_PLTRELSZ = 2, DT_HASH = 4, DT_STRTAB = 5, DT_SYMTAB = 6, DT_RELA = 7, DT_RELASZ = 8,
@@ -174,10 +174,10 @@ static void relocate(Module *m) {
 
 void loader_load(const char *exefs) {
     char path[1024];
-    // Let's Go: the game, the SDK, glslc (runtime GLSL compiler) and multimedia (movie::). Same order and bases as
-    // the generated code (Makefile `gen`, tools/gamelib_entry.c).
+    // Scarlet base: game main, nnSdk and one auxiliary subsdk. Keep this order/bases identical to
+    // Makefile `gen`, runtime/gamebuild.c and tools/gamelib_entry.c.
     static const struct { const char *name; uint64_t base; } mods[] = {
-        {"main", MAIN_BASE}, {"sdk", SDK_BASE}, {"subsdk0", SUBSDK0_BASE}, {"subsdk1", SUBSDK1_BASE}};
+        {"main", MAIN_BASE}, {"sdk", SDK_BASE}, {"subsdk0", SUBSDK0_BASE}};
     for (unsigned i = 0; i < sizeof mods / sizeof mods[0]; i++) {
         Module *m = &g_modules[g_nmodules++];
         m->name = mods[i].name;
