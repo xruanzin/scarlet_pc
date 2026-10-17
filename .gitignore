@@ -32,3 +32,6 @@ NVIDIA Corporation/
 fonts/*.bfttf
 fonts/*.ttf
 
+
+# Relatórios locais do diagnóstico do Scarlet
+scarlet_*.json
