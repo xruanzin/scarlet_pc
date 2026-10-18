@@ -1,6 +1,7 @@
 param(
     [string]$GameRoot = "D:\Pokemon Scarlet\Extracted\Base",
-    [switch]$Profile
+    [switch]$Profile,
+    [switch]$LiveLog
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,7 +46,7 @@ Write-Host ""
 # ErrorActionPreference is Stop. cmd.exe merges stderr into stdout before
 # PowerShell sees it, so the runtime can log normally without being aborted.
 $Q = [char]34
-$CmdLine = $Q + $Exe + $Q + " " + $Q + $GameRoot + $Q + " --play 2>&1"
+$BaseCmdLine = $Q + $Exe + $Q + " " + $Q + $GameRoot + $Q + " --play"
 $PreviousVkProf = $env:LARECOMP_VK_PROF
 try {
     if ($Profile) {
@@ -57,8 +58,21 @@ try {
         # queries and per-frame profiling are useful for diagnostics, not normal play.
         Remove-Item Env:LARECOMP_VK_PROF -ErrorAction SilentlyContinue
     }
-    & $env:ComSpec /d /s /c $CmdLine | Tee-Object -FilePath $Log
-    $Code = $LASTEXITCODE
+    if ($LiveLog) {
+        # Diagnostic convenience only: piping thousands of native log lines
+        # through PowerShell/Tee-Object can stall the game itself on Windows.
+        $CmdLine = $BaseCmdLine + " 2>&1"
+        & $env:ComSpec /d /s /c $CmdLine | Tee-Object -FilePath $Log
+        $Code = $LASTEXITCODE
+    }
+    else {
+        # Fast path: cmd.exe writes directly to disk. PowerShell is not in the
+        # runtime's stdout/stderr hot path, so loading/shader bursts cannot block
+        # waiting for Tee-Object to consume lines.
+        $CmdLine = $BaseCmdLine + " > " + $Q + $Log + $Q + " 2>&1"
+        & $env:ComSpec /d /s /c $CmdLine
+        $Code = $LASTEXITCODE
+    }
 }
 finally {
     if ($null -eq $PreviousVkProf) {
