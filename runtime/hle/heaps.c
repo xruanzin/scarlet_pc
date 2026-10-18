@@ -135,31 +135,200 @@ HLE_FUNC("_ZN2nn4lmem21AllocateFromFrameHeapEPNS0_6detail8HeapHeadEmi", heap_all
     if (!c->x[0]) fail_once("frame heap allocation", lr, size);
 }
 
-// nn::mem::StandardAllocator::Initialize(void *addr, size_t size[, bool])
+// nn::mem::StandardAllocator
+//
+// Scarlet initializes its allocator with addr == NULL and a 0x300000000-byte
+// virtual arena. The Nintendo SDK implementation expects console virtual-memory
+// plumbing that this host runtime does not expose yet and aborts during boot.
+// Recompiled code can directly dereference host pointers, so use a host-backed
+// allocator here. This is also the strategy used by other native Switch
+// recompilation projects and gets the boot past the SDK allocator without
+// committing the advertised 12 GiB arena.
+
+typedef struct StdAllocRec {
+    void *ptr;
+    uint64_t size;
+    uint64_t align;
+    struct StdAllocRec *next;
+} StdAllocRec;
+
+static StdAllocRec *g_std_recs;
+static pthread_mutex_t g_std_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_std_declared_size = 0x10000000ull;
+static uint64_t g_std_live_bytes;
+
+static uint64_t std_align(uint64_t a) {
+    if (a < 16) a = 16;
+    // Nintendo callers use powers of two; be defensive for malformed values.
+    if (a & (a - 1)) {
+        uint64_t p = 16;
+        while (p < a && p < (1ull << 62)) p <<= 1;
+        a = p;
+    }
+    return a;
+}
+
+static void *std_host_alloc(uint64_t size, uint64_t align) {
+    if (!size) size = 1;
+    align = std_align(align);
+#ifdef _WIN32
+    void *p = _aligned_malloc((size_t)size, (size_t)align);
+#else
+    void *p = NULL;
+    if (posix_memalign(&p, (size_t)align, (size_t)size) != 0) p = NULL;
+#endif
+    if (!p) return NULL;
+
+    StdAllocRec *r = malloc(sizeof *r);
+    if (!r) {
+#ifdef _WIN32
+        _aligned_free(p);
+#else
+        free(p);
+#endif
+        return NULL;
+    }
+    r->ptr = p; r->size = size; r->align = align;
+    pthread_mutex_lock(&g_std_lock);
+    r->next = g_std_recs;
+    g_std_recs = r;
+    g_std_live_bytes += size;
+    pthread_mutex_unlock(&g_std_lock);
+    return p;
+}
+
+static StdAllocRec *std_find_locked(void *p, StdAllocRec ***link_out) {
+    StdAllocRec **link = &g_std_recs;
+    while (*link) {
+        if ((*link)->ptr == p) {
+            if (link_out) *link_out = link;
+            return *link;
+        }
+        link = &(*link)->next;
+    }
+    return NULL;
+}
+
+static void std_host_free(void *p) {
+    if (!p) return;
+    uint64_t size = 0;
+    pthread_mutex_lock(&g_std_lock);
+    StdAllocRec **link = NULL;
+    StdAllocRec *r = std_find_locked(p, &link);
+    if (r) {
+        *link = r->next;
+        size = r->size;
+        if (g_std_live_bytes >= size) g_std_live_bytes -= size;
+    }
+    pthread_mutex_unlock(&g_std_lock);
+    if (!r) {
+        LOG("[heaps] StandardAllocator::Free unknown pointer %p (ignored)\n", p);
+        return;
+    }
+#ifdef _WIN32
+    _aligned_free(p);
+#else
+    free(p);
+#endif
+    free(r);
+}
+
+static void *std_host_realloc(void *p, uint64_t size) {
+    if (!p) return std_host_alloc(size, 16);
+    if (!size) size = 1;
+
+    uint64_t old_size = 0, align = 16;
+    pthread_mutex_lock(&g_std_lock);
+    StdAllocRec *r = std_find_locked(p, NULL);
+    if (r) { old_size = r->size; align = r->align; }
+    pthread_mutex_unlock(&g_std_lock);
+    if (!r) return NULL;
+
+    void *n = std_host_alloc(size, align);
+    if (!n) return NULL;
+    memcpy(n, p, (size_t)(old_size < size ? old_size : size));
+    std_host_free(p);
+    return n;
+}
+
+static uint64_t std_host_size(void *p) {
+    uint64_t size = 0;
+    pthread_mutex_lock(&g_std_lock);
+    StdAllocRec *r = std_find_locked(p, NULL);
+    if (r) size = r->size;
+    pthread_mutex_unlock(&g_std_lock);
+    return size;
+}
+
+RT_ON_RESET(stdalloc_reset) {
+    pthread_mutex_lock(&g_std_lock);
+    StdAllocRec *r = g_std_recs;
+    g_std_recs = NULL;
+    g_std_live_bytes = 0;
+    g_std_declared_size = 0x10000000ull;
+    pthread_mutex_unlock(&g_std_lock);
+    while (r) {
+        StdAllocRec *n = r->next;
+#ifdef _WIN32
+        _aligned_free(r->ptr);
+#else
+        free(r->ptr);
+#endif
+        free(r);
+        r = n;
+    }
+}
+
+static void std_init_common(Cpu *c, bool cached) {
+    g_std_declared_size = c->x[2] ? c->x[2] : 0x10000000ull;
+    LOG("[heaps] StandardAllocator host-backed: arena=%#llx addr=%#llx cached=%d\n",
+        (unsigned long long)g_std_declared_size,
+        (unsigned long long)c->x[1], cached ? 1 : 0);
+    // Initialize is void. Preserve x0 ('this') as normal AArch64 member
+    // functions commonly do; no guest SDK call is made here.
+}
+
 HLE_FUNC("_ZN2nn3mem17StandardAllocator10InitializeEPvm", heap_std_init) {
-    uint64_t lr = c->x[30], size = c->x[2];
-    CALL("_ZN2nn3mem17StandardAllocator10InitializeEPvm");
-    if (ENV("LARECOMP_LOG_HEAPS"))
-        LOG("[heaps] standard allocator %#llx bytes from lr %llx\n", (unsigned long long)size, (unsigned long long)lr);
+    std_init_common(c, false);
 }
 
 HLE_FUNC("_ZN2nn3mem17StandardAllocator10InitializeEPvmb", heap_std_init_b) {
-    uint64_t lr = c->x[30], addr = c->x[1], size = c->x[2], flag = c->x[3];
-    LOG("[heaps] StandardAllocator::Initialize(addr=%#llx, size=%#llx, flag=%llu) from lr %llx\n",
-        (unsigned long long)addr, (unsigned long long)size, (unsigned long long)flag, (unsigned long long)lr);
-    CALL("_ZN2nn3mem17StandardAllocator10InitializeEPvmb");
-    if (ENV("LARECOMP_LOG_HEAPS"))
-        LOG("[heaps] standard allocator returned x0=%#llx\n", (unsigned long long)c->x[0]);
+    std_init_common(c, c->x[3] != 0);
 }
 
 HLE_FUNC("_ZN2nn3mem17StandardAllocator8AllocateEm", heap_std_alloc) {
-    uint64_t lr = c->x[30], size = c->x[1];
-    CALL("_ZN2nn3mem17StandardAllocator8AllocateEm");
+    uint64_t size = c->x[1], lr = c->x[30];
+    c->x[0] = (uint64_t)(uintptr_t)std_host_alloc(size, 16);
     if (!c->x[0] && size) fail_once("standard allocation", lr, size);
 }
 
 HLE_FUNC("_ZN2nn3mem17StandardAllocator8AllocateEmm", heap_std_alloc_a) {
-    uint64_t lr = c->x[30], size = c->x[1];
-    CALL("_ZN2nn3mem17StandardAllocator8AllocateEmm");
+    uint64_t size = c->x[1], align = c->x[2], lr = c->x[30];
+    c->x[0] = (uint64_t)(uintptr_t)std_host_alloc(size, align);
     if (!c->x[0] && size) fail_once("standard allocation (aligned)", lr, size);
+}
+
+HLE_FUNC("_ZN2nn3mem17StandardAllocator4FreeEPv", heap_std_free) {
+    std_host_free((void *)(uintptr_t)c->x[1]);
+}
+
+HLE_FUNC("_ZN2nn3mem17StandardAllocator10ReallocateEPvm", heap_std_realloc) {
+    uint64_t size = c->x[2], lr = c->x[30];
+    c->x[0] = (uint64_t)(uintptr_t)std_host_realloc((void *)(uintptr_t)c->x[1], size);
+    if (!c->x[0] && size) fail_once("standard reallocation", lr, size);
+}
+
+HLE_FUNC("_ZNK2nn3mem17StandardAllocator9GetSizeOfEPKv", heap_std_sizeof) {
+    c->x[0] = std_host_size((void *)(uintptr_t)c->x[1]);
+}
+
+HLE_FUNC("_ZNK2nn3mem17StandardAllocator16GetTotalFreeSizeEv", heap_std_free_size) {
+    pthread_mutex_lock(&g_std_lock);
+    uint64_t live = g_std_live_bytes, total = g_std_declared_size;
+    pthread_mutex_unlock(&g_std_lock);
+    c->x[0] = total > live ? total - live : 0;
+}
+
+HLE_FUNC("_ZN2nn3mem17StandardAllocator8FinalizeEv", heap_std_finalize) {
+    (void)c;
 }
