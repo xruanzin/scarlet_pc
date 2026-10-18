@@ -759,6 +759,45 @@ TexBackend *vk_tex(NvnTexture *t, bool for_render) {
     return b;
 }
 
+bool renderer_fill_identity_lut_3d(NvnTexture *t) {
+    if (!t || t->target != 2 || t->width != 32 || t->height != 32 || t->depth != 32 || t->format != 0x3D)
+        return false;
+
+    static uint32_t lut[32 * 32 * 32];
+    static int ready;
+    if (!ready) {
+        for (uint32_t z = 0; z < 32; z++)
+            for (uint32_t y = 0; y < 32; y++)
+                for (uint32_t x = 0; x < 32; x++) {
+                    uint32_t r = (x * 1023u + 15u) / 31u;
+                    uint32_t g = (y * 1023u + 15u) / 31u;
+                    uint32_t b = (z * 1023u + 15u) / 31u;
+                    lut[(z * 32u + y) * 32u + x] = r | (g << 10) | (b << 20) | (3u << 30);
+                }
+        ready = 1;
+    }
+
+    renderer_mark_gpu_owned(t);
+    TexBackend *b = vk_tex(t, true);
+    if (!b || !b->image) return false;
+
+    VkSpan sp = vk_transient_copy(lut, sizeof lut, 16);
+    VkBufferImageCopy rg = {
+        .bufferOffset = sp.off,
+        .bufferRowLength = 32,
+        .bufferImageHeight = 32,
+        .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+        .imageExtent = {32, 32, 32},
+    };
+    VkCommandBuffer cb = vk_upload_cmd();
+    vkCmdCopyBufferToImage(cb, sp.buf, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+
+    static int logged;
+    if (!logged++) LOG("[vk] Scarlet 32x32x32 colour LUT: neutral identity fallback\n");
+    return true;
+}
+
+
 void renderer_mark_gpu_owned(NvnTexture *t) { tex_backend(t)->gpu_owned = true; }
 bool renderer_is_gpu_owned(NvnTexture *t) { return tex_backend(t)->gpu_owned; }
 // Host-produced texel data (decoded video, any thread): applied on the render thread at the texture's next use.
