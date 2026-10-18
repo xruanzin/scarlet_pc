@@ -170,3 +170,46 @@ CMP/MOV/ADRP/ADD/ADR/LDRB/ADD/BR shape. Without main resume metadata, the compac
 case reproduces a missing interior target; with it, SP/LR and registers match.
 These synthetic fixtures contain no game binary. Full Windows game boot and
 image presentation remain to be checked on the user's machine.
+
+## Link recovery after Argument list too long
+
+`scarlet_build(5).log` compiles main and its table, compiles the game-library
+entry with ID `f5dbb454872d1866`, then successfully replaces ScarletRecomp.exe.
+The DLL link passes every object on one command line and fails:
+
+```text
+make: clang: Argument list too long
+make: *** [Makefile:158: build/lasgame.dll] Error 127
+```
+
+The later `scarlet_boot(20261018-032326).log` stops immediately with
+`lasgame.dll was built for another version`. The DLL link never succeeded, so
+the updated runtime is paired with the previous DLL/ID. This boot cannot
+validate main's indirect-branch correction. Do not edit the ID or bypass the
+runtime's compatibility check.
+
+The Makefile now writes quoted object paths to `build/lasgame.dll.rsp` using
+GNU make's file function. Clang receives `@build/lasgame.dll.rsp` instead of
+the full object list. Writing the response file also avoids a long shell
+command. The existing temporary-DLL rename and ID update run only after a
+successful link. The in-app builder already uses a response file.
+
+Close the game and resume the existing build:
+
+```powershell
+git pull --ff-only origin scarlet-bootstrap
+Set-ExecutionPolicy -Scope Process Bypass
+.\tools\scarlet_build_windows.ps1 -Jobs 4
+.\tools\scarlet_run.ps1
+```
+
+No NSO regeneration or cleanup is needed. Keep all generated sources and
+compiled objects: make reuses them and retries the link. Run the game only
+after the build prints `BUILD CONCLUIDO`.
+
+`python tools/test_gamelib_link.py` exercises this exact Makefile rule on
+Linux with 1800 synthetic objects plus a callable probe. Its compiler wrapper
+enforces a 32767-character command-line limit. It verifies a failed link
+preserves the old DLL/ID, retry links a real loadable library via the response
+file, all objects remain untouched, and the next build skips linking. No game
+files are used; final Windows linking and game execution need user validation.

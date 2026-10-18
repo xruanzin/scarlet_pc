@@ -154,8 +154,11 @@ $(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ)
 	mv -f $(dir $@)link/$(notdir $@) $@
 
 # its id file (<library>.id) says what it was built from without loading it (runtime/gamelib.c)
+# Scarlet's main produces over a thousand objects. Write their list with make,
+# not a shell command: either command line can exceed Windows' process limit.
 $(GAMELIB): $(GEN_OBJ) | $(EXE)
-	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp $^
+	$(file >$@.rsp,$(foreach obj,$^,"$(obj)"))
+	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp @"$@.rsp"
 	mv -f $@.tmp $@
 	echo $(GAMELIB_ID) > $@.id
 
