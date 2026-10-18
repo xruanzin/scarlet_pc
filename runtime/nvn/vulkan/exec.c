@@ -1110,6 +1110,14 @@ static void translate_program(void *arg) {
         atomic_store(&p->state, 2);
         return;
     }
+    if (p->vi->surface_fallbacks || p->fi->surface_fallbacks) {
+        static _Atomic unsigned nlog;
+        unsigned n = atomic_fetch_add(&nlog, 1);
+        if (n < 32)
+            LOG("[shader] storage-image compatibility: vs=%u fs=%u (vs %llx fs %llx)\n",
+                p->vi->surface_fallbacks, p->fi->surface_fallbacks,
+                (unsigned long long)p->code[0], (unsigned long long)p->code[1]);
+    }
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
@@ -1921,6 +1929,9 @@ static CsProg *compute_program(NvnProgram *np) {
         atomic_store(&cp->p.state, 2);
         return cp;
     }
+    if (cp->si->surface_fallbacks)
+        LOG("[compute] storage-image compatibility: %u ops (code %llx)\n",
+            cp->si->surface_fallbacks, (unsigned long long)ss->code_addr);
     for (int i = 0; i < 3; i++) {
         cp->local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
         if (!cp->local[i]) cp->local[i] = 1;
