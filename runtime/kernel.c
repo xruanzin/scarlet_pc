@@ -979,6 +979,17 @@ void kernel_dump_guest_threads(void) {
             (unsigned long long)t->wait_mutex,
             t->wait_tag, t->in_sync_wait, t->cur_svc,
             (unsigned long long)t->cur_svc_pc);
+        // Guest call stack (AArch64 frame-record chain from x29), the same walk LARECOMP_THREAD_DUMP does: it shows
+        // which guest function each blocked thread is waiting inside, i.e. what a hung scene is waiting for.
+        uint64_t fp = t->cpu.x[29];
+        LOG("[guest-thread]     stack(x29=%llx):", (unsigned long long)fp);
+        for (int i = 0; i < 16 && fp >= GUEST_LO && fp < GUEST_HI && !(fp & 7); i++) {
+            uint64_t lr = ((uint64_t *)(uintptr_t)fp)[1], up = ((uint64_t *)(uintptr_t)fp)[0];
+            LOG(" %llx", (unsigned long long)lr);
+            if (up <= fp) break;
+            fp = up;
+        }
+        LOG("\n");
     }
     pthread_mutex_unlock(&g_klock);
 }
