@@ -1847,6 +1847,7 @@ typedef struct {
 } SurfaceBindlessCache;
 
 static SurfaceBindlessCache surface_cache[8];
+RT_ON_RESET(surface_bindless_reset) { memset(surface_cache, 0, sizeof surface_cache); }
 
 static SurfaceBindlessCache *surface_cache_get(NvnDescPool *pool) {
     SurfaceBindlessCache *c = NULL;
