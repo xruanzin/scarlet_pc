@@ -14,6 +14,7 @@
 // APIs remain unimplemented; report their actual use once per entry point so
 // a missing model is not incorrectly diagnosed as a texture/driver problem.
 #define TF_UNIMPLEMENTED(name) NVN(name) { \
+    nvn_diag_tf_call(#name, c); \
     static atomic_bool reported; \
     if (!atomic_exchange_explicit(&reported, true, memory_order_relaxed)) \
         LOG("[nvn-unimplemented] %s cb=%llx args=%llx,%llx,%llx lr=%llx (transform feedback is not executed)\n", \

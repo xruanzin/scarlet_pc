@@ -71,6 +71,10 @@ typedef struct NvnShaderStage {
     void *backend;
 } NvnShaderStage;
 
+// Opt-in, bounded local diagnostics: immutable shader controls and TF API calls.
+void nvn_diag_shader(const NvnShaderStage *stage);
+void nvn_diag_tf_call(const char *name, const Cpu *cpu);
+
 typedef struct NvnProgram {
     NvnShaderStage stages[6];
     uint32_t stage_mask;

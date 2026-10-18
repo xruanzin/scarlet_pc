@@ -1,7 +1,8 @@
 param(
     [string]$GameRoot = "D:\Pokemon Scarlet\Extracted\Base",
     [switch]$Profile,
-    [switch]$LiveLog
+    [switch]$LiveLog,
+    [switch]$GraphicsDiagnostics
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,13 +51,29 @@ $BaseCmdLine = $Q + $Exe + $Q + " " + $Q + $GameRoot + $Q + " --play"
 $PreviousVkProf = $env:LARECOMP_VK_PROF
 $PreviousVkOpt = $env:LARECOMP_VK_OPT
 $LocationPushed = $false
+$PreviousDiagnosticEnv = @{}
+foreach ($Name in @('LARECOMP_HLE_PROF', 'LARECOMP_TF_DIAG_DIR')) {
+    $PreviousDiagnosticEnv[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
+}
+$GraphicsDir = $null
 try {
     # Anchor launcher-relative paths. The runtime chooses its own data root and reports it in the log.
     Push-Location -LiteralPath $RepoRoot
     $LocationPushed = $true
     # Normal runs use the stable compiler mode, even after experiments in this PowerShell session.
     $env:LARECOMP_VK_OPT = "0"
+    if ($GraphicsDiagnostics) {
+        $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+        $GraphicsDir = Join-Path $RepoRoot "build\scarlet-diagnostics-$Stamp"
+        $null = New-Item -ItemType Directory -Path $GraphicsDir -Force
+        $env:LARECOMP_TF_DIAG_DIR = $GraphicsDir
+        Write-Host "[scarlet-run] Coleta de controles NVN: $GraphicsDir"
+    }
+    else {
+        Remove-Item Env:LARECOMP_TF_DIAG_DIR -ErrorAction SilentlyContinue
+    }
     if ($Profile) {
+        $env:LARECOMP_HLE_PROF = '1'
         $env:LARECOMP_VK_PROF = "1"
         Write-Host "[scarlet-run] Perfil Vulkan ativo: tempos de CPU, GPU e apresentacao no log."
     }
@@ -64,6 +81,7 @@ try {
         # Do not inherit profiling from an older PowerShell session. GPU timestamp
         # queries and per-frame profiling are useful for diagnostics, not normal play.
         Remove-Item Env:LARECOMP_VK_PROF -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_HLE_PROF -ErrorAction SilentlyContinue
     }
     if ($LiveLog) {
         # Diagnostic convenience only: piping thousands of native log lines
@@ -83,6 +101,14 @@ try {
 }
 finally {
     if ($LocationPushed) { Pop-Location }
+    foreach ($Name in $PreviousDiagnosticEnv.Keys) {
+        if ($null -eq $PreviousDiagnosticEnv[$Name]) {
+            Remove-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue
+        }
+        else {
+            Set-Item -LiteralPath "Env:$Name" -Value $PreviousDiagnosticEnv[$Name]
+        }
+    }
     if ($null -eq $PreviousVkOpt) {
         Remove-Item Env:LARECOMP_VK_OPT -ErrorAction SilentlyContinue
     }
@@ -174,6 +200,38 @@ if ($Code -eq 86 -or $HadSlowBuild) {
     }
     catch {
         Write-Host "[scarlet-run] Nao foi possivel compactar o diagnostico: $_" -ForegroundColor Yellow
+    }
+}
+if ($GraphicsDir) {
+    try {
+        Copy-Item -LiteralPath $Log -Destination (Join-Path $GraphicsDir 'scarlet_boot.log')
+        $RuntimeRoot = Split-Path -Parent $Exe
+        $DataLine = Select-String -LiteralPath $Log -Pattern '^\[paths\] data: (.+)$' | Select-Object -First 1
+        if ($DataLine) { $RuntimeRoot = $DataLine.Matches[0].Groups[1].Value.Trim() }
+        $NoPosition = Select-String -LiteralPath $Log -Pattern 'VS has no position export: code=([0-9a-fA-F]+)'
+        foreach ($Entry in $NoPosition) {
+            $ShaderCode = $Entry.Matches[0].Groups[1].Value
+            foreach ($Suffix in @('.glsl', '.sass.bin')) {
+                $Path = Join-Path $RuntimeRoot ("build/shader-diagnostics/nopos_{0}_vs{1}" -f $ShaderCode, $Suffix)
+                if (Test-Path -LiteralPath $Path -PathType Leaf) {
+                    Copy-Item -LiteralPath $Path -Destination $GraphicsDir -Force
+                }
+            }
+        }
+        $Manifest = [ordered]@{
+            CreatedUtc = [DateTime]::UtcNow.ToString('o')
+            ExecutableSha256 = (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash
+            Profile = [bool]$Profile
+            ExitCode = $Code
+            Note = 'Diagnostic collection only; transform feedback is not implemented by this update.'
+        }
+        $Manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $GraphicsDir 'run.json') -Encoding UTF8
+        $Archive = "$GraphicsDir.zip"
+        Compress-Archive -Path (Join-Path $GraphicsDir '*') -DestinationPath $Archive -CompressionLevel Fastest
+        Write-Host "[scarlet-run] Envie este arquivo: $Archive" -ForegroundColor Cyan
+    }
+    catch {
+        Write-Host "[scarlet-run] Falha ao compactar; arquivos disponiveis em $GraphicsDir : $_" -ForegroundColor Yellow
     }
 }
 exit $Code

@@ -676,6 +676,7 @@ static void save_pipeline_cache(void *a) {
 }
 
 const char *renderer_stats(void) {
+    if (getenv("LARECOMP_HLE_PROF")) rt_hle_profile_report();
     // The pipeline cache was written only at a clean exit: a crash or a killed process lost every pipeline built in
     // the session, and the next one popped in again. Save it on a worker once a burst of new pipelines settles
     // (no new ones for ~6 s: entering an area builds them for a few seconds).

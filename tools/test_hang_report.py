@@ -40,6 +40,7 @@ typedef struct { uint64_t x[31]; } Cpu;
 static uint64_t plat_register_thread(void) { return (uint64_t)(uintptr_t)pthread_self(); }
 static const char *loader_symbol_at(uint64_t pc, uint64_t *off) { return NULL; }
 static void plat_dump_other_threads(void) {}
+static void kernel_dump_guest_threads(void) {}
 /*PRODUCTION*/
 static atomic_bool done;
 static void *write_calls(void *arg) {

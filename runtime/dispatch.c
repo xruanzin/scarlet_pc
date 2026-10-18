@@ -49,6 +49,38 @@ void rt_guest_setjmp(Cpu *c, GuestFn setup, GuestFn continuation, uint64_t retur
 typedef struct { const char *name; HostFn fn; } HleSlot;
 static HleSlot hle_slots[MAX_HLE];
 static int hle_count;
+static _Atomic uint64_t hle_prof_ns[MAX_HLE], hle_prof_calls[MAX_HLE];
+
+// Opt-in wall times, inclusive of nested callbacks and waits. Never sum these
+// as CPU utilization: the renderer already has its own execution/GPU timings.
+// In particular, the frame profiler's "other" is not all recompiled game code.
+static void hle_profile_call(Cpu *c) {
+    unsigned i = (unsigned)((c->pc - HLE_BASE) / 16);
+    uint64_t start = plat_now_ns();
+    hle_slots[i].fn(c);
+    uint64_t elapsed = plat_now_ns() - start;
+    atomic_fetch_add_explicit(&hle_prof_ns[i], elapsed, memory_order_relaxed);
+    atomic_fetch_add_explicit(&hle_prof_calls[i], 1, memory_order_relaxed);
+}
+
+void rt_hle_profile_report(void) {
+    struct { int slot; uint64_t ns, calls; } top[10] = {0};
+    for (int i = 0; i < hle_count; i++) {
+        uint64_t ns = atomic_exchange_explicit(&hle_prof_ns[i], 0, memory_order_relaxed);
+        uint64_t calls = atomic_exchange_explicit(&hle_prof_calls[i], 0, memory_order_relaxed);
+        if (!calls || !ns) continue;
+        for (int j = 0; j < 10; j++) if (ns > top[j].ns) {
+            for (int k = 9; k > j; k--) top[k] = top[k - 1];
+            top[j].slot = i; top[j].ns = ns; top[j].calls = calls;
+            break;
+        }
+    }
+    if (!top[0].calls) return;
+    LOG("[hle-prof] top inclusive wall times since last report (callbacks/waits can overlap):\n");
+    for (int i = 0; i < 10 && top[i].calls; i++)
+        LOG("[hle-prof] %.3f ms %llu calls %s\n", top[i].ns / 1e6,
+            (unsigned long long)top[i].calls, hle_slots[top[i].slot].name);
+}
 
 // Overrides of recompiled guest functions (by address)
 #define MAX_OVERRIDE 1024
@@ -309,7 +341,11 @@ static GuestFn dispatch_slow(Cpu *c) {
         int i = (int)((pc - HLE_BASE) / 16);
         if (i < hle_count) {
             hhist_push(hle_slots[i].name, c);
-            if (hle_slots[i].fn) return hle_slots[i].fn;
+            if (hle_slots[i].fn) {
+                static __thread int profile = -1;
+                if (profile < 0) profile = getenv("LARECOMP_HLE_PROF") != NULL;
+                return profile ? hle_profile_call : hle_slots[i].fn;
+            }
             unimpl_pc = pc;
             return hle_unimplemented;
         }

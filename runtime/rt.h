@@ -55,6 +55,7 @@ const char *loader_symbol_at(uint64_t addr, uint64_t *offset);
 typedef void (*HostFn)(Cpu *c);
 void dispatch_init(void);
 GuestFn dispatch_lookup(uint64_t addr);
+void rt_hle_profile_report(void);  // interval HLE wall times, when LARECOMP_HLE_PROF is enabled
 // A generated setjmp site tail-enters this scope; continuation runs while its
 // native jump buffer is live. Guest SDK code still saves/restores guest state.
 void rt_guest_setjmp(Cpu *c, GuestFn setup, GuestFn continuation, uint64_t return_pc);
