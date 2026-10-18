@@ -24,7 +24,7 @@ Settings g_settings = {
     .stick_deadzone = 0.15f,
     .reverb = true,
     .movie_audio = true,
-    .show_fps = false,
+    .show_fps = true,  // (Scarlet port: always show the frame rate while the port is being brought up)
     .upscaler = UPSCALE_SHARP,
     .antialias = AA_SMAA,  // (the game has no anti-aliasing of its own)
 };

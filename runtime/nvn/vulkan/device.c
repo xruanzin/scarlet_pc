@@ -767,6 +767,29 @@ void backend_clear_window(void) {
     if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
 }
 
+// Window-title FPS / hang indicator. It runs on the UI thread, so it keeps updating even when the game thread is stuck:
+// "sem resposta" appears when no frame was presented for 2 s (a freeze, a long shader build or a deadlock).
+static void title_fps_update(void) {
+    static uint64_t last_ms, last_frames, last_change_ms;
+    static double fps;
+    uint64_t now = SDL_GetTicks();
+    if (!last_ms) { last_ms = last_change_ms = now; last_frames = total_frames; return; }
+    if (now - last_ms < 500) return;
+    uint64_t f = total_frames;
+    fps = (double)(f - last_frames) * 1000.0 / (double)(now - last_ms);
+    if (f != last_frames) last_change_ms = now;
+    last_frames = f;
+    last_ms = now;
+    char title[160];
+    if (now - last_change_ms >= 2000)
+        snprintf(title, sizeof title, "%s - SEM RESPOSTA ha %.0f s (frame %llu)", RT_APP_NAME,
+                 (double)(now - last_change_ms) / 1000.0, (unsigned long long)f);
+    else
+        snprintf(title, sizeof title, "%s - %.0f fps (%.0f ms) - frame %llu", RT_APP_NAME, fps, fps > 0 ? 1000.0 / fps : 0.0,
+                 (unsigned long long)f);
+    SDL_SetWindowTitle(window, title);
+}
+
 int ui_run(void) {
     ui_window_init();
     atomic_store(&ui_ready, true);
@@ -783,5 +806,6 @@ int ui_run(void) {
             input_handle_event(&e);
         }
         menu_apply_window_requests(window);
+        title_fps_update();
     }
 }
