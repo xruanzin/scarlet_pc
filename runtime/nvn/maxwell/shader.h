@@ -51,7 +51,9 @@ typedef struct {
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
     uint8_t bindless_storage; // Vulkan backend can execute bindless SUST/SURED through storage images
     uint8_t storage_buffers;  // LDG/STG through the bound NVN storage buffers (no host-memory import required)
-    uint8_t xfb;              // transform-feedback variant: capture generic outputs into separate streams
+    uint8_t xfb;              // transform-feedback variant
+    uint8_t xfb_layout;       // 0: infer legacy layout, 1: Scarlet stream-output layout from NVN control
+    uint8_t xfb_comp[4];      // captured components per buffer/varying (Scarlet: 3,1,1,0)
 } ShaderKey;
 
 typedef struct {
