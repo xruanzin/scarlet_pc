@@ -2,6 +2,8 @@
 #pragma once
 #include "kernel.h"
 
+typedef struct Service Service;
+
 typedef struct {
     uint64_t addr, size;
 } IpcBuf;
@@ -19,9 +21,9 @@ typedef struct IpcReq {
     uint32_t domain_obj;  // 0 if not a domain message
     uint32_t domain_in_objs[8];
     int ndomain_in;
+    Service *in_objects[8]; // resolved CMIF input service objects, domain or moved sessions
+    int nin_objects;
 } IpcReq;
-
-typedef struct Service Service;
 
 typedef struct IpcResp {
     uint32_t result;
