@@ -25,20 +25,20 @@ counters together or subtract all waits from the executor as one CPU budget.
   Nested callbacks and parallel threads can overlap, so their totals are not
   CPU utilization. Guest code and direct overrides outside the HLE stub path
   are not timed by this probe.
-- `-GraphicsDiagnostics` saves a known shader-control prefix (0x704 bytes) and
-  the NVN/SPH header (0x80 bytes), plus constants offsets and sizes. It captures
-  up to 128 initial non-fragment graphics shaders and 128 TF API calls. An
-  independent quota selects up to 128 programs bound during TF, including
-  programs bound before Begin or after Begin/Resume. Early UI programs cannot
-  consume the TF quota.
-- Shader controls are deduplicated by code/control/stage. The collector does
-  not follow embedded pointers or guess larger allocations. Normal launches
-  disable these dumps and the added per-call timing.
-- With diagnostics enabled, SetShaders retains an immutable copy of each
-  non-fragment graphics stage's known prefix/header, bounded to 16 MiB across
-  live programs. Selection at BindProgram/Begin uses that copy rather than
-  dereferencing caller-owned control memory later. Replacement and Finalize
-  release it; allocation/budget exhaustion is reported in the log.
+- `-GraphicsDiagnostics` saves the known 0x704-byte control prefix for the
+  first 128 non-fragment graphics shaders. For programs actually active at
+  transform feedback, it recognizes the standard NVN 0x880-byte control from
+  the control's own +0x6f0 size field and saves the full control, 0x80-byte
+  NVN/SPH header and bounded raw code block. It also records up to 128 TF API
+  calls. Early UI programs cannot consume the independent TF-program quota.
+- Shader controls are deduplicated by code/control/stage. The collector extends
+  beyond 0x704 only when the already-known prefix advertises the standard
+  0x880-byte control size. Raw code capture additionally validates a bounded
+  code size before writing it. Normal launches disable all of these dumps.
+- The first-128 inventory keeps only a small bounded set of snapshots. Late
+  shaders are not retained speculatively. At Begin/ResumeTransformFeedback the
+  currently bound program is captured on use, which avoids the previous 16 MiB
+  live-snapshot budget being exhausted before Scarlet reached customization.
 - On exit the launcher collects this run's log, the captured controls, the
   no-position GLSL/SASS files named in that log and an executable SHA-256 into
   a fresh timestamped ZIP. Older diagnostic files are not included by globbing
@@ -63,11 +63,11 @@ path the launcher prints after exit:
 
 ## Validation
 
-- Native tests verify control-prefix sizes, disabled-path non-dereference,
-  deduplication, shader/call caps and exclusion of fragment/compute controls.
-  They also fill the initial quota before binding late TF programs, overwrite
-  caller control bytes before binding, and check both binding orders and the
-  separate quota.
+- Native tests verify the 0x704 ordinary prefix, 0x880 TF control capture,
+  bounded raw-code dumps, disabled-path non-dereference, deduplication,
+  shader/call caps and exclusion of fragment/compute controls. They fill the
+  initial quota before binding late TF programs and check both binding orders
+  and the separate quota.
 - Native HLE tests verify preservation of function results and PC changes,
   nested-call accounting, 16,000 concurrent calls and interval reset.
 - PowerShell 7 tests exercise normal and abnormal process exit, both profiling
