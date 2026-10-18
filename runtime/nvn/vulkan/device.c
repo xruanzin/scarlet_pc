@@ -200,8 +200,10 @@ static void create_device(void) {
     b->shaderStorageImageArrayDynamicIndexing = h->shaderStorageImageArrayDynamicIndexing;
     b->shaderStorageImageWriteWithoutFormat = h->shaderStorageImageWriteWithoutFormat;
     b->shaderStorageImageReadWithoutFormat = h->shaderStorageImageReadWithoutFormat;
+    b->shaderStorageImageExtendedFormats = h->shaderStorageImageExtendedFormats;
     b->robustBufferAccess = h->robustBufferAccess;
-    g_vk.bindless_storage = have12.shaderStorageImageArrayNonUniformIndexing &&
+    g_vk.bindless_storage = h->fragmentStoresAndAtomics &&
+                            have12.shaderStorageImageArrayNonUniformIndexing &&
                             h->shaderStorageImageArrayDynamicIndexing &&
                             h->shaderStorageImageWriteWithoutFormat &&
                             g_vk.props.limits.maxPerStageDescriptorStorageImages >= MAXWELL_BINDLESS_IMAGES * 2;
