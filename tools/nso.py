@@ -4,7 +4,9 @@ import sys
 import lz4.block
 
 DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ = 0, 1, 2, 4, 5, 6, 7, 8
-DT_STRSZ, DT_JMPREL, DT_RELACOUNT = 10, 23, 0x6FFFFFF9
+DT_STRSZ, DT_INIT, DT_FINI, DT_JMPREL = 10, 12, 13, 23
+DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ = 25, 26, 27, 28
+DT_RELACOUNT = 0x6FFFFFF9
 R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE = 257, 1025, 1026, 1027
 
 
@@ -55,6 +57,12 @@ class Nso:
                 needed.append(val)
             dyn.setdefault(tag, val)
         self.dyn = dyn
+        self.init = dyn.get(DT_INIT, 0)
+        self.fini = dyn.get(DT_FINI, 0)
+        self.init_array = dyn.get(DT_INIT_ARRAY, 0)
+        self.fini_array = dyn.get(DT_FINI_ARRAY, 0)
+        self.init_array_size = dyn.get(DT_INIT_ARRAYSZ, 0)
+        self.fini_array_size = dyn.get(DT_FINI_ARRAYSZ, 0)
         strtab = dyn.get(DT_STRTAB, 0)
         self.strtab = strtab
         self.needed = [self.cstr(strtab + n) for n in needed]
