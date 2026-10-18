@@ -49,16 +49,29 @@ $CmdLine = $Q + $Exe + $Q + " " + $Q + $GameRoot + $Q + " --play 2>&1"
 
 $Code = $LASTEXITCODE
 
-# If the runtime crashed inside recompiled guest code, inspect the first guest
-# function from the host backtrace automatically. This turns the next crash log
-# into an actionable symbol/disassembly report without another manual step.
+# Inspect narrow fast-boot guards too: LR is the return address, so LR-4 is
+# the guest instruction that made the bad indirect call.
 if (Test-Path -LiteralPath $Log) {
-    $CrashLine = Select-String -Path $Log -Pattern 'f_([0-9a-fA-F]{8,})\+' | Select-Object -First 1
-    if ($CrashLine -and $CrashLine.Matches.Count -gt 0) {
-        $Addr = "0x" + $CrashLine.Matches[0].Groups[1].Value
-        $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
-        $Inspector = Join-Path $RepoRoot "tools\scarlet_inspect_addr.py"
-        if ((Test-Path -LiteralPath $Python) -and (Test-Path -LiteralPath $Inspector)) {
+    $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+    $Inspector = Join-Path $RepoRoot "tools\scarlet_inspect_addr.py"
+    if ((Test-Path -LiteralPath $Python) -and (Test-Path -LiteralPath $Inspector)) {
+        $GuardLine = Select-String -Path $Log -Pattern '\[boot-guard\].*lr=0x([0-9a-fA-F]+)' | Select-Object -First 1
+        if ($GuardLine -and $GuardLine.Matches.Count -gt 0) {
+            $Lr = [Convert]::ToUInt64($GuardLine.Matches[0].Groups[1].Value, 16)
+            if ($Lr -ge 4) {
+                $Caller = ('0x{0:x}' -f ($Lr - 4))
+                Write-Host ""
+                Write-Host "[scarlet-run] Inspecionando caller do boot-guard $Caller ..." -ForegroundColor Yellow
+                "[guard-caller-inspect] $Caller" | Tee-Object -FilePath $Log -Append
+                & $Python $Inspector $ExeFs $Caller 2>&1 | Tee-Object -FilePath $Log -Append
+            }
+        }
+
+        # If the runtime crashed inside recompiled guest code, inspect the first
+        # guest function from the host backtrace automatically.
+        $CrashLine = Select-String -Path $Log -Pattern 'f_([0-9a-fA-F]{8,})\+' | Select-Object -First 1
+        if ($CrashLine -and $CrashLine.Matches.Count -gt 0) {
+            $Addr = "0x" + $CrashLine.Matches[0].Groups[1].Value
             Write-Host ""
             Write-Host "[scarlet-run] Inspecionando crash guest $Addr ..." -ForegroundColor Yellow
             "[crash-inspect] $Addr" | Tee-Object -FilePath $Log -Append
