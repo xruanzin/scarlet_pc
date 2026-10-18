@@ -117,13 +117,53 @@ static ImGuiKey key_from_pad(Uint8 b) {
 }
 
 // ---- software keyboard (runtime/hle/swkbd.c: the game's name entry) ------------------------------------------
-// The game thread waits in menu_keyboard_run (re-presenting the last frame); this dialog takes the text: typed
-// directly when the player last used a keyboard, an on-screen keyboard (d-pad + A, B deletes, Start / + OK) when
-// they last used a controller.
+// Scarlet's nn::swkbd::ShowKeyboard is handled with the PC keyboard only. Do NOT re-enter the Vulkan presenter
+// while ShowKeyboard is blocking: on AMD Windows that raced the normal renderer and crashed inside amdvlk64.dll.
+// SDL events stay on the main thread; the game thread simply waits for Enter/Esc.
 static std::atomic<int> g_kbd{0};  // 1 open, 2 confirmed, 3 cancelled
 static std::atomic<bool> g_last_pad{false};
 static char g_kbd_text[96];
 static int g_kbd_max = 8;
+static pthread_mutex_t g_kbd_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int kbd_utf8_chars(const char *p) {
+    int n = 0;
+    for (const unsigned char *s = (const unsigned char *)p; *s; s++)
+        if ((*s & 0xC0) != 0x80) n++;
+    return n;
+}
+
+static void kbd_backspace(void) {
+    pthread_mutex_lock(&g_kbd_lock);
+    size_t n = strlen(g_kbd_text);
+    if (n) {
+        n--;
+        while (n && (((unsigned char)g_kbd_text[n] & 0xC0) == 0x80)) n--;
+        g_kbd_text[n] = 0;
+    }
+    pthread_mutex_unlock(&g_kbd_lock);
+}
+
+static void kbd_append(const char *text) {
+    if (!text || !*text) return;
+    pthread_mutex_lock(&g_kbd_lock);
+    size_t used = strlen(g_kbd_text);
+    int chars = kbd_utf8_chars(g_kbd_text);
+    const unsigned char *p = (const unsigned char *)text;
+    while (*p && chars < g_kbd_max && used + 1 < sizeof g_kbd_text) {
+        size_t n = (*p < 0x80) ? 1 : ((*p & 0xE0) == 0xC0) ? 2 : ((*p & 0xF0) == 0xE0) ? 3 : 4;
+        bool valid = used + n < sizeof g_kbd_text;
+        for (size_t i = 1; valid && i < n; i++) valid = (p[i] & 0xC0) == 0x80;
+        if (!valid) { p++; continue; }
+        memcpy(g_kbd_text + used, p, n);
+        used += n;
+        g_kbd_text[used] = 0;
+        p += n;
+        chars++;
+    }
+    pthread_mutex_unlock(&g_kbd_lock);
+}
+
 static bool capturing() { return g_open.load() || g_kbd.load() == 1; }
 // The game gets no input while this is true (runtime/hle/input.c): the question or the name entry is up.
 extern "C" bool menu_input_captured(void) { return capturing(); }
@@ -132,14 +172,41 @@ bool menu_handle_event(const SDL_Event *e) {
     static bool back_down, start_down;
     if (e->type == SDL_EVENT_KEY_DOWN) g_last_pad = false;
     if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) g_last_pad = true;
-    bool typing = g_kbd.load() == 1;  // (the name entry: keys are text, not shortcuts)
-    if (typing && e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {  // Enter confirms, Esc cancels
-        if (e->key.scancode == SDL_SCANCODE_RETURN || e->key.scancode == SDL_SCANCODE_KP_ENTER) { g_kbd = 2; return true; }
-        if (e->key.scancode == SDL_SCANCODE_ESCAPE) { g_kbd = 3; return true; }
-    }
-    if (typing && e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && e->gbutton.button == SDL_GAMEPAD_BUTTON_START) {
-        g_kbd = 2;
-        return true;
+    bool typing = g_kbd.load() == 1;  // Scarlet name entry: physical PC keyboard, no Vulkan/OSK
+    if (typing) {
+        switch (e->type) {
+        case SDL_EVENT_KEY_DOWN:
+            if (e->key.scancode == SDL_SCANCODE_RETURN || e->key.scancode == SDL_SCANCODE_KP_ENTER) {
+                if (g_kbd_text[0]) g_kbd = 2;
+                return true;
+            }
+            if (e->key.scancode == SDL_SCANCODE_ESCAPE) { g_kbd = 3; return true; }
+            if (e->key.scancode == SDL_SCANCODE_BACKSPACE) { kbd_backspace(); return true; }
+            if (e->key.scancode == SDL_SCANCODE_V && (e->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI))) {
+                char *clip = SDL_GetClipboardText();
+                if (clip) { kbd_append(clip); SDL_free(clip); }
+                return true;
+            }
+            return true;  // printable characters arrive through SDL_EVENT_TEXT_INPUT
+        case SDL_EVENT_KEY_UP:
+            return true;
+        case SDL_EVENT_TEXT_INPUT:
+            kbd_append(e->text.text);
+            return true;
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+            if (e->gbutton.button == SDL_GAMEPAD_BUTTON_START && g_kbd_text[0]) g_kbd = 2;
+            else if (e->gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH) g_kbd = 3;  // B / cancel
+            return true;
+        case SDL_EVENT_GAMEPAD_BUTTON_UP:
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+        case SDL_EVENT_MOUSE_MOTION:
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+        case SDL_EVENT_MOUSE_WHEEL:
+            return true;
+        default:
+            break;
+        }
     }
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
@@ -237,6 +304,27 @@ void menu_apply_window_requests(void *win) {
         else SDL_StopTextInput(w);
         text_input = want_text;
     }
+
+    // Name entry has no renderer overlay: show what is being typed in the native window title instead.
+    static char normal_title[256];
+    static bool title_saved, kbd_title;
+    if (!title_saved) {
+        snprintf(normal_title, sizeof normal_title, "%s", SDL_GetWindowTitle(w));
+        title_saved = true;
+    }
+    if (g_kbd.load() == 1) {
+        char text[96], title[384];
+        pthread_mutex_lock(&g_kbd_lock);
+        snprintf(text, sizeof text, "%s", g_kbd_text);
+        pthread_mutex_unlock(&g_kbd_lock);
+        snprintf(title, sizeof title, "Pokemon Scarlet - Nome: %s  |  Enter confirma  |  Backspace apaga  |  Esc cancela", text);
+        SDL_SetWindowTitle(w, title);
+        kbd_title = true;
+    } else if (kbd_title) {
+        SDL_SetWindowTitle(w, normal_title);
+        kbd_title = false;
+    }
+
     static bool first = true;
     if (first || g_want_fullscreen_apply.exchange(false)) {
         first = false;
@@ -363,24 +451,29 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
     if (g_kbd.load() != 1) was_open = false;
 }
 
-// Game thread (runtime/hle/swkbd.c): show the dialog, re-present the last frame until it's answered.
-// Returns 1 confirmed (out = text, UTF-8), 0 cancelled.
+// Game thread (runtime/hle/swkbd.c): freeze the last game frame and wait while the SDL/main thread captures
+// the physical keyboard. Never call backend_present/backend_represent here: ShowKeyboard may run on a game worker
+// while the renderer owns Vulkan state, which crashes the AMD Windows driver.
 extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, int cap) {
-    extern void backend_represent(void);
+    pthread_mutex_lock(&g_kbd_lock);
     snprintf(g_kbd_text, sizeof g_kbd_text, "%s", initial ? initial : "");
+    pthread_mutex_unlock(&g_kbd_lock);
     g_kbd_max = max_len > 0 && max_len < (int)sizeof g_kbd_text / 4 ? max_len : 8;
     input_reset();
     g_kbd = 1;
     // (test) LARECOMP_KBD_AUTO=<text>: answer at once
-    if (getenv("LARECOMP_KBD_AUTO")) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO")); g_kbd = 2; }
-    while (g_kbd.load() == 1 && !g_rt_unwind) {  // ~60 Hz (a reboot cancels)
-        uint64_t t0 = SDL_GetTicks();
-        backend_represent();
-        uint64_t dt = SDL_GetTicks() - t0;
-        if (dt < 16) SDL_Delay((uint32_t)(16 - dt));
+    if (getenv("LARECOMP_KBD_AUTO")) {
+        pthread_mutex_lock(&g_kbd_lock);
+        snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO"));
+        pthread_mutex_unlock(&g_kbd_lock);
+        g_kbd = 2;
     }
-    bool ok = g_kbd.load() == 2 && g_kbd_text[0];
+    while (g_kbd.load() == 1 && !g_rt_unwind) SDL_Delay(4);
+    bool ok = g_kbd.load() == 2;
+    pthread_mutex_lock(&g_kbd_lock);
+    ok = ok && g_kbd_text[0];
     if (ok) snprintf(out, cap, "%s", g_kbd_text);
+    pthread_mutex_unlock(&g_kbd_lock);
     g_kbd = 0;
     input_reset();
     return ok;
@@ -417,7 +510,7 @@ static void quit_draw(ImGuiIO &io, float scale) {
 }
 
 void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
-    bool open = g_open.load(), kbd = g_kbd.load() == 1;
+    bool open = g_open.load(), kbd = false;  // Scarlet swkbd uses the physical keyboard; no Vulkan overlay
     float fx, fy;
     bool fdown, finger = !open && input_finger_cursor(&fx, &fy, &fdown);
     if (!open && !kbd && !g_settings.show_fps && !finger) {
