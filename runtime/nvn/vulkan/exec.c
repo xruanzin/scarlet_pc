@@ -2671,6 +2671,19 @@ static void draw_(CmdRec *r, bool indexed) {
             if (i != nbuf || !guest_direct(st.tfbuf[i].addr, st.tfbuf[i].size, &b, &o)) break;
             bufs[nbuf] = b; offs[nbuf] = o; sizes[nbuf] = st.tfbuf[i].size; nbuf++;
         }
+        {
+            static int tf_begin_logs;
+            if (tf_begin_logs < 24) {
+                tf_begin_logs++;
+                VkBuffer db; VkDeviceSize doff;
+                bool d0 = st.tfbuf[0].addr && guest_direct(st.tfbuf[0].addr, st.tfbuf[0].size, &db, &doff);
+                LOG("[tf-begin] #%d nbuf=%u tfbuf0=%llx+%llu tfbuf1=%llx+%llu tfbuf2=%llx+%llu direct0=%d heap=%llx..%llx\n",
+                    tf_begin_logs, nbuf, (unsigned long long)st.tfbuf[0].addr, (unsigned long long)st.tfbuf[0].size,
+                    (unsigned long long)st.tfbuf[1].addr, (unsigned long long)st.tfbuf[1].size,
+                    (unsigned long long)st.tfbuf[2].addr, (unsigned long long)st.tfbuf[2].size, d0,
+                    (unsigned long long)HEAP_BASE, (unsigned long long)(HEAP_BASE + gmem_size));
+            }
+        }
         if (nbuf) {
             if (!tf_api_ready()) { st.tf_active = false; }
             else tf_bind_buffers(cb, 0, nbuf, bufs, offs, sizes);
@@ -3705,6 +3718,11 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_END_TRANSFORM_FEEDBACK:
         case CMD_PAUSE_TRANSFORM_FEEDBACK: {
             if (!g_vk.transform_feedback || !st.tf_active) break;
+            if (!st.tf_vk_active) {
+                static int tf_idle_ends;
+                if (tf_idle_ends++ < 12)
+                    LOG("[tf-end] #%d End/Pause with no TF draw issued since Begin (no draw reached the TF block)\n", tf_idle_ends);
+            }
             if (st.tf_vk_active) {
                 // EXT_transform_feedback requires Begin/End inside the same rendering instance.
                 VkCommandBuffer cb = vk_cmd();
