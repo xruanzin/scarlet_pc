@@ -69,6 +69,7 @@ typedef struct {
                             // target scale, [1 + i] = allocation scale of texture i
     uint32_t local_mem;     // bytes of local memory
     uint32_t num_insts;
+    uint32_t surface_fallbacks; // SULD/SUST/SURED preserved with compatibility fallback (until storage images are native)
     char error[256];        // set when translation fails
 } ShaderInfo;
 
