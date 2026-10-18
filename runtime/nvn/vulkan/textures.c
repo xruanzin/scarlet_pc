@@ -238,10 +238,21 @@ void vk_collect_dead(void) {
 
 static void create_image(NvnTexture *t, TexBackend *b) {
     VkFmt mf = fmt_of(t->format);
+    bool depthfmt = renderer_format_is_depth(t->format);
+
+    // Keep render-resolution coordinates for every scalable target, but do not
+    // physically shrink depth/stencil images. Scarlet reuses a 1920x1080 depth
+    // target with offscreen colour targets such as 1280x840. Shrinking that
+    // depth image to 1280x720 made Vulkan clamp the whole mixed pass to 720
+    // lines, cutting the scene and corrupting every post-process fed by it.
+    //
+    // Colour targets still use the selected internal resolution. Full-size
+    // depth retains sx/sy so texel-addressed depth reads/copies follow the same
+    // logical resolution as their scaled colour target.
     b->sx = b->scalable ? g_rs_x : 1;
     b->sy = b->scalable ? g_rs_y : 1;
     uint32_t tw = t->width ? t->width : 1, th = t->height ? t->height : 1;
-    if (b->scalable) {
+    if (b->scalable && !depthfmt) {
         tw = (uint32_t)lroundf(tw * b->sx); th = (uint32_t)lroundf(th * b->sy);
         if (tw < 1) tw = 1;
         if (th < 1) th = 1;
@@ -283,7 +294,6 @@ static void create_image(NvnTexture *t, TexBackend *b) {
             vf = VK_FORMAT_R8G8B8A8_UNORM;
         }
     }
-    bool depthfmt = renderer_format_is_depth(t->format);
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (depthfmt) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     else {
