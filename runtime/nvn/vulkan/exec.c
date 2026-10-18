@@ -4065,7 +4065,7 @@ void vk_big_lock(void) {
 }
 void vk_big_unlock(void) { pthread_mutex_unlock(&g_vk_big); }
 
-void backend_execute(uint64_t handle) {
+static void backend_execute_common(uint64_t handle, bool submit_after) {
     vk_big_lock();
     bool thread_diag = vk_exec_diag_enter(handle);
     PROF_T0();
@@ -4076,10 +4076,13 @@ void backend_execute(uint64_t handle) {
     static int sync_submit = -1;
     if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
     if (sync_submit) renderer_flush();
-    else renderer_submit();
+    else if (submit_after) renderer_submit();
     vk_exec_diag_leave(thread_diag);
     vk_big_unlock();
 }
+
+void backend_execute_deferred(uint64_t handle) { backend_execute_common(handle, false); }
+void backend_execute(uint64_t handle) { backend_execute_common(handle, true); }
 
 // ================================================================== frame interpolation (prototype)
 // LARECOMP_INTERP=1: 60 fps from the game's 30 by drawing an in-between frame (docs/PESQUISA-60FPS.md). The game's
