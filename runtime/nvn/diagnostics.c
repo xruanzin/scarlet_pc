@@ -13,6 +13,13 @@ static struct { uint64_t code; const uint8_t *control; uint32_t stage; } diag_se
 static struct { uint64_t code; uint32_t stage; } diag_tf_seen[128];
 static unsigned diag_nseen, diag_tf_nseen, diag_calls;
 static size_t diag_snapshot_bytes;
+
+typedef struct {
+    uint64_t cb, addr, size;
+    uint32_t slot;
+} DiagTfRange;
+static DiagTfRange diag_tf_ranges[512];
+static unsigned diag_tf_nranges, diag_tf_range_next, diag_tf_vertex_links;
 #define DIAG_CONTROL_PREFIX 0x704u
 #define DIAG_CONTROL_FULL   0x880u
 #define DIAG_CODE_LIMIT     (8u << 20)
@@ -189,10 +196,87 @@ void nvn_diag_tf_state(NvnCmdBuf *cb, const char *name) {
     pthread_mutex_unlock(&diag_lock);
 }
 
+
+static void diag_remember_tf_range(uint64_t cb, uint32_t slot, uint64_t addr, uint64_t size) {
+    if (!addr || !size || addr > UINT64_MAX - size) return;
+    for (unsigned i = 0; i < diag_tf_nranges; i++) {
+        DiagTfRange *r = &diag_tf_ranges[i];
+        if (r->addr == addr && r->size == size) {
+            r->cb = cb;
+            r->slot = slot;
+            return;
+        }
+    }
+    unsigned id;
+    if (diag_tf_nranges < (unsigned)(sizeof diag_tf_ranges / sizeof diag_tf_ranges[0]))
+        id = diag_tf_nranges++;
+    else
+        id = diag_tf_range_next++ % (unsigned)(sizeof diag_tf_ranges / sizeof diag_tf_ranges[0]);
+    diag_tf_ranges[id] = (DiagTfRange){.cb = cb, .addr = addr, .size = size, .slot = slot};
+}
+
+static bool diag_ranges_overlap(uint64_t a, uint64_t asz, uint64_t b, uint64_t bsz) {
+    if (!a || !asz || !b || !bsz || a > UINT64_MAX - asz || b > UINT64_MAX - bsz) return false;
+    return a < b + bsz && b < a + asz;
+}
+
+// NVNbufferRange is {u64 address, u64 size}. When a TF output later becomes a
+// vertex source, record the exact overlap so stretched geometry can be tied to
+// the currently unimplemented stream-output path rather than inferred visually.
+void nvn_diag_vertex_buffers(uint64_t cb, uint32_t first, uint32_t count, const uint64_t *ranges) {
+    pthread_once(&diag_once, diag_init);
+    if (!diag_dir[0] || !ranges || !count) return;
+    if (count > 32) count = 32;
+    pthread_mutex_lock(&diag_lock);
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t addr = ranges[i * 2], size = ranges[i * 2 + 1];
+        if (!addr || !size) continue;
+        for (unsigned j = 0; j < diag_tf_nranges; j++) {
+            const DiagTfRange *tf = &diag_tf_ranges[j];
+            if (!diag_ranges_overlap(addr, size, tf->addr, tf->size)) continue;
+            if (diag_tf_vertex_links++ >= 256) continue;
+            char path[2304];
+            snprintf(path, sizeof path, "%s/tf_vertex_links.txt", diag_dir);
+            FILE *file = fopen(path, "a");
+            if (file) {
+                fprintf(file,
+                    "%u vb_cb=%llx vb_slot=%u vb=%llx+%llx tf_cb=%llx tf_slot=%u tf=%llx+%llx\n",
+                    diag_tf_vertex_links,
+                    (unsigned long long)cb, first + i,
+                    (unsigned long long)addr, (unsigned long long)size,
+                    (unsigned long long)tf->cb, tf->slot,
+                    (unsigned long long)tf->addr, (unsigned long long)tf->size);
+                fclose(file);
+            }
+            if (diag_tf_vertex_links <= 16)
+                LOG("[tf-diag] TF output reused as vertex buffer: vb=%llx+%llx tf=%llx+%llx slot=%u\n",
+                    (unsigned long long)addr, (unsigned long long)size,
+                    (unsigned long long)tf->addr, (unsigned long long)tf->size, tf->slot);
+        }
+    }
+    pthread_mutex_unlock(&diag_lock);
+}
+
 void nvn_diag_tf_call(const char *name, const Cpu *c) {
     pthread_once(&diag_once, diag_init);
     if (!diag_dir[0]) return;
     pthread_mutex_lock(&diag_lock);
+
+    if (!strcmp(name, "nvnCommandBufferBindTransformFeedbackBuffer")) {
+        diag_remember_tf_range(c->x[0], (uint32_t)c->x[1], c->x[2], c->x[3]);
+    } else if (!strcmp(name, "nvnCommandBufferBindTransformFeedbackBuffers")) {
+        uint32_t first = (uint32_t)c->x[1], count = (uint32_t)c->x[2];
+        uint64_t ptr = c->x[3];
+        if (count > 32) count = 32;
+        uint64_t bytes = (uint64_t)count * 16;
+        if (ptr >= GUEST_LO && bytes <= GUEST_HI - GUEST_LO &&
+            ptr <= GUEST_HI - bytes) {
+            const uint64_t *ranges = (const uint64_t *)(uintptr_t)ptr;
+            for (uint32_t i = 0; i < count; i++)
+                diag_remember_tf_range(c->x[0], first + i, ranges[i * 2], ranges[i * 2 + 1]);
+        }
+    }
+
     if (diag_calls++ < 128) {
         char path[2304];
         snprintf(path, sizeof path, "%s/tf_calls.txt", diag_dir);
