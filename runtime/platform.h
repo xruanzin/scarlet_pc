@@ -21,10 +21,6 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi);
 // Make sure [addr, addr+size) inside the guest window is backed (before the OS itself writes there, e.g.
 // file reads); a no-op where the whole window is backed from the start.
 void plat_commit(uint64_t addr, uint64_t size);
-// Pages written by the CPU since the previous query of this range. Returns the
-// number of page addresses stored in `pages`, or -1 when the host cannot track
-// writes. The query resets the host write-watch bits for the range.
-int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page_size);
 // In-place reboot: every page of [lo, hi) back to zero (and unbacked), the window still claimed.
 bool plat_reset_guest(uint64_t lo, uint64_t hi);
 enum { PLAT_PROT_NONE = 0, PLAT_PROT_READ = 1, PLAT_PROT_RW = 3 };
@@ -45,13 +41,10 @@ void plat_unmap_file(const void *ptr);
 void plat_set_cpu_boost(bool enabled);
 // Apply the current guest thread's Horizon priority/core as Windows scheduler hints.
 void plat_guest_thread_config(int priority, int core);
-// Independent frontend for Horizon's Software Keyboard library applet.
-// Unlike the old debug/name overlay, this owns its own native window/message
-// loop and stays responsive while the application is suspended in ShowKeyboard.
-// Returns 1=entered, 0=cancel.
-int plat_swkbd_applet_show(const char *title, const char *subtitle, const char *guide,
-                           const char *initial, const char *error,
-                           int min_chars, int max_chars, char *out, size_t out_cap);
+// Native modal text entry centered over the game window. Returns 1 = OK, 0 = cancel.
+int plat_text_input_dialog(const char *title, const char *subtitle, const char *guide,
+                           const char *initial, int min_chars, int max_chars,
+                           char *out, size_t out_cap);
 #endif
 
 // ---- process
