@@ -246,7 +246,14 @@ static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int
 static void thread_start(KThread *t) {
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 256ull << 20);  // guest recursion runs on the host stack
+    // Lifted calls use the host stack, but 256 MiB reserved for every Scarlet
+    // guest thread wastes several GiB of VA and makes thread-heavy loading
+    // unnecessarily expensive on Windows. 32 MiB is still twice the EXE's
+    // own 16 MiB stack; allow an override for pathological recursion.
+    uint64_t stack_mb = 32;
+    const char *se = getenv("LARECOMP_GUEST_STACK_MB");
+    if (se && atoi(se) >= 8) stack_mb = (uint64_t)atoi(se);
+    pthread_attr_setstacksize(&attr, stack_mb << 20);
     t->started = true;
     pthread_create(&t->host, &attr, thread_main, t);
     pthread_attr_destroy(&attr);
