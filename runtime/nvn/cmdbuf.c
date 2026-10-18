@@ -189,6 +189,30 @@ static void obj_mark(Cpu *c, NvnCmdBuf *cb) {
 static void draw_chain(Cpu *c, const char *kind, uint64_t count);
 static uint64_t g_trace_cb[16], g_trace_list[64];  // (LARECOMP_TRACE_COUNT, below)
 static int g_ntrace_cb, g_ntrace_list;
+
+// The expanded command stream lives in host segments, but every returned NVN
+// command handle still needs one tiny stable guest slot. When that handle ring
+// is full, ask the game's normal NVN memory callback for a fresh guest chunk.
+// This is the part the letsgo-recomp path relies on: the game's allocator owns
+// command-ring lifetime, so reusing a range lets hostseg_release_range recycle
+// all expanded segments associated with the old handles.
+static bool command_handle_slot(Cpu *c, NvnCmdBuf *cb) {
+    for (int tries = 0; tries < 2; tries++) {
+        if (cb->guest_mem && cb->used + sizeof(CmdRec) <= cb->guest_size) return true;
+        if (!cb->callback) break;
+
+        uint64_t saved[8];
+        memcpy(saved, c->x, sizeof saved);
+        c->x[0] = cb->guest;
+        c->x[1] = 0;  // NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY
+        c->x[2] = sizeof(CmdRec) + JUMP_RESERVE;
+        c->x[3] = cb->callback_data;
+        guest_call(c, cb->callback);
+        memcpy(c->x, saved, sizeof saved);
+    }
+    return cb->guest_mem && cb->used + sizeof(CmdRec) <= cb->guest_size;
+}
+
 NVN(nvnCommandBufferBeginRecording) {
     draw_chain(c, "begin", 0);
     static bool hooked;  // (hooks cost every game function a lookup: only with interpolation on)
@@ -201,13 +225,18 @@ NVN(nvnCommandBufferBeginRecording) {
     }
     NvnCmdBuf *cb = cb_of(A(0));
     cb->obj_tag = 0;
-    cb->recording = true;
     cb->host_origin_lo = cb->host_origin_hi = 0;
+
+    // Request the next ring chunk before marking the buffer recording. That
+    // lets nvnCommandBufferAddCommandMemory safely recycle an old guest range
+    // and its host segment chain.
+    bool have_slot = command_handle_slot(c, cb);
+    cb->recording = true;
 
     // Keep only one opaque jump record in guest command memory. The expanded
     // stream begins in host memory, so the game's ring usage reflects a stable
     // per-list handle instead of our much larger CmdRec representation.
-    if (cb->guest_mem && cb->used + sizeof(CmdRec) <= cb->guest_size) {
+    if (have_slot) {
         uint64_t slot = cb->guest_mem + cb->used;
         hostseg_release_range(slot, slot + sizeof(CmdRec));
         cb->host_origin_lo = slot;
@@ -222,12 +251,9 @@ NVN(nvnCommandBufferBeginRecording) {
         cb->chunk_used = 0;
         cb->host_segment = true;
     } else {
-        // No guest slot is available. A command handle is opaque, so a host
-        // address is a safe fallback; this avoids recursively entering the
-        // game's out-of-memory callback because of host-only representation cost.
-        // Make the remaining guest bytes unavailable to subsequent
-        // recordings so GetCommandMemoryFree reports zero and the engine can
-        // supply its next ring chunk.
+        // Last-resort fallback only (missing/broken game callback). Normal
+        // Scarlet recording should never stay here frame after frame: doing so
+        // is what previously exhausted the 256 MB host-segment pool.
         if (cb->guest_mem) cb->used = cb->guest_size;
         uint64_t host = hostseg_take(cb);
         cb->start = host;
