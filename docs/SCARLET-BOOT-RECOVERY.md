@@ -52,7 +52,7 @@ nem confirmação do comportamento do driver AMD proprietário neste ambiente.
 ## Política atual de espera, integrada da branch
 
 Enquanto esta correção era validada, a branch recebeu `2ac3841`. Essa mudança
-foi integrada sem ser revertida: o padrão passa a esperar 3 s por build e depois
+foi integrada sem ser revertida: o padrão passa a esperar 30 s por build e depois
 adiar/omitir operações que ainda dependem dele, mantendo a compilação em segundo
 plano. São dois workers até 12 CPUs lógicas e três nos demais computadores.
 `LARECOMP_SHADER_WAIT_MS` configura a espera. `LARECOMP_SHADER_TIMEOUT_EXIT=1`

@@ -500,7 +500,7 @@ static uint64_t shader_wait_limit_ns(void) {
     if (!v) {
         const char *e = getenv("LARECOMP_SHADER_WAIT_MS");
         long ms = e ? atol(e) : 0;
-        v = (ms > 0 ? (uint64_t)ms : 3000ull) * 1000000ull;
+        v = (ms > 0 ? (uint64_t)ms : 30000ull) * 1000000ull;
     }
     return v;
 }
