@@ -152,6 +152,25 @@ static void create_device(void) {
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     g_fault_ext = fault;
+
+    // Probe only. Transform feedback is still deliberately not enabled until
+    // Scarlet's exact stream-output layout has been captured and translated.
+    bool tf_ext = has_ext(ep, ne, VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME);
+    VkPhysicalDeviceTransformFeedbackFeaturesEXT tf_feat = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT};
+    VkPhysicalDeviceTransformFeedbackPropertiesEXT tf_prop = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT};
+    if (tf_ext) {
+        VkPhysicalDeviceFeatures2 tf_f2 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &tf_feat};
+        VkPhysicalDeviceProperties2 tf_p2 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &tf_prop};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &tf_f2);
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &tf_p2);
+    }
+    LOG("[vk] transform feedback: %s (feature=%u, buffers=%u, draw=%u)\n",
+        tf_ext ? "extension present" : "extension absent",
+        tf_feat.transformFeedback, tf_prop.maxTransformFeedbackBuffers, tf_prop.transformFeedbackDraw);
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
