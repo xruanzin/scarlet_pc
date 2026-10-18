@@ -19,5 +19,9 @@ const char *renderer_stats(void);
 bool renderer_format_is_depth(uint32_t f);
 bool renderer_format_has_stencil(uint32_t f);
 void renderer_mark_gpu_owned(NvnTexture *t);
+// Scarlet compatibility: replace its 32^3 colour-grading render pass with a
+// neutral identity LUT on Vulkan. This avoids layered 3D rendering on drivers
+// where that transition can crash, while keeping the following tone-map pass valid.
+bool renderer_fill_identity_lut_3d(NvnTexture *t);
 void input_handle_event(const SDL_Event *e);
 bool input_user_blocked(const SDL_Event *e);
