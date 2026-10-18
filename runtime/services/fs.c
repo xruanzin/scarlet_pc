@@ -20,6 +20,15 @@
 const char *g_save_dir = "save";
 static int romfs_fd = -1;
 
+static bool romfs_legacy_layout(int fd) {
+    uint64_t h[10] = {0};
+    if (pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h) return false;
+    // Old scarlet_pc builder put file data at 0x200 and all metadata after it.
+    // Canonical Horizon RomFS keeps metadata before data, so dir-hash offset
+    // must be below data_offset.
+    return h[0] == 0x50 && h[1] > h[9];
+}
+
 static void romfs_build_progress(uint64_t done, uint64_t total) {
     static int last = -5;
     int pct = total ? (int)((done * 100) / total) : 100;
@@ -416,12 +425,21 @@ static Service *open_romfs_storage(void) {
         char path[1024];
         snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // sibling of extracted romfs/ directory
         romfs_fd = open(path, O_RDONLY);
+        bool rebuild = false;
+        if (romfs_fd >= 0 && romfs_legacy_layout(romfs_fd)) {
+            LOG("[fs] legacy data-first romfs.bin detected; rebuilding canonical image\n");
+            close(romfs_fd);
+            romfs_fd = -1;
+            remove(path);
+            rebuild = true;
+        }
         if (romfs_fd < 0) {
             struct stat sb;
             if (stat(g_romfs_dir, &sb) != 0 || !S_ISDIR(sb.st_mode))
                 FATAL("cannot open %s and extracted RomFS directory is missing: %s\n", path, g_romfs_dir);
 
-            LOG("[fs] %s not found; building it automatically from %s\n", path, g_romfs_dir);
+            LOG("[fs] %s%s; building it automatically from %s\n",
+                path, rebuild ? " needs rebuild" : " not found", g_romfs_dir);
             LOG("[fs] this is a one-time step; later boots reuse the image\n");
             char why[512] = {0};
             if (!romfs_build(g_romfs_dir, path, romfs_build_progress, why, sizeof why))
