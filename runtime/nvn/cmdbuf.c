@@ -541,6 +541,37 @@ PLAIN(nvnCommandBufferWaitEvent, CMD_WAIT_EVENT)
 PLAIN(nvnCommandBufferReportCounter, CMD_REPORT_COUNTER)
 NVN(nvnCommandBufferReportValue) { (void)c; }
 NVN(nvnCommandBufferResetCounter) { (void)c; }
+// Real NVN command streams encode CallCommands much more compactly than our
+// CmdRec representation. Scarlet can submit large arrays (for example 0x86
+// handles while entering character creation); copying the whole array into one
+// CmdRec makes a single host-side record larger than the command-memory chunks
+// the game budgets for real hardware. Split the array into small, ordered CMD_CALL
+// records. The executor already restores object state around every CMD_CALL, so
+// this is semantically identical to one large record.
+static void record_call_commands(Cpu *c) {
+    Snap s = snap(c);
+    uint64_t count = s.x[1];
+    uint64_t handles = s.x[2];
+    enum { CALL_CHUNK = 16 };
+
+    if (!count) {
+        record(c, CMD_CALL, 0, &s);
+        return;
+    }
+
+    for (uint64_t first = 0; first < count; first += CALL_CHUNK) {
+        uint64_t n = count - first;
+        if (n > CALL_CHUNK) n = CALL_CHUNK;
+
+        Snap part = s;
+        part.x[1] = n;
+        part.x[2] = handles + first * sizeof(uint64_t);
+        CmdRec *r = record(c, CMD_CALL, (uint32_t)(n * sizeof(uint64_t)), &part);
+        memcpy(r->extra, (const void *)(uintptr_t)part.x[2],
+               (size_t)n * sizeof(uint64_t));
+    }
+}
+
 NVN(nvnCommandBufferCallCommands) {
     if (g_ntrace_list) {
         const uint64_t *h = (const uint64_t *)(uintptr_t)A(2);
@@ -552,8 +583,14 @@ NVN(nvnCommandBufferCallCommands) {
                 trace_chain(c);
             }
     }
-    draw_chain(c, "call", A(1)); obj_mark(c, cb_of(A(0))); record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
-NVN(nvnCommandBufferCopyCommands) { obj_mark(c, cb_of(A(0))); record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
+    draw_chain(c, "call", A(1));
+    obj_mark(c, cb_of(A(0)));
+    record_call_commands(c);
+}
+NVN(nvnCommandBufferCopyCommands) {
+    obj_mark(c, cb_of(A(0)));
+    record_call_commands(c);
+}
 NVN(nvnCommandBufferInsertDebugMarker) { (void)c; }
 NVN(nvnCommandBufferInsertDebugMarkerDynamic) { (void)c; }
 NVN(nvnCommandBufferInsertDebugMarkerStatic) { (void)c; }
