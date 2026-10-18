@@ -26,6 +26,9 @@
 //    support), GL_EXT_texture_shadow_lod (explicit-LOD array / cube shadow lookups).
 //  - not in GLSL: the maxwell_dbg_vs position dump (buffer 29) is MSL only.
 #pragma once
+
+// Compact bindless storage-image window. Two arrays (write + atomic) consume 32 descriptors/stage.
+#define MAXWELL_BINDLESS_IMAGES 16
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -69,7 +72,9 @@ typedef struct {
                             // target scale, [1 + i] = allocation scale of texture i
     uint32_t local_mem;     // bytes of local memory
     uint32_t num_insts;
-    uint32_t surface_fallbacks; // SULD/SUST/SURED preserved with compatibility fallback (until storage images are native)
+    uint32_t surface_fallbacks; // surface ops that still had to use a compatibility fallback
+    bool uses_surface_write;   // bindless SUST 2D path
+    bool uses_surface_atomic;  // bindless SURED.ADD.U32 / SUATOM path
     char error[256];        // set when translation fails
 } ShaderInfo;
 
