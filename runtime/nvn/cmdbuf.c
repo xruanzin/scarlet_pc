@@ -552,8 +552,17 @@ NVN(nvnCommandBufferBindSeparateTexture) {
 }
 NVN(nvnCommandBufferBindSeparateSamplers) { (void)c; }
 NVN(nvnCommandBufferBindSeparateSampler) { (void)c; }
-TF_UNIMPLEMENTED(nvnCommandBufferBindTransformFeedbackBuffers)
-TF_UNIMPLEMENTED(nvnCommandBufferBindTransformFeedbackBuffer)
+NVN(nvnCommandBufferBindTransformFeedbackBuffers) {
+    nvn_diag_tf_call("nvnCommandBufferBindTransformFeedbackBuffers", c);
+    record_copy(c, CMD_BIND_TRANSFORM_FEEDBACK_BUFFERS, 3, (uint32_t)A(2) * 16);
+}
+NVN(nvnCommandBufferBindTransformFeedbackBuffer) {
+    nvn_diag_tf_call("nvnCommandBufferBindTransformFeedbackBuffer", c);
+    Snap s = snap(c);
+    CmdRec *r = record(c, CMD_BIND_TRANSFORM_FEEDBACK_BUFFERS, 16, &s);
+    r->x[0] = s.x[1]; r->x[1] = 1;
+    memcpy(r->extra, &s.x[2], 16);
+}
 NVN(nvnCommandBufferBindCoverageModulationTable) { (void)c; }
 
 NVN(nvnCommandBufferSetTexturePool) {
@@ -798,10 +807,26 @@ TF_UNIMPLEMENTED(nvnCommandBufferDrawTransformFeedback)
 NVN(nvnCommandBufferDrawTexture) { (void)c; }
 PLAIN(nvnCommandBufferDispatchCompute, CMD_DISPATCH)
 PLAIN(nvnCommandBufferDispatchComputeIndirect, CMD_DISPATCH_INDIRECT)
-TF_UNIMPLEMENTED(nvnCommandBufferBeginTransformFeedback)
-TF_UNIMPLEMENTED(nvnCommandBufferEndTransformFeedback)
-TF_UNIMPLEMENTED(nvnCommandBufferPauseTransformFeedback)
-TF_UNIMPLEMENTED(nvnCommandBufferResumeTransformFeedback)
+NVN(nvnCommandBufferBeginTransformFeedback) {
+    nvn_diag_tf_call("nvnCommandBufferBeginTransformFeedback", c);
+    nvn_diag_tf_state(cb_of(A(0)), "nvnCommandBufferBeginTransformFeedback");
+    Snap s = snap(c); CmdRec *r = record(c, CMD_BEGIN_TRANSFORM_FEEDBACK, 0, &s); r->x[0] = s.x[1];
+}
+NVN(nvnCommandBufferEndTransformFeedback) {
+    nvn_diag_tf_call("nvnCommandBufferEndTransformFeedback", c);
+    nvn_diag_tf_state(cb_of(A(0)), "nvnCommandBufferEndTransformFeedback");
+    Snap s = snap(c); CmdRec *r = record(c, CMD_END_TRANSFORM_FEEDBACK, 0, &s); r->x[0] = s.x[1];
+}
+NVN(nvnCommandBufferPauseTransformFeedback) {
+    nvn_diag_tf_call("nvnCommandBufferPauseTransformFeedback", c);
+    nvn_diag_tf_state(cb_of(A(0)), "nvnCommandBufferPauseTransformFeedback");
+    Snap s = snap(c); CmdRec *r = record(c, CMD_PAUSE_TRANSFORM_FEEDBACK, 0, &s); r->x[0] = s.x[1];
+}
+NVN(nvnCommandBufferResumeTransformFeedback) {
+    nvn_diag_tf_call("nvnCommandBufferResumeTransformFeedback", c);
+    nvn_diag_tf_state(cb_of(A(0)), "nvnCommandBufferResumeTransformFeedback");
+    Snap s = snap(c); CmdRec *r = record(c, CMD_RESUME_TRANSFORM_FEEDBACK, 0, &s); r->x[0] = s.x[1];
+}
 
 // ---- copies
 typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRef;
