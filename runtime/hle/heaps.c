@@ -162,7 +162,10 @@ typedef struct StdFreeRec {
 static StdAllocRec *g_std_recs;
 #define STD_REC_HASH (1u << 17)
 static StdAllocRec *g_std_hash[STD_REC_HASH];
-static StdFreeRec *g_std_free;
+
+#define STD_FREE_BINS 32
+static StdFreeRec *g_std_free_bins[STD_FREE_BINS];
+static uint64_t g_std_free_bytes;
 static pthread_mutex_t g_std_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static inline uint32_t std_rec_hash(uint64_t addr) {
@@ -220,29 +223,27 @@ static uint64_t align_up_u64(uint64_t v, uint64_t a) {
     return (v + a - 1) & ~(a - 1);
 }
 
+static int std_free_bin(uint64_t size) {
+    if (size <= 16) return 0;
+    uint64_t v = size - 1;
+    int lg = 0;
+    while (v >>= 1) lg++;
+    int b = lg - 3;  // (16,32] -> 1, (32,64] -> 2, ...
+    if (b < 0) b = 0;
+    if (b >= STD_FREE_BINS) b = STD_FREE_BINS - 1;
+    return b;
+}
+
 static void std_free_insert_locked(uint64_t addr, uint64_t size) {
     if (!size) return;
     StdFreeRec *n = malloc(sizeof *n);
     if (!n) return;
     n->addr = addr;
     n->size = size;
-    StdFreeRec **pp = &g_std_free;
-    while (*pp && (*pp)->addr < addr) pp = &(*pp)->next;
-    n->next = *pp;
-    *pp = n;
-
-    // Coalesce adjacent free spans.
-    StdFreeRec *p = g_std_free;
-    while (p && p->next) {
-        if (p->addr + p->size == p->next->addr) {
-            StdFreeRec *q = p->next;
-            p->size += q->size;
-            p->next = q->next;
-            free(q);
-        } else {
-            p = p->next;
-        }
-    }
+    int b = std_free_bin(size);
+    n->next = g_std_free_bins[b];
+    g_std_free_bins[b] = n;
+    g_std_free_bytes += size;
 }
 
 static uint64_t std_guest_alloc(uint64_t size, uint64_t align) {
@@ -252,36 +253,32 @@ static uint64_t std_guest_alloc(uint64_t size, uint64_t align) {
     pthread_mutex_lock(&g_std_lock);
 
     uint64_t addr = 0;
-    StdFreeRec **pp = &g_std_free;
-    while (*pp) {
-        StdFreeRec *f = *pp;
-        uint64_t a = align_up_u64(f->addr, align);
-        uint64_t prefix = a - f->addr;
-        if (prefix <= f->size && size <= f->size - prefix) {
-            uint64_t suffix_addr = a + size;
-            uint64_t suffix = (f->addr + f->size) - suffix_addr;
-            if (prefix && suffix) {
-                f->size = prefix;
-                StdFreeRec *tail = malloc(sizeof *tail);
-                if (tail) {
-                    tail->addr = suffix_addr;
-                    tail->size = suffix;
-                    tail->next = f->next;
-                    f->next = tail;
-                }
-            } else if (prefix) {
-                f->size = prefix;
-            } else if (suffix) {
-                f->addr = suffix_addr;
-                f->size = suffix;
-            } else {
+    // Segregated free lists keep the common allocate/free path O(1)-ish even
+    // after the open world has churned through thousands of objects. Search
+    // only bins that can contain the requested size; alignment is checked per span.
+    int first_bin = std_free_bin(size);
+    for (int b = first_bin; b < STD_FREE_BINS && !addr; b++) {
+        StdFreeRec **pp = &g_std_free_bins[b];
+        while (*pp) {
+            StdFreeRec *f = *pp;
+            uint64_t a = align_up_u64(f->addr, align);
+            uint64_t prefix = a - f->addr;
+            if (prefix <= f->size && size <= f->size - prefix) {
+                uint64_t old_size = f->size;
+                uint64_t old_end = f->addr + f->size;
                 *pp = f->next;
                 free(f);
+                if (g_std_free_bytes >= old_size) g_std_free_bytes -= old_size;
+
+                uint64_t suffix_addr = a + size;
+                uint64_t suffix = old_end - suffix_addr;
+                if (prefix) std_free_insert_locked(a - prefix, prefix);
+                if (suffix) std_free_insert_locked(suffix_addr, suffix);
+                addr = a;
+                break;
             }
-            addr = a;
-            break;
+            pp = &(*pp)->next;
         }
-        pp = &(*pp)->next;
     }
 
     if (!addr) {
@@ -362,10 +359,12 @@ static uint64_t std_guest_size(uint64_t addr) {
 RT_ON_RESET(stdalloc_reset) {
     pthread_mutex_lock(&g_std_lock);
     StdAllocRec *r = g_std_recs;
-    StdFreeRec *f = g_std_free;
+    StdFreeRec *free_bins[STD_FREE_BINS];
+    memcpy(free_bins, g_std_free_bins, sizeof free_bins);
     g_std_recs = NULL;
     memset(g_std_hash, 0, sizeof g_std_hash);
-    g_std_free = NULL;
+    memset(g_std_free_bins, 0, sizeof g_std_free_bins);
+    g_std_free_bytes = 0;
     g_std_live_bytes = 0;
     g_std_declared_size = 0x10000000ull;
     g_std_next = STD_GUEST_BASE;
@@ -375,10 +374,13 @@ RT_ON_RESET(stdalloc_reset) {
         free(r);
         r = n;
     }
-    while (f) {
-        StdFreeRec *n = f->next;
-        free(f);
-        f = n;
+    for (int b = 0; b < STD_FREE_BINS; b++) {
+        StdFreeRec *f = free_bins[b];
+        while (f) {
+            StdFreeRec *n = f->next;
+            free(f);
+            f = n;
+        }
     }
 }
 
@@ -429,8 +431,10 @@ HLE_FUNC("_ZNK2nn3mem17StandardAllocator16GetTotalFreeSizeEv", heap_std_free_siz
     pthread_mutex_lock(&g_std_lock);
     uint64_t used = g_std_next - STD_GUEST_BASE;
     uint64_t cap = STD_GUEST_LIMIT - STD_GUEST_BASE;
+    uint64_t free_bytes = g_std_free_bytes;
     pthread_mutex_unlock(&g_std_lock);
-    c->x[0] = cap > used ? cap - used : 0;
+    uint64_t tail = cap > used ? cap - used : 0;
+    c->x[0] = tail + free_bytes;
 }
 
 HLE_FUNC("_ZN2nn3mem17StandardAllocator8FinalizeEv", heap_std_finalize) {
