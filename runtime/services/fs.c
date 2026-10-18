@@ -361,8 +361,37 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         IpcBuf *b = out_buf(req, 0);
         if (!b) { resp->result = MAKE_RESULT(2, 6001); break; }
         if (size > b->size) size = b->size;
+
+        // Windows ReadFile writes into this buffer outside the process' normal
+        // fault path. Guest buffers in our reserved address window can still be
+        // MEM_RESERVE-only here, so the OS returns an I/O failure instead of
+        // triggering lazy_commit(). Commit the destination explicitly first.
+        if (size) plat_commit(b->addr, size);
+
+        uint64_t image_size = ov_n ? ov_end : st->size;
+        if (off > image_size || size > image_size - off) {
+            LOG("[fs] romfs read out of range: off=%llx size=%llx image=%llx\n",
+                (unsigned long long)off, (unsigned long long)size,
+                (unsigned long long)image_size);
+            resp->result = MAKE_RESULT(2, 6001);
+            break;
+        }
+
         ssize_t n = romfs_read(st->fd, (uint8_t *)(uintptr_t)b->addr, size, off);
-        if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
+        if (n < 0) {
+            LOG("[fs] storage read failed at %llx size %llx dst %llx: %s\n",
+                (unsigned long long)off, (unsigned long long)size,
+                (unsigned long long)b->addr, strerror(errno));
+            resp->result = MAKE_RESULT(2, 6001);
+            break;
+        }
+        if ((uint64_t)n != size) {
+            LOG("[fs] short romfs read at %llx: got %lld of %llu bytes\n",
+                (unsigned long long)off, (long long)n, (unsigned long long)size);
+            memset((uint8_t *)(uintptr_t)b->addr + n, 0, size - (uint64_t)n);
+            resp->result = MAKE_RESULT(2, 6001);
+            break;
+        }
         {
             const char *path = romfs_file_at(off);
             static const char *last;
