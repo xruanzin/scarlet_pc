@@ -246,7 +246,7 @@ int plat_text_input_dialog(const char *title, const char *subtitle, const char *
         wc.cbSize = sizeof wc;
         wc.lpfnWndProc = textdlg_proc;
         wc.hInstance = GetModuleHandleW(NULL);
-        wc.hCursor = LoadCursorW(NULL, IDC_IBEAM);
+        wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32513));
         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
         wc.lpszClassName = L"ScarletNativeTextInput";
         atom = RegisterClassExW(&wc);
