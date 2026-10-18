@@ -12,12 +12,38 @@ static char diag_dir[2048];
 static struct { uint64_t code; const uint8_t *control; uint32_t stage; } diag_seen[128];
 static struct { uint64_t code; uint32_t stage; } diag_tf_seen[128];
 static unsigned diag_nseen, diag_tf_nseen, diag_calls;
-static bool diag_snapshot_warning;
 static size_t diag_snapshot_bytes;
-#define DIAG_SNAPSHOT_LIMIT (16u << 20)
+#define DIAG_CONTROL_PREFIX 0x704u
+#define DIAG_CONTROL_FULL   0x880u
+#define DIAG_CODE_LIMIT     (8u << 20)
 typedef struct {
-    uint8_t control[0x704], header[0x80];
+    uint8_t control[DIAG_CONTROL_FULL], header[0x80];
+    uint32_t control_bytes;
 } DiagShaderSnapshot;
+
+static uint32_t diag_u32(const uint8_t *p) {
+    uint32_t v;
+    memcpy(&v, p, sizeof v);
+    return v;
+}
+
+// Scarlet's NVN controls advertise the standard 0x880-byte control size at
+// +0x6f0. Older diagnostics knew only the 0x704-byte prefix. Never extend a
+// read unless the known prefix itself identifies the full control layout.
+static uint32_t diag_control_bytes(const uint8_t *control) {
+    if (!control || diag_u32(control) != 0x98761234u) return DIAG_CONTROL_PREFIX;
+    uint32_t advertised = diag_u32(control + 0x6f0);
+    return advertised == DIAG_CONTROL_FULL ? DIAG_CONTROL_FULL : DIAG_CONTROL_PREFIX;
+}
+
+static bool diag_snapshot_live(const NvnShaderStage *s, DiagShaderSnapshot *copy) {
+    if (!s || !s->control || !s->code_addr) return false;
+    memset(copy, 0, sizeof *copy);
+    copy->control_bytes = diag_control_bytes(s->control);
+    memcpy(copy->control, s->control, copy->control_bytes);
+    memcpy(copy->header, (const void *)(uintptr_t)s->code_addr, sizeof copy->header);
+    return true;
+}
 
 static void diag_init(void) {
     const char *dir = getenv("LARECOMP_TF_DIAG_DIR");
@@ -29,7 +55,7 @@ static void diag_init(void) {
     strcpy(diag_dir, dir);
     // The launcher creates the parent and passes an absolute, per-run path.
     mkdir(diag_dir, 0755);
-    LOG("[tf-diag] local output: %s (controls only; TF remains unimplemented)\n", diag_dir);
+    LOG("[tf-diag] local output: %s (TF programs captured on use; TF remains unimplemented)\n", diag_dir);
 }
 
 static bool diag_write(const char *leaf, const void *data, size_t size) {
@@ -44,20 +70,36 @@ static bool diag_write(const char *leaf, const void *data, size_t size) {
     return ok;
 }
 
-// Called with diag_lock held; bytes come from SetShaders, never a potentially
-// released guest control pointer when a command buffer later binds the program.
-static void diag_save_shader(const NvnShaderStage *s, const char *reason) {
-    const DiagShaderSnapshot *copy = s->diag_snapshot;
+// Called with diag_lock held. Initial shaders use a small retained snapshot;
+// TF shaders are captured from the program that is actually bound at Begin/Resume.
+static void diag_save_shader(const NvnShaderStage *s, const DiagShaderSnapshot *copy, const char *reason) {
     if (!copy) return;
-    char leaf[160], meta[640];
+    char leaf[160], meta[896];
     snprintf(leaf, sizeof leaf, "shader_%llx_s%u.control.bin", (unsigned long long)s->code_addr, s->stage);
-    bool control_ok = diag_write(leaf, copy->control, sizeof copy->control);
+    bool control_ok = diag_write(leaf, copy->control, copy->control_bytes);
     snprintf(leaf, sizeof leaf, "shader_%llx_s%u.header.bin", (unsigned long long)s->code_addr, s->stage);
     bool header_ok = diag_write(leaf, copy->header, sizeof copy->header);
+
+    uint32_t code_size = 0, program_start = 0, program_size = 0, control_stage = ~0u;
+    bool code_ok = false;
+    if (copy->control_bytes >= DIAG_CONTROL_FULL) {
+        code_size = diag_u32(copy->control + 0x704);
+        program_start = diag_u32(copy->control + 0x708);
+        control_stage = diag_u32(copy->control + 0x714);
+        program_size = diag_u32(copy->control + 0x6f8);
+        if (!strcmp(reason, "transform-feedback") && code_size >= 0x80 && code_size <= DIAG_CODE_LIMIT) {
+            snprintf(leaf, sizeof leaf, "shader_%llx_s%u.code.bin", (unsigned long long)s->code_addr, s->stage);
+            code_ok = diag_write(leaf, (const void *)(uintptr_t)s->code_addr, code_size);
+        }
+    }
+
     int length = snprintf(meta, sizeof meta,
-        "code=%llx\nstage=%u\ncontrol=%llx\ncontrol_bytes=0x704\nheader_bytes=0x80\nconst_offset=%x\nconst_size=%x\ncontrol_saved=%d\nheader_saved=%d\nreason=%s\n",
+        "code=%llx\nstage=%u\ncontrol=%llx\ncontrol_bytes=0x%x\nheader_bytes=0x80\n"
+        "program_start=0x%x\nprogram_size=0x%x\ncode_size=0x%x\ncontrol_stage=0x%x\n"
+        "const_offset=%x\nconst_size=%x\ncontrol_saved=%d\nheader_saved=%d\ncode_saved=%d\nreason=%s\n",
         (unsigned long long)s->code_addr, s->stage, (unsigned long long)(uintptr_t)s->control,
-        s->const_offset, s->const_size, control_ok, header_ok, reason);
+        copy->control_bytes, program_start, program_size, code_size, control_stage,
+        s->const_offset, s->const_size, control_ok, header_ok, code_ok, reason);
     snprintf(leaf, sizeof leaf, "shader_%llx_s%u.txt", (unsigned long long)s->code_addr, s->stage);
     diag_write(leaf, meta, (size_t)length);
 }
@@ -75,28 +117,26 @@ void nvn_diag_shader(NvnShaderStage *s) {
     pthread_once(&diag_once, diag_init);
     if (!diag_dir[0] || !s || !s->control || !s->code_addr || s->stage == 1 || s->stage == 5) return;
     pthread_mutex_lock(&diag_lock);
-    // Retain a bounded immutable copy for late TF selection even after the
-    // ordinary first-128 quota is full. Program replacement/finalize releases it.
-    if (!s->diag_snapshot && diag_snapshot_bytes + sizeof(DiagShaderSnapshot) <= DIAG_SNAPSHOT_LIMIT) {
-        DiagShaderSnapshot *copy = malloc(sizeof *copy);
-        if (copy) {
-            memcpy(copy->control, s->control, sizeof copy->control);
-            memcpy(copy->header, (const void *)(uintptr_t)s->code_addr, sizeof copy->header);
-            s->diag_snapshot = copy;
-            diag_snapshot_bytes += sizeof *copy;
-        }
-    }
-    if (!s->diag_snapshot && !diag_snapshot_warning) {
-        diag_snapshot_warning = true;
-        LOG("[tf-diag] snapshot allocation/budget exhausted; some late TF controls may be absent\n");
-    }
     for (unsigned i = 0; i < diag_nseen; i++)
         if (diag_seen[i].code == s->code_addr && diag_seen[i].control == s->control &&
             diag_seen[i].stage == s->stage) { pthread_mutex_unlock(&diag_lock); return; }
-    if (diag_nseen == 128 || !s->diag_snapshot) { pthread_mutex_unlock(&diag_lock); return; }
+
+    // Keep snapshots only for the ordinary first-128 inventory. The previous
+    // implementation retained every live program hoping it might later be used
+    // for TF and exhausted 16 MiB before Scarlet reached customization.
+    if (diag_nseen == 128) { pthread_mutex_unlock(&diag_lock); return; }
+    if (!s->diag_snapshot) {
+        DiagShaderSnapshot *copy = malloc(sizeof *copy);
+        if (copy && diag_snapshot_live(s, copy)) {
+            s->diag_snapshot = copy;
+            diag_snapshot_bytes += sizeof *copy;
+        } else free(copy);
+    }
+    if (!s->diag_snapshot) { pthread_mutex_unlock(&diag_lock); return; }
+
     unsigned id = diag_nseen++;
     diag_seen[id].code = s->code_addr; diag_seen[id].control = s->control; diag_seen[id].stage = s->stage;
-    diag_save_shader(s, "initial");
+    diag_save_shader(s, (const DiagShaderSnapshot *)s->diag_snapshot, "initial");
     pthread_mutex_unlock(&diag_lock);
 }
 
@@ -104,16 +144,25 @@ static void diag_save_tf_programs(NvnCmdBuf *cb) {
     for (unsigned stage = 0; stage < 5; stage++) {
         if (stage == 1 || !cb->diag_programs[stage]) continue;
         const NvnShaderStage *s = &cb->diag_programs[stage]->stages[stage];
-        if (!s->diag_snapshot) continue;
+        if (!s->control || !s->code_addr) continue;
         bool seen = false;
         for (unsigned i = 0; i < diag_tf_nseen; i++)
             if (diag_tf_seen[i].code == s->code_addr && diag_tf_seen[i].stage == stage) seen = true;
         if (seen || diag_tf_nseen == 128) continue;
+
+        // Capture on use. This is the program actually bound when TF begins,
+        // so early UI shaders cannot consume the late-scene capture budget.
+        DiagShaderSnapshot live;
+        const DiagShaderSnapshot *copy = s->diag_snapshot;
+        if (!copy) {
+            if (!diag_snapshot_live(s, &live)) continue;
+            copy = &live;
+        }
         diag_tf_seen[diag_tf_nseen].code = s->code_addr;
         diag_tf_seen[diag_tf_nseen++].stage = stage;
-        diag_save_shader(s, "transform-feedback");
-        LOG("[tf-diag] TF program cb=%llx code=%llx stage=%u\n",
-            (unsigned long long)cb->guest, (unsigned long long)s->code_addr, stage);
+        diag_save_shader(s, copy, "transform-feedback");
+        LOG("[tf-diag] TF program cb=%llx code=%llx stage=%u control=0x%x\n",
+            (unsigned long long)cb->guest, (unsigned long long)s->code_addr, stage, copy->control_bytes);
     }
 }
 
