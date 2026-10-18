@@ -3717,6 +3717,31 @@ static void exec_list(uint64_t handle, int depth) {
                 st.tf_vk_active = false;
                 vk_end_pass();
                 vk_full_barrier(vk_cmd());
+                // [tf-check]: does the GPU really write sane vertex data into the guest buffers? Look at the first
+                // few TF passes (waits for the GPU once each). nan/huge/zero counts per buffer tell a working TF
+                // from one that writes nothing, garbage or the wrong layout.
+                static int tf_checks;
+                if (tf_checks < 12) {
+                    tf_checks++;
+                    uint64_t sq = vk_pending_seq();
+                    renderer_flush();
+                    vk_wait_seq(sq);
+                    for (int bi = 0; bi < 3; bi++) {
+                        if (!st.tfbuf[bi].addr || !st.tfbuf[bi].size) continue;
+                        const float *f = (const float *)(uintptr_t)st.tfbuf[bi].addr;
+                        uint64_t n = st.tfbuf[bi].size / 4, nan = 0, huge = 0, zero = 0;
+                        for (uint64_t i = 0; i < n; i++) {
+                            float v = f[i];
+                            if (v != v) nan++;
+                            else if (v > 1e6f || v < -1e6f) huge++;
+                            else if (v == 0.0f) zero++;
+                        }
+                        LOG("[tf-check] #%d buf%d addr=%llx size=%llu words=%llu nan=%llu huge=%llu zero=%llu first: %g %g %g %g %g %g\n",
+                            tf_checks, bi, (unsigned long long)st.tfbuf[bi].addr, (unsigned long long)st.tfbuf[bi].size,
+                            (unsigned long long)n, (unsigned long long)nan, (unsigned long long)huge, (unsigned long long)zero,
+                            n > 0 ? f[0] : 0, n > 1 ? f[1] : 0, n > 2 ? f[2] : 0, n > 3 ? f[3] : 0, n > 4 ? f[4] : 0, n > 5 ? f[5] : 0);
+                    }
+                }
             }
             st.tf_active = false;
             st.tf_resume = false;
