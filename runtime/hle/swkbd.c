@@ -87,43 +87,6 @@ static size_t u16_to_utf8(const uint16_t *src, size_t units, char *out, size_t c
     return o;
 }
 
-static size_t utf8_to_u16(const char *src, uint16_t *out, size_t cap_units, size_t max_units) {
-    size_t o = 0;
-    const unsigned char *p = (const unsigned char *)src;
-    if (!cap_units) return 0;
-
-    while (*p) {
-        uint32_t cp;
-        int n;
-        if (*p < 0x80) { cp = *p; n = 1; }
-        else if ((*p & 0xE0) == 0xC0) { cp = *p & 0x1F; n = 2; }
-        else if ((*p & 0xF0) == 0xE0) { cp = *p & 0x0F; n = 3; }
-        else if ((*p & 0xF8) == 0xF0) { cp = *p & 0x07; n = 4; }
-        else { p++; continue; }
-
-        bool valid = true;
-        for (int i = 1; i < n; i++) {
-            if ((p[i] & 0xC0) != 0x80) { valid = false; break; }
-            cp = (cp << 6) | (p[i] & 0x3F);
-        }
-        if (!valid) { p++; continue; }
-
-        size_t need = cp >= 0x10000 ? 2 : 1;
-        if (o + need > max_units || o + need + 1 > cap_units) break;
-        if (need == 2) {
-            cp -= 0x10000;
-            out[o++] = (uint16_t)(0xD800 | (cp >> 10));
-            out[o++] = (uint16_t)(0xDC00 | (cp & 0x3FF));
-        } else {
-            out[o++] = (uint16_t)cp;
-        }
-        p += n;
-    }
-    out[o] = 0;
-    return o;
-}
-
-
 // nn::swkbd::String is always a byte/UTF-8 string: NintendoSDK defines it as
 // { char *strBuf; size_t bufsize; }. KeyboardConfig::isUseUtf8 only selects the
 // library-applet wire format. It must not change the String ABI seen by the
