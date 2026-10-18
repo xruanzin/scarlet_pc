@@ -364,6 +364,292 @@ int plat_text_input_dialog(const char *title, const char *subtitle, const char *
     return d.ok;
 }
 
+// ---- Horizon Software Keyboard applet frontend ---------------------------------
+// This is intentionally a separate native window rather than part of the game's
+// Vulkan/ImGui frame. On Horizon, swkbd is a library applet and the application
+// is suspended while it owns the foreground. Keeping the frontend independent
+// preserves that lifetime model and avoids re-entering the AMD Vulkan presenter.
+enum {
+    SWKBD_KEY_BASE = 6000,
+    SWKBD_BACKSPACE = 6400,
+    SWKBD_SPACE,
+    SWKBD_CANCEL,
+    SWKBD_OK,
+};
+
+typedef struct {
+    HWND hwnd, owner, edit, error_label;
+    int done, ok, min_chars, max_chars;
+    char *out;
+    size_t out_cap;
+    HBRUSH dark_brush, panel_brush, edit_brush;
+    HFONT font, title_font, key_font;
+} SwkbdAppletWindow;
+
+static void swkbd_append_char(SwkbdAppletWindow *d, wchar_t ch) {
+    if (!d || !d->edit) return;
+    wchar_t s[2] = {ch, 0};
+    SendMessageW(d->edit, EM_REPLACESEL, TRUE, (LPARAM)s);
+    SetFocus(d->edit);
+}
+
+static LRESULT CALLBACK swkbd_applet_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    SwkbdAppletWindow *d = (SwkbdAppletWindow *)GetWindowLongPtrW(h, GWLP_USERDATA);
+    if (msg == WM_NCCREATE) {
+        CREATESTRUCTW *cs = (CREATESTRUCTW *)lp;
+        d = (SwkbdAppletWindow *)cs->lpCreateParams;
+        SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)d);
+        d->hwnd = h;
+    }
+    if (!d) return DefWindowProcW(h, msg, wp, lp);
+
+    switch (msg) {
+    case WM_COMMAND: {
+        int id = LOWORD(wp);
+        if (id >= SWKBD_KEY_BASE && id < SWKBD_KEY_BASE + 256) {
+            swkbd_append_char(d, (wchar_t)(id - SWKBD_KEY_BASE));
+            return 0;
+        }
+        if (id == SWKBD_SPACE) {
+            swkbd_append_char(d, L' ');
+            return 0;
+        }
+        if (id == SWKBD_BACKSPACE) {
+            SendMessageW(d->edit, WM_CHAR, L'\b', 0);
+            SetFocus(d->edit);
+            return 0;
+        }
+        if (id == SWKBD_CANCEL) {
+            d->ok = 0;
+            d->done = 1;
+            DestroyWindow(h);
+            return 0;
+        }
+        if (id == SWKBD_OK) {
+            int n = GetWindowTextLengthW(d->edit);
+            if (n < d->min_chars) {
+                wchar_t msgbuf[128];
+                _snwprintf(msgbuf, 128, L"Enter at least %d character(s).", d->min_chars);
+                msgbuf[127] = 0;
+                SetWindowTextW(d->error_label, msgbuf);
+                MessageBeep(MB_ICONWARNING);
+                SetFocus(d->edit);
+                return 0;
+            }
+            wchar_t *w = calloc((size_t)n + 1, sizeof *w);
+            if (!w) return 0;
+            GetWindowTextW(d->edit, w, n + 1);
+            if (d->out && d->out_cap) {
+                int got = WideCharToMultiByte(CP_UTF8, 0, w, -1, d->out, (int)d->out_cap, NULL, NULL);
+                if (!got) d->out[0] = 0;
+                d->out[d->out_cap - 1] = 0;
+            }
+            free(w);
+            d->ok = 1;
+            d->done = 1;
+            DestroyWindow(h);
+            return 0;
+        }
+        break;
+    }
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = (HDC)wp;
+        HWND child = (HWND)lp;
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, child == d->error_label ? RGB(205, 45, 45) : RGB(28, 30, 34));
+        return (LRESULT)d->panel_brush;
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC dc = (HDC)wp;
+        SetBkColor(dc, RGB(255, 255, 255));
+        SetTextColor(dc, RGB(20, 22, 26));
+        return (LRESULT)d->edit_brush;
+    }
+    case WM_ERASEBKGND: {
+        RECT r;
+        GetClientRect(h, &r);
+        FillRect((HDC)wp, &r, d->dark_brush);
+        return 1;
+    }
+    case WM_CLOSE:
+        d->ok = 0;
+        d->done = 1;
+        DestroyWindow(h);
+        return 0;
+    case WM_DESTROY:
+        d->done = 1;
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+int plat_swkbd_applet_show(const char *title, const char *subtitle, const char *guide,
+                           const char *initial, const char *error,
+                           int min_chars, int max_chars, char *out, size_t out_cap) {
+    static ATOM atom;
+    static HBRUSH class_brush;
+    if (!atom) {
+        class_brush = CreateSolidBrush(RGB(9, 20, 35));
+        WNDCLASSEXW wc = {0};
+        wc.cbSize = sizeof wc;
+        wc.lpfnWndProc = swkbd_applet_proc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
+        wc.hbrBackground = class_brush;
+        wc.lpszClassName = L"ScarletHorizonSoftwareKeyboard";
+        atom = RegisterClassExW(&wc);
+        if (!atom && GetLastError() == ERROR_CLASS_ALREADY_EXISTS) atom = 1;
+    }
+    if (!atom) return 0;
+
+    TextOwnerFind find = {0};
+    EnumWindows(text_owner_enum, (LPARAM)&find);
+
+    RECT base = {0};
+    if (!find.hwnd || !GetWindowRect(find.hwnd, &base)) {
+        int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+        base.left = (sw - 1280) / 2; base.top = (sh - 720) / 2;
+        base.right = base.left + 1280; base.bottom = base.top + 720;
+    }
+    int ww = base.right - base.left, wh = base.bottom - base.top;
+    if (ww < 900) ww = 900;
+    if (wh < 600) wh = 600;
+
+    wchar_t wtitle[320], wsub[640], wguide[1024], winitial[1024], werror[1024];
+    utf8_wide(title && *title ? title : "Enter text", wtitle, 320);
+    utf8_wide(subtitle, wsub, 640);
+    utf8_wide(guide, wguide, 1024);
+    utf8_wide(initial, winitial, 1024);
+    utf8_wide(error, werror, 1024);
+
+    SwkbdAppletWindow d = {0};
+    d.owner = find.hwnd;
+    d.min_chars = min_chars > 0 ? min_chars : 0;
+    d.max_chars = max_chars > 0 ? max_chars : 500;
+    d.out = out;
+    d.out_cap = out_cap;
+    d.dark_brush = CreateSolidBrush(RGB(7, 18, 32));
+    d.panel_brush = CreateSolidBrush(RGB(239, 240, 243));
+    d.edit_brush = CreateSolidBrush(RGB(255, 255, 255));
+    d.font = CreateFontW(-20, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    d.title_font = CreateFontW(-30, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                               OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                               DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    d.key_font = CreateFontW(-18, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+    HWND h = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                             L"ScarletHorizonSoftwareKeyboard", L"",
+                             WS_POPUP,
+                             base.left, base.top, ww, wh, find.hwnd, NULL,
+                             GetModuleHandleW(NULL), &d);
+    if (!h) goto cleanup;
+
+    int panel_w = ww * 78 / 100;
+    if (panel_w > 1120) panel_w = 1120;
+    int panel_h = wh * 68 / 100;
+    if (panel_h > 540) panel_h = 540;
+    int px = (ww - panel_w) / 2;
+    int py = (wh - panel_h) / 2;
+
+    HWND panel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_WHITERECT,
+                                 px, py, panel_w, panel_h, h, NULL, GetModuleHandleW(NULL), NULL);
+    (void)panel;
+
+    HWND title_w = CreateWindowExW(0, L"STATIC", wtitle, WS_CHILD | WS_VISIBLE,
+                                   px + 24, py + 18, panel_w - 48, 42, h, NULL, GetModuleHandleW(NULL), NULL);
+    HWND sub_w = CreateWindowExW(0, L"STATIC", wsub, WS_CHILD | WS_VISIBLE,
+                                 px + 24, py + 61, panel_w - 48, 26, h, NULL, GetModuleHandleW(NULL), NULL);
+    HWND guide_w = CreateWindowExW(0, L"STATIC", wguide, WS_CHILD | WS_VISIBLE,
+                                   px + 24, py + 88, panel_w - 48, 25, h, NULL, GetModuleHandleW(NULL), NULL);
+    d.error_label = CreateWindowExW(0, L"STATIC", werror, WS_CHILD | WS_VISIBLE,
+                                    px + 24, py + 115, panel_w - 48, 25, h, NULL, GetModuleHandleW(NULL), NULL);
+    d.edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", winitial,
+                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                             px + 24, py + 145, panel_w - 48, 38, h, NULL, GetModuleHandleW(NULL), NULL);
+    SendMessageW(d.edit, EM_SETLIMITTEXT, (WPARAM)d.max_chars, 0);
+
+    SendMessageW(title_w, WM_SETFONT, (WPARAM)d.title_font, TRUE);
+    SendMessageW(sub_w, WM_SETFONT, (WPARAM)d.font, TRUE);
+    SendMessageW(guide_w, WM_SETFONT, (WPARAM)d.font, TRUE);
+    SendMessageW(d.error_label, WM_SETFONT, (WPARAM)d.font, TRUE);
+    SendMessageW(d.edit, WM_SETFONT, (WPARAM)d.title_font, TRUE);
+
+    static const wchar_t *rows[] = {L"QWERTYUIOP", L"ASDFGHJKL", L"ZXCVBNM", L"1234567890"};
+    int y = py + 202;
+    for (int r = 0; r < 4; r++, y += 50) {
+        int n = (int)wcslen(rows[r]);
+        int kw = 48, gap = 7;
+        int row_w = n * kw + (n - 1) * gap;
+        int x = px + (panel_w - row_w) / 2;
+        for (int i = 0; i < n; i++, x += kw + gap) {
+            wchar_t label[2] = {rows[r][i], 0};
+            wchar_t insert_ch = rows[r][i];
+            if (insert_ch >= L'A' && insert_ch <= L'Z') insert_ch = insert_ch - L'A' + L'a';
+            HWND b = CreateWindowExW(0, L"BUTTON", label,
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                     x, y, kw, 40, h,
+                                     (HMENU)(INT_PTR)(SWKBD_KEY_BASE + (int)insert_ch),
+                                     GetModuleHandleW(NULL), NULL);
+            SendMessageW(b, WM_SETFONT, (WPARAM)d.key_font, TRUE);
+        }
+    }
+
+    int by = py + panel_h - 58;
+    HWND back = CreateWindowExW(0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                px + 24, by, 118, 38, h, (HMENU)(INT_PTR)SWKBD_BACKSPACE,
+                                GetModuleHandleW(NULL), NULL);
+    HWND space = CreateWindowExW(0, L"BUTTON", L"Space", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                 px + 152, by, 220, 38, h, (HMENU)(INT_PTR)SWKBD_SPACE,
+                                 GetModuleHandleW(NULL), NULL);
+    HWND cancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                  px + panel_w - 272, by, 112, 38, h, (HMENU)(INT_PTR)SWKBD_CANCEL,
+                                  GetModuleHandleW(NULL), NULL);
+    HWND ok = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                              px + panel_w - 150, by, 126, 38, h, (HMENU)(INT_PTR)SWKBD_OK,
+                              GetModuleHandleW(NULL), NULL);
+    SendMessageW(back, WM_SETFONT, (WPARAM)d.key_font, TRUE);
+    SendMessageW(space, WM_SETFONT, (WPARAM)d.key_font, TRUE);
+    SendMessageW(cancel, WM_SETFONT, (WPARAM)d.key_font, TRUE);
+    SendMessageW(ok, WM_SETFONT, (WPARAM)d.key_font, TRUE);
+
+    if (find.hwnd) EnableWindow(find.hwnd, FALSE);
+    ShowWindow(h, SW_SHOW);
+    UpdateWindow(h);
+    SetForegroundWindow(h);
+    SetFocus(d.edit);
+    SendMessageW(d.edit, EM_SETSEL, 0, -1);
+
+    MSG msg;
+    while (!d.done && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (msg.message == WM_KEYDOWN && msg.hwnd == d.edit) {
+            if (msg.wParam == VK_RETURN) { SendMessageW(h, WM_COMMAND, SWKBD_OK, 0); continue; }
+            if (msg.wParam == VK_ESCAPE) { SendMessageW(h, WM_COMMAND, SWKBD_CANCEL, 0); continue; }
+        }
+        if (!IsDialogMessageW(h, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    if (find.hwnd) {
+        EnableWindow(find.hwnd, TRUE);
+        SetForegroundWindow(find.hwnd);
+    }
+
+cleanup:
+    if (d.font) DeleteObject(d.font);
+    if (d.title_font) DeleteObject(d.title_font);
+    if (d.key_font) DeleteObject(d.key_font);
+    if (d.dark_brush) DeleteObject(d.dark_brush);
+    if (d.panel_brush) DeleteObject(d.panel_brush);
+    if (d.edit_brush) DeleteObject(d.edit_brush);
+    return d.ok;
+}
+
 // ---- process
 // Release builds are GUI-subsystem executables (no console window): stdout / stderr go to lasrecomp.log next to the
 // exe, and a fatal error shows a message box (plat_fatal_notice) instead of vanishing. Processes started by this one
