@@ -1,5 +1,9 @@
 # Scarlet: SDK boot stops before any game image
 
+The latest boot passes SDK/TLS initialization and reaches NVN. For that later
+failure and the current incremental update, see
+[main switch after NVN initialization](#later-boot-main-switch-after-nvn-initialization).
+
 ## Evidence from the supplied logs
 
 The failing boot loads main, sdk and subsdk0, reaches the loader's SDK
@@ -73,10 +77,10 @@ if ($LASTEXITCODE -ne 0) { throw "Falha no build" }
 .\tools\scarlet_run.ps1 -GameRoot "D:\Pokemon Scarlet\Extracted\Base"
 ```
 
-Only SDK C sources need regeneration. Keep generated main/subsdk0 sources and
+For this original SDK fix, only SDK C sources needed regeneration. Keep generated main/subsdk0 sources and
 their object files: their CPU-state ABI did not change. The build script
 rejects SDK tables without nonzero resume metadata and prints the repair
-command. `make gen` and the in-app builder also enable SDK resume generation.
+command. The current builders enable main resume generation too; see below.
 
 The next boot should report `[dispatch] sdk: ... static resume ranges`. This
 confirms the new metadata was loaded; it is not a claim that the game rendered.
@@ -106,3 +110,63 @@ These are regression tests for the reproduced generator failure, not a test of
 Pokémon Scarlet reaching its menu. The original SDK/ROMFS and a Windows game
 boot are unavailable in this development environment. Further CPU, service,
 NVN or shader issues may become visible after the reported blocker is removed.
+
+## Later boot: main switch after NVN initialization
+
+`scarlet_boot(20261018-025850).log` confirms the TLR publication fix advanced
+the real game past malloc and SDK constructors. TPIDR_EL0 is subsequently
+`0x7240001140`, consistent with the SDK replacing its bootstrap TLS. The boot
+reads game archives, creates a VI layer, reaches `nvnBootstrapLoader`, initializes
+the NVN device and creates a Vulkan 1280x720 swapchain on AMD Radeon graphics.
+It then stops at:
+
+```text
+FATAL: no function at 7000a7db34 (lr=7000a7da60 munmap+cfdd0)
+```
+
+The auto-inspection and register dump show a compact switch in **main**:
+
+```text
+0x7000a7db14: adr  x10, #0x7000a7db24
+0x7000a7db18: ldrb w11, [x9, x8]
+0x7000a7db1c: add  x10, x10, x11, lsl #2
+0x7000a7db20: br   x10
+0x7000a7db34: ldr  x19, [x3]
+```
+
+At the failure, X11=4 and X10=`0x7000a7db34`: a valid case 16 bytes after the
+ADR base. ADR discovery splits the function at `0x7000a7db24`; the selected
+case is inside another fragment. SDK resume ranges cannot cover main addresses.
+The distant `munmap` name is only the nearest exported symbol, not evidence
+that this is a virtual-memory syscall failure.
+
+The main generator now enables `--indirect-resume`, and the game library
+publishes main's ranges alongside SDK's. PowerShell, `make gen` and the in-app
+builder agree. The Windows wrapper rejects a zero/missing main resume count
+before compilation and gives the regeneration command. No ABI layout or CPU
+header change is needed; the changed library entry updates GAMELIB_ID.
+Existing SDK/subsdk0 sources and objects remain reusable.
+
+Close the game and run:
+
+```powershell
+git pull --ff-only origin scarlet-bootstrap
+Set-ExecutionPolicy -Scope Process Bypass
+.\tools\scarlet_generate.ps1 -ExeFs "D:\Pokemon Scarlet\Extracted\Base\exefs" -Module main
+.\tools\scarlet_build_windows.ps1 -Jobs 4
+.\tools\scarlet_run.ps1 -GameRoot "D:\Pokemon Scarlet\Extracted\Base"
+```
+
+Do not clean the entire generated/build directories. Generation preserves
+unchanged files; compilation rebuilds changed main chunks and relinks the DLL.
+This is more work than the previous runtime-only TLS patch. The new boot must
+report both `[dispatch] main: ... static resume ranges` and the existing SDK
+range count. This confirms the updated DLL loaded, not successful rendering.
+
+The regression suite now generates and links both main and SDK fixtures with
+the production library entry and dispatcher. It compares 256 cross-fragment
+executions against ARM64, plus 24 compact byte-switch cases with the observed
+CMP/MOV/ADRP/ADD/ADR/LDRB/ADD/BR shape. Without main resume metadata, the compact
+case reproduces a missing interior target; with it, SP/LR and registers match.
+These synthetic fixtures contain no game binary. Full Windows game boot and
+image presentation remain to be checked on the user's machine.

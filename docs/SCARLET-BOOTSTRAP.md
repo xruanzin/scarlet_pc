@@ -8,6 +8,9 @@ For the SDK initialization failure `no function at 700657c59c`, see
 For the subsequent `malloc` access violation at `0x20`, see
 [the writable-thread-pointer fix and runtime-only rebuild](SCARLET-THREAD-TLS-BOOT.md).
 
+For the later NVN initialization stop at `0x7000a7db34`, see
+[main-module indirect resumes and the main-only regeneration](SCARLET-SDK-INDIRECT-BOOT.md#later-boot-main-switch-after-nvn-initialization).
+
 ## Important
 
 Do **not** put Pokémon Scarlet game files, Switch keys, generated game code or Nintendo assets in this repository.

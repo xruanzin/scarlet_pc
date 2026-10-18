@@ -34,11 +34,14 @@ foreach ($Rel in $RequiredGenerated) {
     }
 }
 
-# ABI 4's SDK table must carry resume functions; other generated modules can
-# be reused. Fail here with the repair command instead of undefined symbols.
-$SdkTable = Join-Path $RepoRoot "generated\sdk\sdk_table.c"
-if (-not (Select-String -LiteralPath $SdkTable -Pattern 'const uint64_t sdk_resume_count = [1-9][0-9]*;' -Quiet)) {
-    throw 'SDK gerado sem retomadas de saltos indiretos. Rode tools\scarlet_generate.ps1 -ExeFs "D:\Pokemon Scarlet\Extracted\Base\exefs" -Module sdk -Clean e compile novamente.'
+# Main now needs the same interior-PC resume support as SDK. Check both before
+# compilation so an old main table cannot silently reproduce the NVN boot stop.
+foreach ($Name in @("main", "sdk")) {
+    $Table = Join-Path $RepoRoot "generated\$Name\${Name}_table.c"
+    $Pattern = "const uint64_t ${Name}_resume_count = [1-9][0-9]*;"
+    if (-not (Select-String -LiteralPath $Table -Pattern $Pattern -Quiet)) {
+        throw "Modulo $Name gerado sem retomadas de saltos indiretos. Rode tools\scarlet_generate.ps1 -ExeFs 'D:\Pokemon Scarlet\Extracted\Base\exefs' -Module $Name e compile novamente."
+    }
 }
 
 if ($Jobs -lt 1) {

@@ -6,14 +6,17 @@
 MOD(main) MOD(sdk) MOD(subsdk0)
 #undef MOD
 #define TAB(n) {#n, n##_fn_addrs, n##_fn_ptrs, &n##_fn_count, NULL, NULL}
-// Only SDK needs regeneration for the current Scarlet boot fix. Existing main
-// and subsdk0 chunks/tables remain usable with the new library entry structure.
+// Both main and SDK contain switches that enter the middle of another emitted
+// fragment. subsdk0 can retain its existing generated chunks and table.
+extern const GameLibResumeRange main_resume_ranges[];
+extern const uint64_t main_resume_count;
 extern const GameLibResumeRange sdk_resume_ranges[];
 extern const uint64_t sdk_resume_count;
+#define MAIN_TAB {"main", main_fn_addrs, main_fn_ptrs, &main_fn_count, main_resume_ranges, &main_resume_count}
 #define SDK_TAB {"sdk", sdk_fn_addrs, sdk_fn_ptrs, &sdk_fn_count, sdk_resume_ranges, &sdk_resume_count}
 
 GAMELIB_EXPORT const GameLibTables *lasgame_tables(void) {
-    static const GameLibTables t = {GAMELIB_ABI, GAMELIB_ID, 3, {TAB(main), SDK_TAB, TAB(subsdk0)}};
+    static const GameLibTables t = {GAMELIB_ABI, GAMELIB_ID, 3, {MAIN_TAB, SDK_TAB, TAB(subsdk0)}};
     return &t;
 }
 

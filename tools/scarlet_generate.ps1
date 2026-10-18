@@ -106,7 +106,7 @@ $Jobs = @(
     @{
         Name = "main"
         Base = "0x7000000000"
-        Extra = @()
+        Extra = @("--indirect-resume")
     },
     @{
         Name = "subsdk0"
