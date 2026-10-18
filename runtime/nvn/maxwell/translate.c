@@ -2039,6 +2039,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         // compiler fuses or reorders the math feeding it (MSL gets this from preserveInvariance; without it foliage
         // drawn twice flickered black)
         sp(&s, "invariant gl_Position;\nprecise gl_Position;\n");
+        if (key && key->layer_from_instance)
+            sp(&s, "#extension GL_ARB_shader_viewport_layer_array : enable\n");
         for (int i = 0; i < 32; i++) {
             if (!(c->out_attr_mask & (1u << i))) continue;
             uint8_t cm = info->out_comp_mask[i];
@@ -2125,6 +2127,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                 sp(&s, "  v%d = xfbtmp%d.%s;\n", i, i, sw);
             }
         }
+        if (key && key->layer_from_instance)
+            sp(&s, "  gl_Layer = int(gl_InstanceIndex);\n");
         if (key && key->flip_y) sp(&s, "  gl_Position.y = -gl_Position.y;\n");
         if (key && key->depth_minus_one) sp(&s, "  gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5f;\n");
     } else if (stage == STAGE_FRAGMENT) {
