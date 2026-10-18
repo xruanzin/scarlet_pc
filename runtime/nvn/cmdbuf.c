@@ -13,8 +13,19 @@
 // budget. Every recording gets a tiny opaque handle in guest memory and the
 // actual CmdRec stream lives in host segments chained from that handle.
 #define HOSTSEG_SIZE (128u << 10)
-#define HOSTSEG_CAP  (256u << 20)
+// The pool cap was 256 MB; a scene change in Scarlet (right after the name-entry screen) records thousands of lists
+// at once and exhausted it ("host command segment pool exhausted"). LARECOMP_HOSTSEG_MB overrides the 1024 MB default.
+static uint64_t hostseg_cap(void) {
+    static uint64_t cap;
+    if (!cap) {
+        const char *e = getenv("LARECOMP_HOSTSEG_MB");
+        long mb = e ? atol(e) : 1024;
+        cap = (uint64_t)(mb >= 64 ? mb : 1024) << 20;
+    }
+    return cap;
+}
 typedef struct {
+    uint64_t born;  // hostseg_take count when it was taken (reclaim leaves the newest alone)
     uint8_t *mem;
     bool busy;
     bool pending_release;
@@ -24,6 +35,37 @@ typedef struct {
 static HostSeg *g_hostseg;
 static int g_nhostseg, g_caphostseg;
 static pthread_mutex_t g_hostseg_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_take_count;
+
+// Pool pressure only (caller holds g_hostseg_lock): free the chains whose game handle is dead. A chain's handle is the
+// CMD_JUMP in the game's command memory at origin_lo; when the game freed or reused that memory for anything else
+// (the ring slot was never handed to AddCommandMemory/BeginRecording again, so hostseg_release_range never ran) the
+// handle can't be submitted any more and its segments only leak. A chain whose slot still holds its JUMP stays.
+static bool hostseg_slot_intact(uint64_t lo) {
+    if (lo < GUEST_LO || lo + sizeof(CmdRec) > GUEST_HI) return false;
+    const CmdRec *r = (const CmdRec *)(uintptr_t)lo;
+    if (r->op != CMD_JUMP || r->size != sizeof(CmdRec)) return false;
+    for (int j = 0; j < g_nhostseg; j++)
+        if (g_hostseg[j].busy && g_hostseg[j].origin_lo == lo && (uint64_t)(uintptr_t)g_hostseg[j].mem == r->x[0]) return true;
+    return false;
+}
+static int hostseg_reclaim_dead_locked(void) {
+    int freed = 0;
+    for (int i = 0; i < g_nhostseg; i++) {
+        HostSeg *s = &g_hostseg[i];
+        if (!s->busy || s->refs || !s->origin_lo || g_take_count - s->born < 4096) continue;
+        if (hostseg_slot_intact(s->origin_lo)) continue;
+        uint64_t lo = s->origin_lo;
+        for (int j = i; j < g_nhostseg; j++) {  // the whole chain (same origin), including those before i already done
+            HostSeg *t = &g_hostseg[j];
+            if (t->busy && !t->refs && t->origin_lo == lo) {
+                t->busy = false; t->pending_release = false; t->origin_lo = t->origin_hi = 0;
+                freed++;
+            }
+        }
+    }
+    return freed;
+}
 
 static void hostseg_release_range(uint64_t lo, uint64_t hi) {
     if (!lo || hi <= lo) return;
@@ -58,11 +100,30 @@ static uint64_t hostseg_take(NvnCmdBuf *cb) {
             g_hostseg[i].pending_release = false;
             g_hostseg[i].origin_lo = cb->host_origin_lo;
             g_hostseg[i].origin_hi = cb->host_origin_hi;
+            g_hostseg[i].born = g_take_count + 1;
             mem = g_hostseg[i].mem;
             break;
         }
     }
-    if (!mem && (uint64_t)(g_nhostseg + 1) * HOSTSEG_SIZE <= HOSTSEG_CAP) {
+    if (!mem && (uint64_t)(g_nhostseg + 1) * HOSTSEG_SIZE > hostseg_cap()) {
+        int freed = hostseg_reclaim_dead_locked();
+        static uint64_t reclaims;
+        if (++reclaims <= 8 || !(reclaims & 63))
+            LOG("[nvn] host segment pool at its cap (%d x %u KB): reclaimed %d dead segments (#%llu)\n", g_nhostseg,
+                HOSTSEG_SIZE >> 10, freed, (unsigned long long)reclaims);
+        for (int i = 0; i < g_nhostseg && freed; i++) {
+            if (!g_hostseg[i].busy && !g_hostseg[i].refs) {
+                g_hostseg[i].busy = true;
+                g_hostseg[i].pending_release = false;
+                g_hostseg[i].origin_lo = cb->host_origin_lo;
+                g_hostseg[i].origin_hi = cb->host_origin_hi;
+                g_hostseg[i].born = g_take_count + 1;
+                mem = g_hostseg[i].mem;
+                break;
+            }
+        }
+    }
+    if (!mem && (uint64_t)(g_nhostseg + 1) * HOSTSEG_SIZE <= hostseg_cap()) {
         if (g_nhostseg == g_caphostseg) {
             int nc = g_caphostseg ? g_caphostseg * 2 : 64;
             HostSeg *p = realloc(g_hostseg, (size_t)nc * sizeof *p);
@@ -72,6 +133,7 @@ static uint64_t hostseg_take(NvnCmdBuf *cb) {
             mem = malloc(HOSTSEG_SIZE);
             if (mem) {
                 g_hostseg[g_nhostseg++] = (HostSeg){
+                    .born = g_take_count + 1,
                     .mem = mem, .busy = true, .pending_release = false, .refs = 0,
                     .origin_lo = cb->host_origin_lo, .origin_hi = cb->host_origin_hi
                 };
@@ -79,9 +141,10 @@ static uint64_t hostseg_take(NvnCmdBuf *cb) {
         }
     }
     uint64_t n = ++total;
+    g_take_count++;
     int pool = g_nhostseg;
     pthread_mutex_unlock(&g_hostseg_lock);
-    if (!mem) FATAL("nvn: host command segment pool exhausted (%u MB)\n", HOSTSEG_CAP >> 20);
+    if (!mem) FATAL("nvn: host command segment pool exhausted (%llu MB)\n", (unsigned long long)(hostseg_cap() >> 20));
     if (n == 1 || !(n & 1023))
         LOG("[nvn] expanded command records -> host segments (take %llu, pool %d x %u KB)\n",
             (unsigned long long)n, pool, HOSTSEG_SIZE >> 10);
