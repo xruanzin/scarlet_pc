@@ -1,9 +1,9 @@
 // nn::swkbd::ShowKeyboard -> host text input.
 //
 // The real Nintendo SDK launches the software-keyboard applet, then copies the
-// applet result into nn::swkbd::String. On Windows we use a native modal text
-// box centered over the Scarlet window; no Vulkan work is performed from the
-// blocking game thread.
+// applet result into nn::swkbd::String. This port keeps that blocking SDK call,
+// while runtime/ui/menu.mm renders an in-window Switch-style keyboard on the
+// normal render thread.
 //
 // ShowKeyboardArg layout used by this SDK:
 //   +0x024 header UTF-16[65]
@@ -41,6 +41,9 @@ enum {
     ARG_INIT_OFF = 0x3c0,
     ARG_INIT_LEN = 0x3c4,
     ARG_WORKBUF = 0x4d0,
+    ARG_WORKBUF_SIZE = 0x4d8,
+    ARG_CHECKBUF = 0x4e0,
+    ARG_CHECKBUF_SIZE = 0x4e8,
     HEADER_N = 65,
     SUB_N = 129,
     GUIDE_N = 257,
@@ -120,6 +123,49 @@ static size_t utf8_to_u16(const char *src, uint16_t *out, size_t cap_units, size
     return o;
 }
 
+
+static uint64_t swkbd_store_string(uint64_t string_obj, const char *text, uint8_t use_utf8, size_t max_len) {
+    uint64_t ptr = LD64(string_obj);
+    uint64_t cap = LD64(string_obj + 8);
+    if (!ptr || !cap) return 0;
+
+    memset((void *)(uintptr_t)ptr, 0, (size_t)cap);
+    if (use_utf8) {
+        size_t n = strlen(text);
+        if (n >= cap) n = (size_t)cap - 1;
+        // Do not split a UTF-8 continuation sequence at the buffer boundary.
+        while (n && (((const unsigned char *)text)[n] & 0xC0) == 0x80) n--;
+        memcpy((void *)(uintptr_t)ptr, text, n);
+        ((char *)(uintptr_t)ptr)[n] = 0;
+        return (uint64_t)n + 1;
+    }
+
+    size_t cap_units = (size_t)cap / 2;
+    if (!cap_units) return 0;
+    size_t units = utf8_to_u16(text, (uint16_t *)(uintptr_t)ptr, cap_units, max_len);
+    return (uint64_t)(units + 1) * 2;
+}
+
+static void swkbd_check_message_utf8(uint64_t check_buf, uint64_t check_cap, uint64_t message_size,
+                                     uint8_t use_utf8, char *out, size_t out_cap) {
+    if (!out_cap) return;
+    out[0] = 0;
+    if (!check_buf || !check_cap) return;
+
+    uint64_t n = message_size && message_size < check_cap ? message_size : check_cap;
+    if (use_utf8) {
+        if (n >= out_cap) n = out_cap - 1;
+        memcpy(out, (const void *)(uintptr_t)check_buf, (size_t)n);
+        out[n] = 0;
+        // The SDK buffer is normally terminated, but enforce it if outMessageSize included extra bytes.
+        for (size_t i = 0; i < (size_t)n; i++) if (!out[i]) return;
+        out[n] = 0;
+    } else {
+        size_t units = (size_t)(n / 2);
+        u16_to_utf8((const uint16_t *)(uintptr_t)check_buf, units, out, out_cap);
+    }
+}
+
 // nn::swkbd::ShowKeyboard(nn::swkbd::String *out, const nn::swkbd::ShowKeyboardArg &arg) -> nn::Result
 // String = {void *ptr; size_t byteCapacity}
 HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swkbd_show) {
@@ -134,6 +180,9 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
     uint32_t init_off = *(const uint32_t *)(uintptr_t)(arg + ARG_INIT_OFF);
     uint32_t init_len = *(const uint32_t *)(uintptr_t)(arg + ARG_INIT_LEN);
     uint64_t work = LD64(arg + ARG_WORKBUF);
+    uint64_t work_size = LD64(arg + ARG_WORKBUF_SIZE);
+    uint64_t check_buf = LD64(arg + ARG_CHECKBUF);
+    uint64_t check_buf_size = LD64(arg + ARG_CHECKBUF_SIZE);
 
     if (max_len <= 0 || max_len > 500) max_len = 500;
     if (min_len < 0 || min_len > max_len) min_len = 0;
@@ -147,7 +196,7 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
     u16_to_utf8((const uint16_t *)(uintptr_t)(arg + ARG_HEADER), HEADER_N, title, sizeof title);
     u16_to_utf8((const uint16_t *)(uintptr_t)(arg + ARG_SUB), SUB_N, sub, sizeof sub);
     u16_to_utf8((const uint16_t *)(uintptr_t)(arg + ARG_GUIDE), GUIDE_N, guide, sizeof guide);
-    if (work && init_len)
+    if (work && init_len && (!work_size || (uint64_t)init_off + (uint64_t)init_len * 2 <= work_size))
         u16_to_utf8((const uint16_t *)(uintptr_t)(work + init_off), init_len, initial, sizeof initial);
 
     char error[0x800] = "";
@@ -164,37 +213,67 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
             max_len, min_len, use_utf8, use_text_check,
             (unsigned long long)text_check_cb, text);
 
+        // Store the candidate in the caller's nn::swkbd::String first. The NintendoSDK
+        // text-check callback receives that same String object, with bufSize temporarily
+        // changed from capacity to the actual encoded string size.
+        uint64_t bytes = swkbd_store_string(out_obj, text, use_utf8, (size_t)max_len);
+
         if (!use_text_check || !text_check_cb) break;
 
-        // nn::swkbd TextCheck callback ABI (same contract as libnx):
-        //   SwkbdTextCheckResult cb(char *tmp_string, size_t tmp_string_size)
-        // tmp_string enters as UTF-8. On failure the callback may replace it
-        // with the message the applet must show.
-        enum { TEXTCHECK_BUF = 0x7D4 };
-        char *tmp = hle_alloc(TEXTCHECK_BUF);
-        snprintf(tmp, TEXTCHECK_BUF, "%s", text);
-        c->x[0] = (uint64_t)(uintptr_t)tmp;
-        c->x[1] = TEXTCHECK_BUF;
+        if (!check_buf || check_buf_size < 2) {
+            LOG("[swkbd] text-check requested but ShowKeyboardArg has no work buffer (buf=%llx size=%llu); accepting candidate safely\n",
+                (unsigned long long)check_buf, (unsigned long long)check_buf_size);
+            break;
+        }
+
+        // NintendoSDK ABI:
+        //   TextCheckResult cb(void *textCheckWorkBuf, size_t *outMessageSize, String *text)
+        // Scarlet uses the pre-8.0 64-bit size_t form (the callback symbol encodes Pm).
+        memset((void *)(uintptr_t)check_buf, 0, (size_t)check_buf_size);
+        uint64_t *message_size = (uint64_t *)hle_alloc(sizeof(uint64_t));
+        *message_size = 0;
+
+        uint64_t saved_cap = LD64(out_obj + 8);
+        uint64_t saved_regs[12];
+        for (int i = 0; i < 12; i++) saved_regs[i] = c->x[19 + i];
+
+        *(uint64_t *)(uintptr_t)(out_obj + 8) = bytes;
+        c->x[0] = check_buf;
+        c->x[1] = (uint64_t)(uintptr_t)message_size;
+        c->x[2] = out_obj;
+        LOG("[swkbd] text-check call cb=%llx work=%llx workSize=%llu sizePtr=%llx string=%llx bytes=%llu\n",
+            (unsigned long long)text_check_cb, (unsigned long long)check_buf,
+            (unsigned long long)check_buf_size, (unsigned long long)(uintptr_t)message_size,
+            (unsigned long long)out_obj, (unsigned long long)bytes);
+
         guest_call(c, text_check_cb);
         uint32_t check = (uint32_t)c->x[0];
 
-        LOG("[swkbd] text-check result=%u message=\"%s\"\n", check, tmp);
-        if (check == 0) break;  // OK
+        for (int i = 0; i < 12; i++) c->x[19 + i] = saved_regs[i];
+        *(uint64_t *)(uintptr_t)(out_obj + 8) = saved_cap;
 
-        // 1 Bad: show callback message and return to keyboard.
-        // 2 Prompt: show message and offer "Use anyway" in the applet.
-        // >=3 Silent: simply return to keyboard without a message.
+        char check_message[0x1000];
+        swkbd_check_message_utf8(check_buf, check_buf_size, *message_size, use_utf8,
+                                 check_message, sizeof check_message);
+        LOG("[swkbd] text-check result=%u messageSize=%llu message=\"%s\"\n",
+            check, (unsigned long long)*message_size, check_message);
+
+        if (check == 0) break;  // Success
+
         snprintf(current, sizeof current, "%s", text);
-        if (check == 2) {
+        if (check == 2) {       // ShowConfirmDialog
             int prompt = menu_keyboard_run(current, min_len, max_len, title, sub, guide,
-                                           tmp[0] ? tmp : "Use this text anyway?", 1,
+                                           check_message[0] ? check_message : "Use this text anyway?", 1,
                                            text, sizeof text);
-            if (prompt == 2) break; // explicit "Use anyway"
+            if (prompt == 2) {
+                swkbd_store_string(out_obj, text, use_utf8, (size_t)max_len);
+                break;
+            }
             if (!prompt) { ok = 0; break; }
             snprintf(current, sizeof current, "%s", text);
             error[0] = 0;
-        } else {
-            snprintf(error, sizeof error, "%s", check == 1 ? tmp : "");
+        } else {                // ShowFailureDialog (and unknown values: reject safely)
+            snprintf(error, sizeof error, "%s", check_message);
         }
     }
 
@@ -206,18 +285,8 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
         return;
     }
 
-    if (ptr && size) {
-        memset((void *)(uintptr_t)ptr, 0, (size_t)size);
-        if (use_utf8) {
-            // ShowKeyboardArg requests the final String encoding independently
-            // of TextCheck (whose callback always receives temporary UTF-8).
-            snprintf((char *)(uintptr_t)ptr, (size_t)size, "%s", text);
-        } else {
-            uint16_t *dst = (uint16_t *)(uintptr_t)ptr;
-            size_t cap_units = (size_t)size / 2;
-            utf8_to_u16(text, dst, cap_units, (size_t)max_len);
-        }
-    }
+    if (ptr && size)
+        swkbd_store_string(out_obj, text, use_utf8, (size_t)max_len);
 
     c->x[0] = 0;
 }
