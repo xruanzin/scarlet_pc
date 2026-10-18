@@ -67,13 +67,13 @@ afirmar sozinho quais deles causavam a tela vazia.
 
 ## Compilação e volume de log
 
-Fragment e compute passam a usar a otimização de desempenho do shaderc. Vertex
-mantém o modo anterior por padrão, preservando a invariância de profundidade
-entre prepass e passe de cor. A opção de compilação faz parte da chave do cache.
-
-`LARECOMP_VK_OPT=0` desativa a otimização. `LARECOMP_VK_OPT=1` também otimiza
-vertex e continua sendo uma opção experimental. O primeiro uso desta revisão
-pode recompilar módulos; o cache antigo não precisa ser apagado.
+A otimização agressiva de fragment/compute introduzida nesta etapa foi revertida
+após a regressão de abertura. Todas as etapas usam o modo original, sem otimização
+shaderc por padrão; a precisão `NoContraction` dos vértices é preservada.
+`LARECOMP_VK_OPT=1` é um experimento ao executar o binário diretamente; o runner
+normal usa `0`. O modo faz parte da chave do cache, que não precisa ser apagado.
+Veja [SCARLET-BOOT-RECOVERY.md](SCARLET-BOOT-RECOVERY.md) para a comparação medida
+e o diagnóstico automático do shader grande.
 
 A alternância normal entre as duas texturas de apresentação não é mais escrita
 no log a cada quadro. `LARECOMP_TRACE_PRESENT=1` restaura esse rastreamento.

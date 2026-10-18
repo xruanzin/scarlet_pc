@@ -48,11 +48,14 @@ Write-Host ""
 $Q = [char]34
 $BaseCmdLine = $Q + $Exe + $Q + " " + $Q + $GameRoot + $Q + " --play"
 $PreviousVkProf = $env:LARECOMP_VK_PROF
+$PreviousVkOpt = $env:LARECOMP_VK_OPT
 $LocationPushed = $false
 try {
     # Keep save and shader caches in the repository even when invoked by absolute path from another directory.
     Push-Location -LiteralPath $RepoRoot
     $LocationPushed = $true
+    # Normal runs use the stable compiler mode, even after experiments in this PowerShell session.
+    $env:LARECOMP_VK_OPT = "0"
     if ($Profile) {
         $env:LARECOMP_VK_PROF = "1"
         Write-Host "[scarlet-run] Perfil Vulkan ativo: tempos de CPU, GPU e apresentacao no log."
@@ -80,6 +83,12 @@ try {
 }
 finally {
     if ($LocationPushed) { Pop-Location }
+    if ($null -eq $PreviousVkOpt) {
+        Remove-Item Env:LARECOMP_VK_OPT -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:LARECOMP_VK_OPT = $PreviousVkOpt
+    }
     if ($null -eq $PreviousVkProf) {
         Remove-Item Env:LARECOMP_VK_PROF -ErrorAction SilentlyContinue
     }
@@ -139,6 +148,25 @@ Write-Host ""
 Write-Host "[scarlet-run] Processo terminou com exit code $Code"
 if ($Code -eq 86) {
     Write-Host "[scarlet-run] Compilacao grafica excedeu 8 segundos. O processo foi encerrado; veja [build-timeout] no log." -ForegroundColor Yellow
+    # Bundle only shaders referenced by this run, plus its log. No game dump, save or complete cache.
+    try {
+        $Files = @($Log)
+        $Diagnostics = Select-String -LiteralPath $Log -Pattern '\[shader-diagnostic\] input (build/shader-diagnostics/[0-9a-f]+\.(?:vert|frag|comp))\.glsl'
+        foreach ($Entry in $Diagnostics) {
+            $Base = Join-Path $RepoRoot $Entry.Matches[0].Groups[1].Value
+            foreach ($Suffix in @('.glsl', '.spv')) {
+                $Path = $Base + $Suffix
+                if (Test-Path -LiteralPath $Path -PathType Leaf) { $Files += $Path }
+            }
+        }
+        $Files = @($Files | Select-Object -Unique)
+        $Archive = Join-Path $RepoRoot 'build\scarlet_shader_failure.zip'
+        Compress-Archive -LiteralPath $Files -DestinationPath $Archive -CompressionLevel Fastest -Force
+        Write-Host "[scarlet-run] Diagnostico para analise: $Archive" -ForegroundColor Yellow
+    }
+    catch {
+        Write-Host "[scarlet-run] Nao foi possivel compactar o diagnostico: $_" -ForegroundColor Yellow
+    }
 }
 exit $Code
 

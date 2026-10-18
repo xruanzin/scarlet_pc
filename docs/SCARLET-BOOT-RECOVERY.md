@@ -1,5 +1,44 @@
 # Correção da regressão de abertura e resposta do Windows
 
+## Resultado do log 153427 e correção do compilador
+
+O log `scarlet_boot(20261018-153427).log`, da revisão `1681e95`, chegou ao
+Vulkan/NVN em **2,650 s**. A proteção de memória foi instalada (7155 MiB).
+Depois, o programa `72730b5000/72730f3000` levou **6,1 s** para gerar SPIR-V:
+830 palavras no vertex e **364040 palavras no fragment**. O pipeline seguinte
+atingiu o prazo de 8 s e terminou com código 86. A proteção funcionou, mas o
+primeiro quadro ainda não foi apresentado.
+
+A revisão `25afbcd` tinha ativado a otimização de desempenho do shaderc por
+padrão em fragment/compute. Ela foi revertida para o modo original do port:
+**sem essa otimização em todas as etapas**. `LARECOMP_VK_OPT=1` continua disponível
+como experimento ao executar o binário diretamente. O script normal força `0`
+durante o processo e restaura o ambiente ao terminar. O driver continua gerando
+o código nativo da GPU; isso não muda a recompilação estática da CPU do jogo.
+
+O teste com o compilador shaderc real reproduz um problema desse tipo: um shader
+sintético com 128 registradores e 1024 blocos de controle cresce para **307901
+palavras** com a otimização, contra **66134** no modo restaurado. Uma execução
+mediu **1,157 s** e **0,097 s**, respectivamente. A promoção dos registradores
+para SSA cria grandes nós Phi no dispatcher. São dados do teste sintético,
+não medidas do shader do jogo ou do driver AMD do usuário. O GLSL desse shader
+específico ainda não estava no log; portanto a causa exata de suas 364040
+palavras não está confirmada.
+
+A opção de compilação faz parte da chave do cache. Um módulo antigo otimizado
+não é usado pelo novo modo padrão. Não apague o cache: os módulos compatíveis
+continuam aproveitáveis. A precisão de vertex (`NoContraction`) e as correções
+de storage, textos/atlas e comandos de primeiro uso são preservadas.
+
+Shaders com fonte de pelo menos 64 KiB ou módulo de pelo menos 32768 palavras
+salvam automaticamente o GLSL e o SPIR-V em `build/shader-diagnostics`. A fonte
+grande é salva antes de chamar shaderc, inclusive se a compilação não terminar.
+Se houver saída 86, `scarlet_run.ps1` cria **`build/scarlet_shader_failure.zip`**
+com o log atual e os arquivos de shader mencionados nele. Esse arquivo permite
+investigar a entrada real caso a reversão ainda não resolva o pipeline na AMD.
+
+## Evidência anterior
+
 O log `scarlet_boot(20261018-150324).log`, da revisão `46a24f4`, registra
 `Vulkan/NVN device ready after 2.631 s`. Depois fica pelo menos **119 s**
 esperando um único pipeline (`72730b4000/72730f2000`), com `jobs=1`, sem chegar
@@ -21,8 +60,9 @@ espera e reduzem o trabalho e a pressão de recursos associados à compilação.
   O log não prova que a expansão desse laço causou o bloqueio específico da AMD.
 - Pipelines gráficos e compute traduzidos usam
   `VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT` na AMD. Isso solicita menos
-  otimização ao driver na criação; shaderc e as regras de precisão dos shaders
-  de vértice permanecem como antes. Não substitui nem omite o shader original.
+  otimização ao driver na criação; as regras de precisão dos shaders
+  de vértice permanecem como antes. O modo shaderc é o descrito acima. Não
+  substitui nem omite o shader original.
   O efeito no desempenho da gameplay ainda precisa ser medido no Windows.
 - Até 12 CPUs lógicas, há um worker de compilação em baixa prioridade; nos demais,
   dois. Essa redução controla concorrência futura: o log problemático já tinha
@@ -78,10 +118,24 @@ if ($LASTEXITCODE -ne 0) { throw "Falha na compilacao." }
 
 O teste inicial usa o perfil de GPU desligado. As linhas de boot e de timeout
 continuam no `scarlet_boot.log`. Se terminar com código 86, o pipeline ainda não
-concluiu dentro do prazo; preserve o log. Não é necessário regenerar a DLL do jogo
-para estas mudanças de runtime.
+concluiu dentro do prazo; preserve o log e `build/scarlet_shader_failure.zip`.
+Não é necessário regenerar a DLL do jogo para estas mudanças de runtime.
 
 ## Validação e limites
+
+- Quatro novos testes com a implementação C real e a biblioteca shaderc: expansão
+  do dispatcher, cache separado entre modos, diagnóstico de fonte antes de falha,
+  precisão de vertex e quatro renderizações de fragment com leitura de pixels.
+  Os valores coincidem com o cálculo de referência, com e sem otimização shaderc
+  e com e sem a flag de criação rápida do pipeline.
+- Execução do runner real em PowerShell 7, com o processo nativo e a presença do
+  MSYS simulados: saída normal, saída 86 com apenas log e saída 86 com shaders.
+  Conferidos restauração de pasta/ambiente, desativação de otimização herdada,
+  conteúdo do ZIP, arquivos duplicados, antigos e SPIR-V ainda não produzido.
+  O arquivo C de shaders também compila com o SDK real para Windows x64.
+- Os tempos do compilador acima são observações de uma execução, não limites
+  impostos pelos testes. O pipeline sintético também funciona no Lavapipe com
+  ambos os modos; isso não prova redução do tempo de criação no driver AMD.
 
 - Teste da espera real: preserva o trabalho que termina em 40 ms; um relógio
   controlado simula builds presos e confirma saída 86 em programa/pipeline/compute.

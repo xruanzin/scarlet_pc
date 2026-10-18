@@ -154,11 +154,14 @@ class StorageTests(unittest.TestCase):
 int main(void){
  unsetenv("LARECOMP_VK_OPT");
  assert(optimization_level(0)==shaderc_optimization_level_zero);
+ assert(optimization_level(1)==shaderc_optimization_level_zero);
+ assert(optimization_level(5)==shaderc_optimization_level_zero);
+ uint64_t fragment=src_hash("test",1),vertex=src_hash("test",0);
+ setenv("LARECOMP_VK_OPT","0",1);assert(fragment==src_hash("test",1));assert(vertex==src_hash("test",0));
+ setenv("LARECOMP_VK_OPT","1",1);assert(fragment!=src_hash("test",1));assert(vertex!=src_hash("test",0));
  assert(optimization_level(1)==shaderc_optimization_level_performance);
- assert(optimization_level(5)==shaderc_optimization_level_performance);
- uint64_t opt=src_hash("test",1),vertex=src_hash("test",0);
- setenv("LARECOMP_VK_OPT","0",1);assert(opt!=src_hash("test",1));assert(vertex==src_hash("test",0));
- setenv("LARECOMP_VK_OPT","1",1);assert(opt==src_hash("test",1));assert(vertex!=src_hash("test",0));
+ setenv("LARECOMP_VK_OPT","",1);assert(fragment==src_hash("test",1));
+ setenv("LARECOMP_VK_OPT","invalid",1);assert(fragment==src_hash("test",1));
  return 0;
 }
 '''

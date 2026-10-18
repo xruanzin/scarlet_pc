@@ -11,6 +11,8 @@ void vk_shaders_init(void) {  // (compilers are per thread: check shaderc works 
     shaderc_compiler_t c = shaderc_compiler_initialize();
     if (!c) FATAL("shaderc_compiler_initialize failed\n");
     shaderc_compiler_release(c);
+    const char *opt = getenv("LARECOMP_VK_OPT");
+    LOG("[shader] shaderc optimizer: %s\n", opt && !strcmp(opt, "1") ? "performance (experimental)" : "disabled (default)");
 }
 
 static shaderc_shader_kind kind_of(int stage) {
@@ -20,15 +22,16 @@ static shaderc_shader_kind kind_of(int stage) {
 // SPIR-V disk cache: cache/spirv/<hash of stage + source>.spv, so a known shader costs a file read instead of a
 // GLSL compile (the driver's pipeline cache only covers the step after this one).
 static shaderc_optimization_level optimization_level(int stage) {
+    (void)stage;
     const char *e = getenv("LARECOMP_VK_OPT");
-    if (e && !strcmp(e, "0")) return shaderc_optimization_level_zero;
-    // Preserve the established vertex depth invariance; optimize fragment/compute register state machines.
-    if (stage == STAGE_VERTEX && !e) return shaderc_optimization_level_zero;
-    return shaderc_optimization_level_performance;
+    // Restore the original port's mode. Promoting every register of a switch/pc dispatcher to SSA can
+    // multiply the module through large Phi nodes. The driver still compiles/optimizes native GPU code.
+    // The Scarlet startup regression appeared after enabling -O for fragment/compute by default.
+    return e && !strcmp(e, "1") ? shaderc_optimization_level_performance : shaderc_optimization_level_zero;
 }
 
 static uint64_t src_hash(const char *src, int stage) {
-    // Include compiler mode: a previously cached unoptimized module must not bypass the new optimizer.
+    // Include compiler mode: cached performance modules must not bypass the safe default on update.
     uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage ^ ((uint64_t)optimization_level(stage) << 32)) + 4;
     for (const char *p = src; *p; p++) { h ^= (uint8_t)*p; h *= 0x100000001B3ull; }
     return h;
@@ -61,6 +64,35 @@ static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) {
     bool ok = fwrite(spv, 4, nwords, f) == nwords;
     fclose(f);
     if (!ok || rename(tmp, path) != 0) remove(tmp);  // (another thread may have stored it first)
+}
+
+// Keep the actual compiler input/output for a pathological build. A boot log alone cannot establish why
+// a particular guest shader is large. Save source before shaderc too, so the build deadline can interrupt it.
+// These are local diagnostics, not substitutes for a shader; normal small shaders cause no extra disk IO.
+static void shader_diagnostic(uint64_t h, int stage, const char *src, const uint32_t *spv, size_t nwords) {
+    size_t bytes = strlen(src);
+    if (bytes < 65536 && nwords < 32768) return;
+    mkdir("build", 0755);
+    mkdir("build/shader-diagnostics", 0755);
+    char base[128], path[144];
+    snprintf(base, sizeof base, "build/shader-diagnostics/%016llx.%s", (unsigned long long)h,
+        stage == STAGE_VERTEX ? "vert" : stage == STAGE_FRAGMENT ? "frag" : "comp");
+    LOG("[shader-diagnostic] input %s.glsl (%zu bytes), SPIR-V=%zu words\n", base, bytes, nwords);
+    const void *data[] = {src, spv};
+    size_t sizes[] = {bytes, nwords * 4};
+    const char *suffix[] = {"glsl", "spv"};
+    for (int i = 0; i < 2; i++) {
+        if (!data[i]) continue;
+        snprintf(path, sizeof path, "%s.%s", base, suffix[i]);
+        FILE *f = fopen(path, "rb");
+        if (f) { fclose(f); continue; }
+        f = fopen(path, "wb");
+        if (!f) { LOG("[shader-diagnostic] could not write %s\n", path); continue; }
+        bool ok = fwrite(data[i], 1, sizes[i], f) == sizes[i];
+        if (fclose(f)) ok = false;
+        if (!ok) { remove(path); LOG("[shader-diagnostic] incomplete write: %s\n", path); }
+        else LOG("[shader-diagnostic] %s (%zu bytes)\n", path, sizes[i]);
+    }
 }
 
 // Vertex shaders: every float add/sub/mul/div/fma gets NoContraction, so no compiler fuses or splits them. Depth
@@ -119,14 +151,15 @@ static uint32_t *no_contraction(uint32_t *spv, size_t *nwords) {
 
 // SPIR-V words of src, or NULL (error logged with the source). *nwords set on success. Thread-safe: one shaderc
 // compiler per thread (a shared one behind a lock serialised all the pipeline workers).
-// Vertex optimization stays off by default: different depth-prepass/color-pass rewrites broke EQUAL testing.
-// Fragment and compute use the performance optimizer. LARECOMP_VK_OPT=0 disables it; =1 includes vertex shaders.
+// Optimization stays off by default, preserving the original depth invariance and avoiding shaderc's large
+// SSA expansion on register dispatchers. LARECOMP_VK_OPT=1 remains an explicit experimental override.
 uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t *nwords) {
     uint64_t h = src_hash(src, stage);
     static int nocache = -1;
     if (nocache < 0) nocache = getenv("LARECOMP_VK_NO_SPIRV_CACHE") != NULL;
     uint32_t *out = nocache ? NULL : cache_load(h, nwords);
-    if (out) return out;
+    if (out) { shader_diagnostic(h, stage, src, out, *nwords); return out; }
+    shader_diagnostic(h, stage, src, NULL, 0);
     static __thread shaderc_compiler_t comp;
     if (!comp) comp = shaderc_compiler_initialize();
     shaderc_compile_options_t o = shaderc_compile_options_initialize();
@@ -143,6 +176,7 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
         memcpy(out, shaderc_result_get_bytes(r), n);
         *nwords = n / 4;
         if (stage == STAGE_VERTEX) out = no_contraction(out, nwords);
+        shader_diagnostic(h, stage, src, out, *nwords);
         if (!nocache) cache_store(h, out, *nwords);
     }
     shaderc_result_release(r);
