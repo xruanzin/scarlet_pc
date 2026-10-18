@@ -416,6 +416,10 @@ void plat_init(void) {
         .StateMask = 0,
     };
     SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof pt);
+    // This runtime spends most of boot and open-world streaming on lifted guest
+    // CPU work. Keep it above ordinary desktop/background tasks; FastLoad may
+    // still raise it temporarily to HIGH_PRIORITY_CLASS.
+    SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
 }
 
 bool plat_exe_path(char *buf, size_t size) {
