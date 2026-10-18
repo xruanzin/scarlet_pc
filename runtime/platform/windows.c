@@ -24,11 +24,6 @@
 static uint64_t g_lo, g_hi;
 #define COMMIT_CHUNK 0x10000ull
 
-// Windows can track which guest pages the CPU has written. The Vulkan texture
-// cache uses this to avoid hashing multi-megabyte dynamic/linear textures every
-// frame when their backing memory has not changed.
-static bool g_write_watch;
-
 static bool lazy_commit(uint64_t a) {
     if (a < g_lo || a >= g_hi) return false;
     MEMORY_BASIC_INFORMATION mi;
@@ -49,38 +44,12 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
 }
 
 bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
-    void *p = VirtualAlloc((void *)(uintptr_t)lo, hi - lo, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE);
-    if (p == (void *)(uintptr_t)lo) {
-        g_write_watch = true;
-    } else {
-        if (p) VirtualFree(p, 0, MEM_RELEASE);
-        p = VirtualAlloc((void *)(uintptr_t)lo, hi - lo, MEM_RESERVE, PAGE_READWRITE);
-    }
+    void *p = VirtualAlloc((void *)(uintptr_t)lo, hi - lo, MEM_RESERVE, PAGE_READWRITE);
     if (p != (void *)(uintptr_t)lo) return false;
     g_lo = lo;
     g_hi = hi;
     AddVectoredExceptionHandler(1, vectored_handler);
-    fprintf(stderr, "[plat] guest write-watch %s\n", g_write_watch ? "enabled" : "unavailable");
     return true;
-}
-
-int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page_size) {
-    if (!g_write_watch || !size || addr < g_lo || addr - g_lo > g_hi - g_lo ||
-        size > g_hi - addr || !pages || max <= 0 || !page_size)
-        return -1;
-
-    ULONG_PTR n = (ULONG_PTR)max;
-    DWORD granularity = 4096;
-    if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (void *)(uintptr_t)addr, (SIZE_T)size,
-                      (PVOID *)pages, &n, &granularity) != 0)
-        return -1;
-
-    *page_size = granularity;
-    // When the caller's array filled, conservatively treat the whole queried
-    // range as dirty. ResetWriteWatch makes sure a later query starts clean.
-    if (n >= (ULONG_PTR)max)
-        ResetWriteWatch((void *)(uintptr_t)addr, (SIZE_T)size);
-    return (int)n;
 }
 
 // Decommit everything: the range stays reserved, and pages come back zeroed when committed again (lazily).
@@ -185,7 +154,16 @@ void plat_guest_thread_config(int priority, int core) {
     }
 }
 
-// ---- software-keyboard window helpers
+// ---- native text input (nn::swkbd replacement)
+enum { TEXTDLG_EDIT = 4101, TEXTDLG_OK = 4102, TEXTDLG_CANCEL = 4103 };
+
+typedef struct {
+    HWND hwnd, edit, owner;
+    int done, ok, min_chars;
+    char *out;
+    size_t out_cap;
+} TextInputDialog;
+
 typedef struct { HWND hwnd; LONG64 area; } TextOwnerFind;
 
 static BOOL CALLBACK text_owner_enum(HWND w, LPARAM lp) {
@@ -211,74 +189,21 @@ static int utf8_wide(const char *src, wchar_t *dst, int cap) {
     return n;
 }
 
-// ---- Horizon Software Keyboard applet frontend ---------------------------------
-// This is intentionally a separate native window rather than part of the game's
-// Vulkan/ImGui frame. On Horizon, swkbd is a library applet and the application
-// is suspended while it owns the foreground. Keeping the frontend independent
-// preserves that lifetime model and avoids re-entering the AMD Vulkan presenter.
-enum {
-    SWKBD_KEY_BASE = 6000,
-    SWKBD_BACKSPACE = 6400,
-    SWKBD_SPACE,
-    SWKBD_CANCEL,
-    SWKBD_OK,
-};
-
-typedef struct {
-    HWND hwnd, owner, edit, error_label;
-    int done, ok, min_chars, max_chars;
-    char *out;
-    size_t out_cap;
-    HBRUSH dark_brush, panel_brush, edit_brush;
-    HFONT font, title_font, key_font;
-} SwkbdAppletWindow;
-
-static void swkbd_append_char(SwkbdAppletWindow *d, wchar_t ch) {
-    if (!d || !d->edit) return;
-    wchar_t s[2] = {ch, 0};
-    SendMessageW(d->edit, EM_REPLACESEL, TRUE, (LPARAM)s);
-    SetFocus(d->edit);
-}
-
-static LRESULT CALLBACK swkbd_applet_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
-    SwkbdAppletWindow *d = (SwkbdAppletWindow *)GetWindowLongPtrW(h, GWLP_USERDATA);
+static LRESULT CALLBACK textdlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    TextInputDialog *d = (TextInputDialog *)(uintptr_t)GetWindowLongPtrW(h, GWLP_USERDATA);
     if (msg == WM_NCCREATE) {
         CREATESTRUCTW *cs = (CREATESTRUCTW *)lp;
-        d = (SwkbdAppletWindow *)cs->lpCreateParams;
+        d = (TextInputDialog *)cs->lpCreateParams;
         SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)d);
         d->hwnd = h;
     }
     if (!d) return DefWindowProcW(h, msg, wp, lp);
 
     switch (msg) {
-    case WM_COMMAND: {
-        int id = LOWORD(wp);
-        if (id >= SWKBD_KEY_BASE && id < SWKBD_KEY_BASE + 256) {
-            swkbd_append_char(d, (wchar_t)(id - SWKBD_KEY_BASE));
-            return 0;
-        }
-        if (id == SWKBD_SPACE) {
-            swkbd_append_char(d, L' ');
-            return 0;
-        }
-        if (id == SWKBD_BACKSPACE) {
-            SendMessageW(d->edit, WM_CHAR, L'\b', 0);
-            SetFocus(d->edit);
-            return 0;
-        }
-        if (id == SWKBD_CANCEL) {
-            d->ok = 0;
-            d->done = 1;
-            DestroyWindow(h);
-            return 0;
-        }
-        if (id == SWKBD_OK) {
+    case WM_COMMAND:
+        if (LOWORD(wp) == TEXTDLG_OK) {
             int n = GetWindowTextLengthW(d->edit);
             if (n < d->min_chars) {
-                wchar_t msgbuf[128];
-                _snwprintf(msgbuf, 128, L"Enter at least %d character(s).", d->min_chars);
-                msgbuf[127] = 0;
-                SetWindowTextW(d->error_label, msgbuf);
                 MessageBeep(MB_ICONWARNING);
                 SetFocus(d->edit);
                 return 0;
@@ -297,27 +222,13 @@ static LRESULT CALLBACK swkbd_applet_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp
             DestroyWindow(h);
             return 0;
         }
+        if (LOWORD(wp) == TEXTDLG_CANCEL) {
+            d->ok = 0;
+            d->done = 1;
+            DestroyWindow(h);
+            return 0;
+        }
         break;
-    }
-    case WM_CTLCOLORSTATIC: {
-        HDC dc = (HDC)wp;
-        HWND child = (HWND)lp;
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, child == d->error_label ? RGB(205, 45, 45) : RGB(28, 30, 34));
-        return (LRESULT)d->panel_brush;
-    }
-    case WM_CTLCOLOREDIT: {
-        HDC dc = (HDC)wp;
-        SetBkColor(dc, RGB(255, 255, 255));
-        SetTextColor(dc, RGB(20, 22, 26));
-        return (LRESULT)d->edit_brush;
-    }
-    case WM_ERASEBKGND: {
-        RECT r;
-        GetClientRect(h, &r);
-        FillRect((HDC)wp, &r, d->dark_brush);
-        return 1;
-    }
     case WM_CLOSE:
         d->ok = 0;
         d->done = 1;
@@ -330,20 +241,18 @@ static LRESULT CALLBACK swkbd_applet_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp
     return DefWindowProcW(h, msg, wp, lp);
 }
 
-int plat_swkbd_applet_show(const char *title, const char *subtitle, const char *guide,
-                           const char *initial, const char *error,
-                           int min_chars, int max_chars, char *out, size_t out_cap) {
+int plat_text_input_dialog(const char *title, const char *subtitle, const char *guide,
+                           const char *initial, int min_chars, int max_chars,
+                           char *out, size_t out_cap) {
     static ATOM atom;
-    static HBRUSH class_brush;
     if (!atom) {
-        class_brush = CreateSolidBrush(RGB(9, 20, 35));
         WNDCLASSEXW wc = {0};
         wc.cbSize = sizeof wc;
-        wc.lpfnWndProc = swkbd_applet_proc;
+        wc.lpfnWndProc = textdlg_proc;
         wc.hInstance = GetModuleHandleW(NULL);
-        wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
-        wc.hbrBackground = class_brush;
-        wc.lpszClassName = L"ScarletHorizonSoftwareKeyboard";
+        wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32513));
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = L"ScarletNativeTextInput";
         atom = RegisterClassExW(&wc);
         if (!atom && GetLastError() == ERROR_CLASS_ALREADY_EXISTS) atom = 1;
     }
@@ -352,116 +261,51 @@ int plat_swkbd_applet_show(const char *title, const char *subtitle, const char *
     TextOwnerFind find = {0};
     EnumWindows(text_owner_enum, (LPARAM)&find);
 
-    RECT base = {0};
-    if (!find.hwnd || !GetWindowRect(find.hwnd, &base)) {
-        int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-        base.left = (sw - 1280) / 2; base.top = (sh - 720) / 2;
-        base.right = base.left + 1280; base.bottom = base.top + 720;
-    }
-    int ww = base.right - base.left, wh = base.bottom - base.top;
-    if (ww < 900) ww = 900;
-    if (wh < 600) wh = 600;
-
-    wchar_t wtitle[320], wsub[640], wguide[1024], winitial[1024], werror[1024];
-    utf8_wide(title && *title ? title : "Enter text", wtitle, 320);
-    utf8_wide(subtitle, wsub, 640);
-    utf8_wide(guide, wguide, 1024);
+    wchar_t wtitle[256], wsub[512], wguide[768], winitial[1024], body[1280];
+    utf8_wide(title && *title ? title : "Inserir texto", wtitle, 256);
+    utf8_wide(subtitle, wsub, 512);
+    utf8_wide(guide, wguide, 768);
     utf8_wide(initial, winitial, 1024);
-    utf8_wide(error, werror, 1024);
+    if (wsub[0] && wguide[0]) _snwprintf(body, 1280, L"%ls\n%ls", wsub, wguide);
+    else _snwprintf(body, 1280, L"%ls", wsub[0] ? wsub : wguide);
+    body[1279] = 0;
 
-    SwkbdAppletWindow d = {0};
+    const int ww = 580, wh = 245;
+    RECT base = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+    if (find.hwnd) GetWindowRect(find.hwnd, &base);
+    int x = base.left + ((base.right - base.left) - ww) / 2;
+    int y = base.top + ((base.bottom - base.top) - wh) / 2;
+
+    TextInputDialog d = {0};
     d.owner = find.hwnd;
     d.min_chars = min_chars > 0 ? min_chars : 0;
-    d.max_chars = max_chars > 0 ? max_chars : 500;
     d.out = out;
     d.out_cap = out_cap;
-    d.dark_brush = CreateSolidBrush(RGB(7, 18, 32));
-    d.panel_brush = CreateSolidBrush(RGB(239, 240, 243));
-    d.edit_brush = CreateSolidBrush(RGB(255, 255, 255));
-    d.font = CreateFontW(-20, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    d.title_font = CreateFontW(-30, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-                               OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                               DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    d.key_font = CreateFontW(-18, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    if (out && out_cap) out[0] = 0;
 
-    HWND h = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-                             L"ScarletHorizonSoftwareKeyboard", L"",
-                             WS_POPUP,
-                             base.left, base.top, ww, wh, find.hwnd, NULL,
-                             GetModuleHandleW(NULL), &d);
-    if (!h) goto cleanup;
+    HWND h = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST | WS_EX_CONTROLPARENT,
+                             L"ScarletNativeTextInput", wtitle,
+                             WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                             x, y, ww, wh, find.hwnd, NULL, GetModuleHandleW(NULL), &d);
+    if (!h) return 0;
 
-    int panel_w = ww * 78 / 100;
-    if (panel_w > 1120) panel_w = 1120;
-    int panel_h = wh * 68 / 100;
-    if (panel_h > 540) panel_h = 540;
-    int px = (ww - panel_w) / 2;
-    int py = (wh - panel_h) / 2;
-
-    HWND panel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_WHITERECT,
-                                 px, py, panel_w, panel_h, h, NULL, GetModuleHandleW(NULL), NULL);
-    (void)panel;
-
-    HWND title_w = CreateWindowExW(0, L"STATIC", wtitle, WS_CHILD | WS_VISIBLE,
-                                   px + 24, py + 18, panel_w - 48, 42, h, NULL, GetModuleHandleW(NULL), NULL);
-    HWND sub_w = CreateWindowExW(0, L"STATIC", wsub, WS_CHILD | WS_VISIBLE,
-                                 px + 24, py + 61, panel_w - 48, 26, h, NULL, GetModuleHandleW(NULL), NULL);
-    HWND guide_w = CreateWindowExW(0, L"STATIC", wguide, WS_CHILD | WS_VISIBLE,
-                                   px + 24, py + 88, panel_w - 48, 25, h, NULL, GetModuleHandleW(NULL), NULL);
-    d.error_label = CreateWindowExW(0, L"STATIC", werror, WS_CHILD | WS_VISIBLE,
-                                    px + 24, py + 115, panel_w - 48, 25, h, NULL, GetModuleHandleW(NULL), NULL);
+    HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HWND label = CreateWindowExW(0, L"STATIC", body, WS_CHILD | WS_VISIBLE,
+                                 22, 18, 520, 58, h, NULL, GetModuleHandleW(NULL), NULL);
     d.edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", winitial,
                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                             px + 24, py + 145, panel_w - 48, 38, h, NULL, GetModuleHandleW(NULL), NULL);
-    SendMessageW(d.edit, EM_SETLIMITTEXT, (WPARAM)d.max_chars, 0);
-
-    SendMessageW(title_w, WM_SETFONT, (WPARAM)d.title_font, TRUE);
-    SendMessageW(sub_w, WM_SETFONT, (WPARAM)d.font, TRUE);
-    SendMessageW(guide_w, WM_SETFONT, (WPARAM)d.font, TRUE);
-    SendMessageW(d.error_label, WM_SETFONT, (WPARAM)d.font, TRUE);
-    SendMessageW(d.edit, WM_SETFONT, (WPARAM)d.title_font, TRUE);
-
-    static const wchar_t *rows[] = {L"QWERTYUIOP", L"ASDFGHJKL", L"ZXCVBNM", L"1234567890"};
-    int y = py + 202;
-    for (int r = 0; r < 4; r++, y += 50) {
-        int n = (int)wcslen(rows[r]);
-        int kw = 48, gap = 7;
-        int row_w = n * kw + (n - 1) * gap;
-        int x = px + (panel_w - row_w) / 2;
-        for (int i = 0; i < n; i++, x += kw + gap) {
-            wchar_t label[2] = {rows[r][i], 0};
-            wchar_t insert_ch = rows[r][i];
-            if (insert_ch >= L'A' && insert_ch <= L'Z') insert_ch = insert_ch - L'A' + L'a';
-            HWND b = CreateWindowExW(0, L"BUTTON", label,
-                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                     x, y, kw, 40, h,
-                                     (HMENU)(INT_PTR)(SWKBD_KEY_BASE + (int)insert_ch),
-                                     GetModuleHandleW(NULL), NULL);
-            SendMessageW(b, WM_SETFONT, (WPARAM)d.key_font, TRUE);
-        }
-    }
-
-    int by = py + panel_h - 58;
-    HWND back = CreateWindowExW(0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                px + 24, by, 118, 38, h, (HMENU)(INT_PTR)SWKBD_BACKSPACE,
-                                GetModuleHandleW(NULL), NULL);
-    HWND space = CreateWindowExW(0, L"BUTTON", L"Space", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                 px + 152, by, 220, 38, h, (HMENU)(INT_PTR)SWKBD_SPACE,
-                                 GetModuleHandleW(NULL), NULL);
-    HWND cancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                  px + panel_w - 272, by, 112, 38, h, (HMENU)(INT_PTR)SWKBD_CANCEL,
-                                  GetModuleHandleW(NULL), NULL);
-    HWND ok = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                              px + panel_w - 150, by, 126, 38, h, (HMENU)(INT_PTR)SWKBD_OK,
-                              GetModuleHandleW(NULL), NULL);
-    SendMessageW(back, WM_SETFONT, (WPARAM)d.key_font, TRUE);
-    SendMessageW(space, WM_SETFONT, (WPARAM)d.key_font, TRUE);
-    SendMessageW(cancel, WM_SETFONT, (WPARAM)d.key_font, TRUE);
-    SendMessageW(ok, WM_SETFONT, (WPARAM)d.key_font, TRUE);
+                             22, 83, 520, 32, h, (HMENU)(INT_PTR)TEXTDLG_EDIT, GetModuleHandleW(NULL), NULL);
+    HWND ok = CreateWindowExW(0, L"BUTTON", L"OK",
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                              330, 145, 100, 34, h, (HMENU)(INT_PTR)TEXTDLG_OK, GetModuleHandleW(NULL), NULL);
+    HWND cancel = CreateWindowExW(0, L"BUTTON", L"Cancelar",
+                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                  442, 145, 100, 34, h, (HMENU)(INT_PTR)TEXTDLG_CANCEL, GetModuleHandleW(NULL), NULL);
+    SendMessageW(label, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(d.edit, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(ok, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(cancel, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(d.edit, EM_SETLIMITTEXT, (WPARAM)(max_chars > 0 ? max_chars : 500), 0);
 
     if (find.hwnd) EnableWindow(find.hwnd, FALSE);
     ShowWindow(h, SW_SHOW);
@@ -473,8 +317,8 @@ int plat_swkbd_applet_show(const char *title, const char *subtitle, const char *
     MSG msg;
     while (!d.done && GetMessageW(&msg, NULL, 0, 0) > 0) {
         if (msg.message == WM_KEYDOWN && msg.hwnd == d.edit) {
-            if (msg.wParam == VK_RETURN) { SendMessageW(h, WM_COMMAND, SWKBD_OK, 0); continue; }
-            if (msg.wParam == VK_ESCAPE) { SendMessageW(h, WM_COMMAND, SWKBD_CANCEL, 0); continue; }
+            if (msg.wParam == VK_RETURN) { SendMessageW(h, WM_COMMAND, TEXTDLG_OK, 0); continue; }
+            if (msg.wParam == VK_ESCAPE) { SendMessageW(h, WM_COMMAND, TEXTDLG_CANCEL, 0); continue; }
         }
         if (!IsDialogMessageW(h, &msg)) {
             TranslateMessage(&msg);
@@ -486,14 +330,6 @@ int plat_swkbd_applet_show(const char *title, const char *subtitle, const char *
         EnableWindow(find.hwnd, TRUE);
         SetForegroundWindow(find.hwnd);
     }
-
-cleanup:
-    if (d.font) DeleteObject(d.font);
-    if (d.title_font) DeleteObject(d.title_font);
-    if (d.key_font) DeleteObject(d.key_font);
-    if (d.dark_brush) DeleteObject(d.dark_brush);
-    if (d.panel_brush) DeleteObject(d.panel_brush);
-    if (d.edit_brush) DeleteObject(d.edit_brush);
     return d.ok;
 }
 
