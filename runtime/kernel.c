@@ -185,6 +185,9 @@ static void *thread_main(void *arg) {
     KThread *t = arg;
     t_cur = t;
     crash_handler_install();
+#ifdef _WIN32
+    plat_guest_thread_config(t->prio, t->core);
+#endif
     rt_set_fpcr(0);
     if (!setjmp(t->unwind)) guest_call(&t->cpu, t->entry);
     pthread_mutex_lock(&g_klock);
@@ -709,7 +712,13 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     }
     case 0x0D: {  // SetThreadPriority
         KObject *o = handle_get((uint32_t)x[0]);
-        if (o) ((KThread *)o)->prio = (int)x[1];
+        if (o && o->type == KOBJ_THREAD) {
+            KThread *t = (KThread *)o;
+            t->prio = (int)x[1];
+#ifdef _WIN32
+            if (t == t_cur) plat_guest_thread_config(t->prio, t->core);
+#endif
+        }
         x[0] = o ? R_OK : R_INVALID_HANDLE;
         break;
     }
@@ -740,6 +749,9 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
             }
             if (ideal >= 0) t->core = ideal;
         }
+#ifdef _WIN32
+        if (t == t_cur) plat_guest_thread_config(t->prio, t->core);
+#endif
         static unsigned nlog;
         if (nlog++ < 32)
             LOG("[kernel] SetThreadCoreMask h=%llx ideal=%lld mask=%#llx -> core %d\n",
