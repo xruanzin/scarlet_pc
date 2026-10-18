@@ -49,6 +49,13 @@ void plat_guest_thread_config(int priority, int core);
 int plat_text_input_dialog(const char *title, const char *subtitle, const char *guide,
                            const char *initial, int min_chars, int max_chars,
                            char *out, size_t out_cap);
+// Independent frontend for Horizon's Software Keyboard library applet.
+// Unlike the old debug/name overlay, this owns its own native window/message
+// loop and stays responsive while the application is suspended in ShowKeyboard.
+// Returns 1=entered, 0=cancel.
+int plat_swkbd_applet_show(const char *title, const char *subtitle, const char *guide,
+                           const char *initial, const char *error,
+                           int min_chars, int max_chars, char *out, size_t out_cap);
 #endif
 
 // ---- process
