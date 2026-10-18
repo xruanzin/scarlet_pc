@@ -699,6 +699,14 @@ static void present_pace(int interval) {
 static int g_last_interval;
 int rt_present_interval(void) { return g_last_interval; }
 NVN(nvnQueuePresentTexture) {
+    static bool first_present;
+    if (!first_present) {
+        first_present = true;
+        extern uint64_t g_boot_started_ns;
+        uint64_t now = plat_now_ns();
+        LOG("[boot-time] first present after %.3f s\n",
+            g_boot_started_ns ? (double)(now - g_boot_started_ns) / 1e9 : 0.0);
+    }
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
     {   // LARECOMP_POKE32="<guest addr>=<value>[;...]": 32-bit values written to the game's memory before every present
