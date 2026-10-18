@@ -501,12 +501,22 @@ static NvnTexture *g_last_presented;
 const float *vk_shot_crop(void) { return g_shot_crop; }
 
 void backend_present(NvnTexture *t);
+static atomic_bool g_represent_requested;
+static pthread_mutex_t g_present_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// letsgo-recomp re-presents the last image while ShowKeyboard blocks. Scarlet
+// normally presents from guest/render execution, so never call Vulkan directly
+// from the keyboard's guest thread: ask the UI thread to do the re-present.
 void backend_represent(void) {
+    atomic_store(&g_represent_requested, true);
+}
+
+static void backend_represent_now(void) {
     if (g_last_presented) backend_present(g_last_presented);
-    else SDL_Delay(16);
 }
 
 void backend_present(NvnTexture *t) {
+    pthread_mutex_lock(&g_present_lock);
     g_last_presented = t;
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
@@ -689,6 +699,7 @@ void backend_present(NvnTexture *t) {
         frames = 0;
         last_fps_time = now;
     }
+    pthread_mutex_unlock(&g_present_lock);
 }
 
 // ================================================================== UI thread
@@ -836,6 +847,7 @@ int ui_run(void) {
             input_handle_event(&e);
         }
         menu_apply_window_requests(window);
+        if (atomic_exchange(&g_represent_requested, false)) backend_represent_now();
         title_fps_update();
     }
 }
