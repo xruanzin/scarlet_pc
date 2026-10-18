@@ -19,6 +19,10 @@
 
 const char *g_save_dir = "save";
 static int romfs_fd = -1;
+#ifdef _WIN32
+static const uint8_t *romfs_map;
+static uint64_t romfs_map_size;
+#endif
 
 static bool romfs_legacy_layout(int fd) {
     uint64_t h[10] = {0};
@@ -70,6 +74,11 @@ RT_ON_RESET(fs_reset) {
     ov_meta = NULL, ov_meta_off = ov_meta_size = ov_end = 0;
     npatches = 0;
     rom_files = NULL, rom_nfiles = 0, rom_data_off = 0;
+#ifdef _WIN32
+    if (romfs_map) plat_unmap_file(romfs_map);
+    romfs_map = NULL;
+    romfs_map_size = 0;
+#endif
     if (romfs_fd >= 0) close(romfs_fd);
     romfs_fd = -1;
     g_save_dir = "save";
@@ -354,9 +363,19 @@ static void rom_index(int fd) {
     LOG("[fs] romfs index: %d files\n", rom_nfiles);
 }
 
+static ssize_t romfs_base_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
+#ifdef _WIN32
+    if (romfs_map && off <= romfs_map_size && size <= romfs_map_size - off) {
+        memcpy(dst, romfs_map + off, (size_t)size);
+        return (ssize_t)size;
+    }
+#endif
+    return pread(fd, dst, size, (off_t)off);
+}
+
 // Virtual RomFS image read: original bytes, with the patched file table and appended replacement files.
 static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
-    if (!ov_n) return pread(fd, dst, size, (off_t)off);
+    if (!ov_n) return romfs_base_read(fd, dst, size, off);
     uint64_t done = 0;
     while (done < size) {
         uint64_t o = off + done, n = size - done;
@@ -378,7 +397,7 @@ static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);
         } else {
             if (o + n > ov[0].start) n = ov[0].start - o;
-            ssize_t r = pread(fd, dst + done, n, (off_t)o);
+            ssize_t r = romfs_base_read(fd, dst + done, n, o);
             if (r < 0) r = 0;
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);
             // overlay the patched tables (file meta, and with added files: header, dir meta, file hash)
@@ -514,6 +533,16 @@ static Service *open_romfs_storage(void) {
         }
         if (!romfs_validate_and_log(romfs_fd))
             FATAL("RomFS structural validation failed: %s\n", path);
+#ifdef _WIN32
+        if (!romfs_map) {
+            romfs_map = plat_map_file_ro(romfs_fd, &romfs_map_size);
+            if (romfs_map)
+                LOG("[fs] romfs.bin memory-mapped: %llu MiB virtual, demand-paged\n",
+                    (unsigned long long)(romfs_map_size >> 20));
+            else
+                LOG("[fs] romfs.bin memory map unavailable; using positional reads\n");
+        }
+#endif
         rom_index(romfs_fd);
     }
     Storage *st = calloc(1, sizeof *st);
@@ -532,6 +561,9 @@ bool romfs_image_file(const char *path, int *fd, uint64_t *off, uint64_t *size) 
         char img[1024];
         snprintf(img, sizeof img, "%s.bin", g_romfs_dir);
         if ((romfs_fd = open(img, O_RDONLY)) < 0) return false;
+#ifdef _WIN32
+        if (!romfs_map) romfs_map = plat_map_file_ro(romfs_fd, &romfs_map_size);
+#endif
         rom_index(romfs_fd);
     }
     for (int i = 0; i < rom_nfiles; i++)
