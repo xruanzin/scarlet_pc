@@ -603,7 +603,8 @@ static struct {
     uint32_t stream[16][2];
     int nstream;
     Range vbuf[16], ubuf[6][18], sbuf[6][16], tfbuf[4];
-    bool tf_active;
+    bool tf_active, tf_vk_active, tf_resume;
+    uint64_t tf_counter;
     uint64_t tex[6][32], img[6][8];
     NvnDescPool *tpool, *spool;
     float viewport[16][4];
@@ -2538,6 +2539,25 @@ static void draw_(CmdRec *r, bool indexed) {
     begin_pass();
     VkCommandBuffer cb = vk_cmd();
 
+    if (st.tf_active && g_vk.transform_feedback && !st.tf_vk_active) {
+        VkBuffer bufs[4], counter = VK_NULL_HANDLE;
+        VkDeviceSize offs[4], sizes[4], coff = 0;
+        uint32_t nbuf = 0, ncounter = 0;
+        for (uint32_t i = 0; i < 4; i++) {
+            if (!st.tfbuf[i].addr || !st.tfbuf[i].size) continue;
+            VkBuffer b; VkDeviceSize o;
+            if (i != nbuf || !guest_direct(st.tfbuf[i].addr, st.tfbuf[i].size, &b, &o)) break;
+            bufs[nbuf] = b; offs[nbuf] = o; sizes[nbuf] = st.tfbuf[i].size; nbuf++;
+        }
+        if (nbuf) {
+            vkCmdBindTransformFeedbackBuffersEXT(cb, 0, nbuf, bufs, offs, sizes);
+            if (st.tf_resume && st.tf_counter &&
+                guest_direct(st.tf_counter, 4, &counter, &coff)) ncounter = 1;
+            vkCmdBeginTransformFeedbackEXT(cb, 0, ncounter, ncounter ? &counter : NULL, ncounter ? &coff : NULL);
+            st.tf_vk_active = true;
+        }
+    }
+
     uint32_t mode = (uint32_t)r->x[0];
     VkPrimitiveTopology topo;
     uint8_t cls;
@@ -3549,38 +3569,32 @@ static void exec_list(uint64_t handle, int depth) {
                 memcpy(&st.tfbuf[r->x[0] + i], (uint8_t *)x + i * 16, 16);
             break;
         case CMD_BEGIN_TRANSFORM_FEEDBACK:
-        case CMD_RESUME_TRANSFORM_FEEDBACK: {
-            if (!g_vk.transform_feedback) break;
-            vk_end_pass();
-            VkCommandBuffer cb = vk_cmd();
-            VkBuffer bufs[4], counter = VK_NULL_HANDLE;
-            VkDeviceSize offs[4], sizes[4], coff = 0;
-            uint32_t nbuf = 0, ncounter = 0;
-            for (uint32_t i = 0; i < 4; i++) {
-                if (!st.tfbuf[i].addr || !st.tfbuf[i].size) continue;
-                VkBuffer b; VkDeviceSize o;
-                if (i != nbuf || !guest_direct(st.tfbuf[i].addr, st.tfbuf[i].size, &b, &o)) break;
-                bufs[nbuf] = b; offs[nbuf] = o; sizes[nbuf] = st.tfbuf[i].size; nbuf++;
+        case CMD_RESUME_TRANSFORM_FEEDBACK:
+            if (g_vk.transform_feedback) {
+                st.tf_active = true;
+                st.tf_vk_active = false;
+                st.tf_resume = r->op == CMD_RESUME_TRANSFORM_FEEDBACK;
+                st.tf_counter = r->x[0];
             }
-            if (nbuf) vkCmdBindTransformFeedbackBuffersEXT(cb, 0, nbuf, bufs, offs, sizes);
-            if (r->op == CMD_RESUME_TRANSFORM_FEEDBACK && r->x[0] &&
-                guest_direct(r->x[0], 4, &counter, &coff)) ncounter = 1;
-            vkCmdBeginTransformFeedbackEXT(cb, 0, ncounter, ncounter ? &counter : NULL, ncounter ? &coff : NULL);
-            st.tf_active = true;
             break;
-        }
         case CMD_END_TRANSFORM_FEEDBACK:
         case CMD_PAUSE_TRANSFORM_FEEDBACK: {
             if (!g_vk.transform_feedback || !st.tf_active) break;
-            vk_end_pass();
-            VkCommandBuffer cb = vk_cmd();
-            VkBuffer counter = VK_NULL_HANDLE;
-            VkDeviceSize coff = 0;
-            uint32_t ncounter = 0;
-            if (r->x[0] && guest_direct(r->x[0], 4, &counter, &coff)) ncounter = 1;
-            vkCmdEndTransformFeedbackEXT(cb, 0, ncounter, ncounter ? &counter : NULL, ncounter ? &coff : NULL);
-            vk_full_barrier(cb);
+            if (st.tf_vk_active) {
+                // EXT_transform_feedback requires Begin/End inside the same rendering instance.
+                VkCommandBuffer cb = vk_cmd();
+                VkBuffer counter = VK_NULL_HANDLE;
+                VkDeviceSize coff = 0;
+                uint32_t ncounter = 0;
+                if (r->x[0] && guest_direct(r->x[0], 4, &counter, &coff)) ncounter = 1;
+                vkCmdEndTransformFeedbackEXT(cb, 0, ncounter, ncounter ? &counter : NULL, ncounter ? &coff : NULL);
+                st.tf_vk_active = false;
+                vk_end_pass();
+                vk_full_barrier(vk_cmd());
+            }
             st.tf_active = false;
+            st.tf_resume = false;
+            st.tf_counter = 0;
             break;
         }
         case CMD_BIND_STORAGE_BUFFERS:
