@@ -805,6 +805,28 @@ const char *renderer_stats(void) {
         size_t n = strlen(stats_text);
         snprintf(stats_text + n, sizeof stats_text - n, ", a2c1x %llu", (unsigned long long)stat_a2c_1x);
     }
+    {
+        uint32_t top_line[5] = {0}, top_count[5] = {0};
+        for (uint32_t l = 1; l < 4096; l++) {
+            uint32_t c = stat_pass_end_line[l];
+            if (!c) continue;
+            for (int k = 0; k < 5; k++) if (c > top_count[k]) {
+                for (int j = 4; j > k; j--) { top_count[j] = top_count[j - 1]; top_line[j] = top_line[j - 1]; }
+                top_count[k] = c; top_line[k] = l; break;
+            }
+        }
+        if (top_count[0]) {
+            size_t n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, " [pass-end");
+            for (int k = 0; k < 5 && top_count[k]; k++) {
+                n = strlen(stats_text);
+                snprintf(stats_text + n, sizeof stats_text - n, " %u:%u", top_line[k], top_count[k]);
+            }
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, "]");
+        }
+        memset(stat_pass_end_line, 0, sizeof stat_pass_end_line);
+    }
     stat_feedback_copies = stat_upload_bytes = stat_shader_wait_ns = 0;
     if (g_exp_count[0] | g_exp_count[1] | g_exp_count[2] | g_exp_count[3]) {
         LOG("[exp] skin identity %llu, ubo direct %llu, ubo copied %llu, one-bone shaders %llu\n",
@@ -896,12 +918,18 @@ static uint32_t tex_wh[2][64][2];
 static VkFormat pass_color[8], pass_depth, pass_stencil;
 static uint32_t pass_ncolor, pass_samples = 1, pass_w, pass_h;
 static int debug_pass_no;
+// Lightweight always-on pass-break attribution. Scarlet currently creates
+// hundreds of rendering instances per frame; keeping just the source line that
+// ended each pass lets us remove the dominant break without the much heavier
+// LARECOMP_VK_PROF timestamp instrumentation.
+static uint32_t stat_pass_end_line[4096];
 
 static void vk_end_pass_at(int line);
 void vk_end_pass(void) { vk_end_pass_at(0); }
 #define vk_end_pass() vk_end_pass_at(__LINE__)
 static void vk_end_pass_at(int line) {
     if (!in_pass) return;
+    if (line > 0 && line < 4096) stat_pass_end_line[line]++;
     if (prof && line < 4096) prof_end_line[line]++;
     vkCmdEndRendering(vk_cmd());
     in_pass = false;
