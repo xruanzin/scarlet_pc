@@ -1457,6 +1457,22 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (right) sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) >> (%s & 31u)))", hi, R(a), sh);
         else sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) << (%s & 31u)) >> 32)", hi, R(a), sh);
         set_reg(c, d, t);
+    } else if (OPM(0xea00000000000000ull, 0xff80000000000000ull)) {  // SUATOM: surface atomic, returns old value
+        // Citron decodes this family as storage-image atomics. Until the Vulkan
+        // path exposes bindless storage images, preserve control/data flow by
+        // returning a deterministic zero old-value instead of rejecting the
+        // complete shader.
+        int dst = (int)bits(w, 0, 8);
+        if (dst != RZ) set_reg(c, dst, "0u");
+        c->info->surface_fallbacks++;
+        sp(&c->body, "    /* SUATOM storage-image atomic fallback */\n");
+    } else if (OPM(0xea80000000000000ull, 0xff80000000000000ull)) {  // SUATOM.CAS
+        // CAS has two source operands and returns the previous image value.
+        // Same compatibility rule as SUATOM while native storage-image CAS is pending.
+        int dst = (int)bits(w, 0, 8);
+        if (dst != RZ) set_reg(c, dst, "0u");
+        c->info->surface_fallbacks++;
+        sp(&c->body, "    /* SUATOM.CAS storage-image fallback */\n");
     } else if (OPM(0xeb00000000000000ull, 0xffe0000000000000ull)) {  // SULD: surface/image load
         // Scarlet uses Maxwell surface operations in material/compute shaders. The
         // Vulkan backend does not yet expose bindless storage images to translated
