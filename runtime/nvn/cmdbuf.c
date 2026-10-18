@@ -12,7 +12,7 @@
 // Expanded host records must not consume the game's real NVN command-memory
 // budget. Every recording gets a tiny opaque handle in guest memory and the
 // actual CmdRec stream lives in host segments chained from that handle.
-#define HOSTSEG_SIZE (64u << 10)
+#define HOSTSEG_SIZE (256u << 10)
 #define HOSTSEG_CAP  (256u << 20)
 typedef struct {
     uint8_t *mem;
@@ -97,8 +97,9 @@ NVN(nvnCommandBufferAddCommandMemory) {
 
     if (mem && size) {
         // Reusing guest command memory makes every host segment hanging from
-        // that range dead as well. This follows NVN command-handle lifetime.
-        hostseg_release_range(mem, mem + size);
+        // that range dead as well. Do not reclaim while a recording is still
+        // being built; that recording may itself be backed by one of them.
+        if (!cb->recording) hostseg_release_range(mem, mem + size);
         cb->guest_mem = mem;
         cb->guest_size = size;
         cb->used = 0;
@@ -224,6 +225,10 @@ NVN(nvnCommandBufferBeginRecording) {
         // No guest slot is available. A command handle is opaque, so a host
         // address is a safe fallback; this avoids recursively entering the
         // game's out-of-memory callback because of host-only representation cost.
+        // Make the remaining guest bytes unavailable to subsequent
+        // recordings so GetCommandMemoryFree reports zero and the engine can
+        // supply its next ring chunk.
+        if (cb->guest_mem) cb->used = cb->guest_size;
         uint64_t host = hostseg_take(cb);
         cb->start = host;
         cb->mem = host;
