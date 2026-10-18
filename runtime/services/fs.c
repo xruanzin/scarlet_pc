@@ -10,6 +10,7 @@
 #include "../hle.h"
 #include "../mods.h"
 #include "../ipc.h"
+#include "../romfs_build.h"
 
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
 #define FS_PATH_EXISTS MAKE_RESULT(2, 2)
@@ -18,6 +19,18 @@
 
 const char *g_save_dir = "save";
 static int romfs_fd = -1;
+
+static void romfs_build_progress(uint64_t done, uint64_t total) {
+    static int last = -5;
+    int pct = total ? (int)((done * 100) / total) : 100;
+    if (pct >= last + 5 || pct == 100) {
+        last = pct;
+        LOG("[fs] building romfs.bin: %d%% (%llu / %llu MiB)\n",
+            pct,
+            (unsigned long long)(done >> 20),
+            (unsigned long long)(total >> 20));
+    }
+}
 
 // ------------------------------------------------------------------ RomFS file index (offset -> path)
 typedef struct { uint64_t start, size; char *path; int fd; const uint8_t *mem; } Overlay;
@@ -372,9 +385,23 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
 static Service *open_romfs_storage(void) {
     if (romfs_fd < 0) {
         char path[1024];
-        snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // extracted/romfs.bin
+        snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // sibling of extracted romfs/ directory
         romfs_fd = open(path, O_RDONLY);
-        if (romfs_fd < 0) FATAL("cannot open %s (set up the game files on the start screen)\n", path);
+        if (romfs_fd < 0) {
+            struct stat sb;
+            if (stat(g_romfs_dir, &sb) != 0 || !S_ISDIR(sb.st_mode))
+                FATAL("cannot open %s and extracted RomFS directory is missing: %s\n", path, g_romfs_dir);
+
+            LOG("[fs] %s not found; building it automatically from %s\n", path, g_romfs_dir);
+            LOG("[fs] this is a one-time step; later boots reuse the image\n");
+            char why[512] = {0};
+            if (!romfs_build(g_romfs_dir, path, romfs_build_progress, why, sizeof why))
+                FATAL("failed to build %s from %s: %s\n", path, g_romfs_dir, why[0] ? why : "unknown error");
+
+            romfs_fd = open(path, O_RDONLY);
+            if (romfs_fd < 0) FATAL("built %s but cannot reopen it: %s\n", path, strerror(errno));
+            LOG("[fs] romfs.bin ready: %s\n", path);
+        }
         rom_index(romfs_fd);
     }
     Storage *st = calloc(1, sizeof *st);
