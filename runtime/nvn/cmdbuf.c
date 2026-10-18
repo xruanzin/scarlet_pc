@@ -31,8 +31,15 @@ static void hostseg_release_range(uint64_t lo, uint64_t hi) {
     for (int i = 0; i < g_nhostseg; i++) {
         HostSeg *s = &g_hostseg[i];
         if (!s->busy || s->origin_hi <= lo || s->origin_lo >= hi) continue;
-        if (s->refs) s->pending_release = true;
-        else {
+        if (s->refs) {
+            s->pending_release = true;
+            static uint64_t deferred;
+            uint64_t n = ++deferred;
+            if (n <= 16 || !(n & 255))
+                LOG("[nvn] deferred host command recycle #%llu: refs=%u origin=%llx..%llx\n",
+                    (unsigned long long)n, s->refs,
+                    (unsigned long long)s->origin_lo, (unsigned long long)s->origin_hi);
+        } else {
             s->busy = false;
             s->pending_release = false;
             s->origin_lo = s->origin_hi = 0;
