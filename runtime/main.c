@@ -13,47 +13,6 @@
 
 const char *g_romfs_dir;
 
-/*
- * Scarlet fast-boot guard for an SDK path-lookup failure seen after RomFS
- * metadata is mounted. The SDK's indirect strncmp call occasionally arrives
- * with a null-derived pointer (0x10). Normal strncmp calls still compare real
- * guest strings; only obviously non-guest pointers are rejected as mismatch.
- *
- * This is deliberately an address/symbol override rather than a generated-code
- * replacement, so removing it later does not require regenerating the SDK.
- */
-static void scarlet_strncmp_guard(Cpu *c) {
-    uint64_t a = c->x[0], b = c->x[1], n = c->x[2], lr = c->x[30];
-    if (!n) {
-        c->x[0] = 0;
-        return;
-    }
-
-    bool a_ok = a >= GUEST_LO && a < GUEST_HI;
-    bool b_ok = b >= GUEST_LO && b < GUEST_HI;
-    if (!a_ok || !b_ok) {
-        LOG("[boot-guard] strncmp invalid a=%#llx b=%#llx n=%#llx lr=%#llx -> mismatch\n",
-            (unsigned long long)a, (unsigned long long)b,
-            (unsigned long long)n, (unsigned long long)lr);
-        c->x[0] = 1;
-        return;
-    }
-
-    int r = strncmp((const char *)(uintptr_t)a, (const char *)(uintptr_t)b, (size_t)n);
-    c->x[0] = (uint32_t)r;
-}
-
-static void install_scarlet_boot_guards(void) {
-    static bool installed;
-    if (installed) return;
-    uint64_t a = loader_find_symbol("strncmp");
-    if (a) {
-        hle_override(a, scarlet_strncmp_guard, "<scarlet_strncmp_guard>");
-        LOG("[boot] strncmp fast-boot guard at %#llx\n", (unsigned long long)a);
-    }
-    installed = true;
-}
-
 // rtld normally passes these to nn::init::Start: run every module's init/fini arrays.
 static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
     for (uint64_t i = 0; i < size / 8; i++) {
@@ -62,20 +21,72 @@ static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
     }
 }
 
-// nn::init::Start calls x2 right after nnosInitialize and x3 after nninitStartup, just before
-// nnMain: SDK constructors run early, the game's run once nninitStartup has set up its heap.
-// rtld runs a module's DT_INIT, which registers it (and its TLS template) with musl via
-// __nnmusl_init_dso and then runs its init_array; fall back to the array if there is no DT_INIT.
-static void module_init(Cpu *c, Module *m) {
-    LOG("init %s (DT_INIT %llx, %llu init_array entries)\n", m->name, m->init, m->init_array_sz / 8);
-    if (m->init) guest_call(c, m->init);
-    else run_array(c, m->init_array, m->init_array_sz);
+// Nintendo's module DT_INIT calls __nnmusl_init_dso and stores its status in a
+// module-local word. If that status is 1, constructors were deliberately left
+// for rtld/the loader instead of being run by DT_INIT. Locate that word from
+// DT_INIT's initial ADRP ... LDR W8 sequence (SDK 16 uses this same pattern).
+static uint64_t module_init_status_addr(Module *m) {
+    if (!m->init) return 0;
+    uint64_t page[32] = {0};
+    for (uint64_t pc = m->init; pc < m->init + 0x40; pc += 4) {
+        uint32_t w = *(uint32_t *)(uintptr_t)pc;
+        if ((w & 0x9F000000u) == 0x90000000u) {  // ADRP
+            uint32_t rd = w & 31u;
+            uint64_t immlo = (w >> 29) & 3u;
+            uint64_t immhi = (w >> 5) & 0x7FFFFu;
+            int64_t imm = (int64_t)((immhi << 2) | immlo);
+            if (imm & (1ll << 20)) imm -= 1ll << 21;
+            page[rd] = (pc & ~0xFFFull) + (uint64_t)(imm << 12);
+        } else if ((w & 0xFFC0001Fu) == 0xB9400008u) {  // LDR W8,[Xn,#imm]
+            uint32_t rn = (w >> 5) & 31u;
+            if (page[rn])
+                return page[rn] + (uint64_t)((w >> 10) & 0xFFFu) * 4u;
+        }
+    }
+    return 0;
 }
 
-static void rtld_init_sdk(Cpu *c) {  // the SDK, then the subsdk modules that link against it
-    for (int i = 1; i < g_nmodules; i++) module_init(c, &g_modules[i]);
+// nn::init::Start invokes the loader init callback after nninitStartup, just
+// before nnMain. At that point the game's allocator exists, so initialize every
+// module in dependency order: SDK, subsdk(s), then main.
+static void module_init(Cpu *c, Module *m) {
+    LOG("init %s (DT_INIT %llx, %llu init_array entries)\n",
+        m->name, (unsigned long long)m->init,
+        (unsigned long long)(m->init_array_sz / 8));
+
+    if (!m->init) {
+        run_array(c, m->init_array, m->init_array_sz);
+        LOG("[boot] %s constructors: %llu (no DT_INIT)\n",
+            m->name, (unsigned long long)(m->init_array_sz / 8));
+        return;
+    }
+
+    guest_call(c, m->init);
+
+    uint64_t status_addr = module_init_status_addr(m);
+    if (!status_addr) {
+        FATAL("%s: could not locate DT_INIT status word\n", m->name);
+    }
+
+    uint32_t status = *(uint32_t *)(uintptr_t)status_addr;
+    LOG("[boot] %s DT_INIT status=%u @ %llx\n",
+        m->name, status, (unsigned long long)status_addr);
+
+    if (status == 1) {
+        run_array(c, m->init_array, m->init_array_sz);
+        LOG("[boot] %s constructors run by loader: %llu\n",
+            m->name, (unsigned long long)(m->init_array_sz / 8));
+    }
 }
-static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
+
+static void rtld_init_sdk(Cpu *c) {
+    for (int i = 1; i < g_nmodules; i++) module_init(c, &g_modules[i]);
+    if (g_nmodules > 0) module_init(c, &g_modules[0]);
+}
+
+// The second callback is rtld's companion/fini hook, not a second constructor
+// phase. Running main constructors here is too late (nnMain is already active).
+static void rtld_init_main(Cpu *c) { (void)c; }
 static void rtld_mark(Cpu *c) { (void)c; }  // extra callback used by newer nn::init::Start ABIs
 
 // Claim the guest address range before anything else can map there. The host allocator places
@@ -177,7 +188,6 @@ static void boot(const char *root) {
     { extern void settings_load(void); settings_load(); }
     kernel_init();
     dispatch_init();
-    install_scarlet_boot_guards();
 
     uint32_t stack_size = 0x100000;
     int prio = 44;
