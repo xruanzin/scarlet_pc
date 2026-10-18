@@ -51,6 +51,7 @@ typedef struct {
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
     uint8_t bindless_storage; // Vulkan backend can execute bindless SUST/SURED through storage images
     uint8_t storage_buffers;  // LDG/STG through the bound NVN storage buffers (no host-memory import required)
+    uint8_t xfb;              // transform-feedback variant: capture generic outputs into separate streams
 } ShaderKey;
 
 typedef struct {
@@ -70,6 +71,7 @@ typedef struct {
     ShaderTexture tex[64];
     uint32_t attr_mask;     // vertex: input attributes; fragment: input varyings
     uint32_t out_mask;      // vertex: output varyings; fragment: render targets written
+    uint8_t out_comp_mask[32]; // vertex: components actually stored for each generic output (bit xyzw)
     bool writes_depth, uses_discard, writes_point_size;
     bool uses_gmem;         // global memory access: bind the guest heap at GMEM_BUFFER_INDEX
     bool writes_gmem;
