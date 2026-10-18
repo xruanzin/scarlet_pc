@@ -6,6 +6,7 @@
 #include "nvn.h"
 
 void renderer_sync(void);
+void renderer_submit(void);
 
 static uint64_t next_debug_id = 1;
 NvnDescPool *g_texture_pools[64], *g_sampler_pools[64];
