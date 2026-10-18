@@ -1514,7 +1514,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                "    { uint _tic = r%d & 0xFFFFFu; if (_tic < uint(surfmap_.slot.length())) { uint _si = surfmap_.slot[_tic].x; "
                "if (_si < %du) imageStore(surf_write[nonuniformEXT(_si)], ivec2(int(r%d), int(r%d)), "
                "vec4(as_type<float>(r%d), as_type<float>(r%d), as_type<float>(r%d), as_type<float>(r%d))); } }\n",
-               hreg, MAXWELL_BINDLESS_IMAGES, coord, coord + 1, data, data + 1, data + 2, data + 3);
+               hreg, (unsigned)c->key->bindless_storage, coord, coord + 1, data, data + 1, data + 2, data + 3);
         } else {
             c->info->surface_fallbacks++;
             sp(&c->body, "    /* SUST storage-image compatibility fallback */\n");
@@ -1536,7 +1536,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             sp(&c->body,
                "    { uint _tic = r%d & 0xFFFFFu; if (_tic < uint(surfmap_.slot.length())) { uint _si = surfmap_.slot[_tic].y; "
                "if (_si < %du) imageAtomicAdd(surf_atomic[nonuniformEXT(_si)], ivec2(int(r%d), int(r%d)), r%d); } }\n",
-               hreg, MAXWELL_BINDLESS_IMAGES, coord, coord + 1, operand);
+               hreg, (unsigned)c->key->bindless_storage, coord, coord + 1, operand);
         } else {
             c->info->surface_fallbacks++;
             sp(&c->body, "    /* SURED storage-image atomic compatibility fallback */\n");
@@ -1929,9 +1929,11 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (info->uses_surface_write || info->uses_surface_atomic) {
         sp(&s, "layout(std430, set = %d, binding = 120) readonly buffer SurfaceMap { uvec2 slot[]; } surfmap_;\n", set);
         if (info->uses_surface_write)
-            sp(&s, "layout(set = %d, binding = 121) writeonly uniform image2D surf_write[%d];\n", set, MAXWELL_BINDLESS_IMAGES);
+            sp(&s, "layout(set = %d, binding = 121) writeonly uniform image2D surf_write[%u];\n", set,
+               key && key->bindless_storage ? key->bindless_storage : 1);
         if (info->uses_surface_atomic)
-            sp(&s, "layout(r32ui, set = %d, binding = 122) uniform uimage2D surf_atomic[%d];\n", set, MAXWELL_BINDLESS_IMAGES);
+            sp(&s, "layout(r32ui, set = %d, binding = 122) uniform uimage2D surf_atomic[%u];\n", set,
+               key && key->bindless_storage ? key->bindless_storage : 1);
     }
     if (c->uses_rscale && stage != STAGE_VERTEX) {
         sp(&s, "layout(std140, set = %d, binding = 18) uniform RScale { vec4 rscale[65]; };\n", set);
