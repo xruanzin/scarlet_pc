@@ -342,12 +342,11 @@ static uint32_t block_current(int64_t timeout_ns) {
             t->wait_result = R_CANCELLED;
             break;
         }
-        if (t->cancel) {
-            t->cancel = false;
-            t->wait_kind = WAIT_NONE;
-            t->wait_result = R_CANCELLED;
-            break;
-        }
+        // CancelSynchronization only applies to cancellable synchronization-
+        // object waits (svcWaitSynchronization). Mutex/condvar/address-arbiter
+        // waits are not cancellable by svcCancelSynchronization on Horizon.
+        // A cancellation requested here remains sticky on the thread and will
+        // be consumed by its next svcWaitSynchronization instead.
         if (!kwait(timeout_ns, &ts)) {
             // A waker may have run while this thread's timed wait was expiring (it holds g_klock, so it got there
             // first): it already cleared wait_kind, set the result and - for a condition variable - handed this
@@ -853,7 +852,10 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
             bool was_waiting = target->in_sync_wait;
             bool was_pending = target->cancel;
             target->cancel = true;
-            wake(target);
+            // Only WaitSynchronization is cancellable. If the target is in a
+            // mutex/condvar/address wait, leave the cancellation pending without
+            // waking that unrelated wait.
+            if (was_waiting) wake(target);
             static _Atomic uint64_t cancel_calls;
             uint64_t n = atomic_fetch_add(&cancel_calls, 1) + 1;
             if (n <= 32 || !(n & 255))
