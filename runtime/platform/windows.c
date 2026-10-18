@@ -131,6 +131,24 @@ void plat_set_cpu_boost(bool enabled) {
     }
 }
 
+void plat_guest_thread_config(int priority, int core) {
+    // Horizon uses smaller numbers for higher priority. Scarlet's latency-sensitive
+    // renderer/audio threads sit around 42-43, main/jobs around 44-45.
+    int winprio = priority <= 43 ? THREAD_PRIORITY_ABOVE_NORMAL :
+                  priority >= 50 ? THREAD_PRIORITY_BELOW_NORMAL :
+                                   THREAD_PRIORITY_NORMAL;
+    SetThreadPriority(GetCurrentThread(), winprio);
+
+    DWORD cpus = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    if (cpus && core >= 0) {
+        // Spread virtual Switch cores over the host's logical CPUs without
+        // hard affinity: 0,3,6,9 on a 12-thread Ryzen, while Windows may still migrate.
+        DWORD ideal = ((DWORD)(core & 3) * cpus) / 4;
+        if (ideal >= cpus) ideal = cpus - 1;
+        SetThreadIdealProcessor(GetCurrentThread(), ideal);
+    }
+}
+
 // ---- native text input (nn::swkbd replacement)
 enum { TEXTDLG_EDIT = 4101, TEXTDLG_OK = 4102, TEXTDLG_CANCEL = 4103 };
 
