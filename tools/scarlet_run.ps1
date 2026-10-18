@@ -52,11 +52,21 @@ try {
         $env:LARECOMP_VK_PROF = "1"
         Write-Host "[scarlet-run] Perfil Vulkan ativo: tempos de CPU, GPU e apresentacao no log."
     }
+    else {
+        # Do not inherit profiling from an older PowerShell session. GPU timestamp
+        # queries and per-frame profiling are useful for diagnostics, not normal play.
+        Remove-Item Env:LARECOMP_VK_PROF -ErrorAction SilentlyContinue
+    }
     & $env:ComSpec /d /s /c $CmdLine | Tee-Object -FilePath $Log
     $Code = $LASTEXITCODE
 }
 finally {
-    $env:LARECOMP_VK_PROF = $PreviousVkProf
+    if ($null -eq $PreviousVkProf) {
+        Remove-Item Env:LARECOMP_VK_PROF -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:LARECOMP_VK_PROF = $PreviousVkProf
+    }
 }
 
 # Inspect narrow fast-boot guards too: LR is the return address, so LR-4 is
