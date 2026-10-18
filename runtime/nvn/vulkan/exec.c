@@ -286,11 +286,12 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
     for (;;) {
         if (s->cur_pool == s->npools) {
             if (s->npools == 16) FATAL("descriptor pools exhausted\n");
-            VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
+            VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8192},
                                             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768},
-                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024}};
+                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
+                                            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 32768}};
             VkDescriptorPoolCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 8192,
-                                             .poolSizeCount = 5, .pPoolSizes = sizes};
+                                             .poolSizeCount = 6, .pPoolSizes = sizes};
             VK_CHECK(vkCreateDescriptorPool(g_vk.dev, &ci, NULL, &s->pools[s->npools++]));
         }
         VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -1824,6 +1825,100 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     *out = (VkDescriptorImageInfo){smp, view, VK_IMAGE_LAYOUT_GENERAL};
 }
 
+typedef struct {
+    NvnDescPool *pool;
+    uint32_t generation;
+    VkBuffer map_buf;
+    VmaAllocation map_mem;
+    uint32_t *map_ptr; // uvec2 per TIC: x write slot, y atomic slot
+    uint32_t map_count;
+    VkDescriptorImageInfo write[MAXWELL_BINDLESS_IMAGES];
+    VkDescriptorImageInfo atomic[MAXWELL_BINDLESS_IMAGES];
+} SurfaceBindlessCache;
+
+static SurfaceBindlessCache surface_cache[8];
+
+static SurfaceBindlessCache *surface_cache_get(NvnDescPool *pool) {
+    SurfaceBindlessCache *c = NULL;
+    for (int i = 0; i < 8; i++) {
+        if (surface_cache[i].pool == pool && surface_cache[i].map_buf) { c = &surface_cache[i]; break; }
+        if (!c && !surface_cache[i].map_buf) c = &surface_cache[i];
+    }
+    if (!c) c = &surface_cache[0];
+
+    uint32_t count = pool && pool->count > 0 ? (uint32_t)pool->count : 1;
+    if (!c->map_buf || c->pool != pool || c->map_count < count) {
+        // Keep old allocations alive for the process lifetime rather than destroying
+        // a buffer that an in-flight descriptor set may still reference.
+        c = NULL;
+        for (int i = 0; i < 8; i++) if (!surface_cache[i].map_buf) { c = &surface_cache[i]; break; }
+        if (!c) c = &surface_cache[0];
+        memset(c, 0, sizeof *c);
+        c->pool = pool;
+        c->map_count = count;
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                 .size = (VkDeviceSize)count * 8,
+                                 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                                               VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo inf;
+        VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->map_buf, &c->map_mem, &inf));
+        c->map_ptr = inf.pMappedData;
+    }
+
+    uint32_t gen = pool ? pool->generation : 0;
+    if (c->generation != gen || !c->generation) {
+        for (uint32_t i = 0; i < c->map_count; i++) {
+            c->map_ptr[i * 2 + 0] = UINT32_MAX;
+            c->map_ptr[i * 2 + 1] = UINT32_MAX;
+        }
+        for (int i = 0; i < MAXWELL_BINDLESS_IMAGES; i++) {
+            c->write[i] = (VkDescriptorImageInfo){VK_NULL_HANDLE, vk_dummy_storage_view(false), VK_IMAGE_LAYOUT_GENERAL};
+            c->atomic[i] = (VkDescriptorImageInfo){VK_NULL_HANDLE, vk_dummy_storage_view(true), VK_IMAGE_LAYOUT_GENERAL};
+        }
+
+        int nw = 0, na = 0;
+        if (pool) {
+            NvnTexEntry *e = pool->entries;
+            // Most recently registered images first. This keeps the compact window
+            // focused on the render targets the current Scarlet scene actually uses.
+            uint32_t before = UINT32_MAX;
+            for (int pass = 0; pass < pool->count && (nw < MAXWELL_BINDLESS_IMAGES || na < MAXWELL_BINDLESS_IMAGES); pass++) {
+                int best = -1;
+                uint32_t best_seq = 0;
+                for (int i = 0; i < pool->count; i++)
+                    if (e[i].is_image && e[i].tex && e[i].image_seq < before && e[i].image_seq > best_seq) {
+                        best = i; best_seq = e[i].image_seq;
+                    }
+                if (best < 0) break;
+                before = best_seq;
+                if (nw < MAXWELL_BINDLESS_IMAGES) {
+                    VkImageView v = vk_storage_write_view(e[best].tex, &e[best].view, e[best].has_view);
+                    if (v) {
+                        c->map_ptr[best * 2 + 0] = (uint32_t)nw;
+                        c->write[nw++] = (VkDescriptorImageInfo){VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL};
+                    }
+                }
+                if (na < MAXWELL_BINDLESS_IMAGES) {
+                    VkImageView v = vk_storage_atomic_u32_view(e[best].tex, &e[best].view, e[best].has_view);
+                    if (v) {
+                        c->map_ptr[best * 2 + 1] = (uint32_t)na;
+                        c->atomic[na++] = (VkDescriptorImageInfo){VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL};
+                    }
+                }
+            }
+        }
+        vmaFlushAllocation(g_vk.vma, c->map_mem, 0, VK_WHOLE_SIZE);
+        c->generation = gen ? gen : 1;
+        static unsigned nlog;
+        if (nlog++ < 24)
+            LOG("[shader] bindless image map: pool=%p count=%u generation=%u\n",
+                (void *)pool, count, gen);
+    }
+    return c;
+}
+
 // Writes the descriptor set of one stage. gx..gz: compute group counts (driver constants).
 // pre_ii: texture descriptors already resolved by the caller (draw: fragment textures, needed earlier for the
 // viewport decision), or NULL.
@@ -1833,6 +1928,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     VkWriteDescriptorSet w[MAX_BIND];
     VkDescriptorBufferInfo bi[MAX_BIND];
     VkDescriptorImageInfo ii[MAX_BIND];
+    SurfaceBindlessCache *surf = (si->uses_surface_write || si->uses_surface_atomic) ? surface_cache_get(st.tpool) : NULL;
     int n = 0;
     int sg = stage == 1 ? 1 : 0;
     float rs[65][4] = {{1, 1, 0, 0}};
@@ -1841,8 +1937,17 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         VkBindingInfo *b = &p->binds[i];
         if (b->set != set) continue;
         w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
-                                      .descriptorCount = 1, .descriptorType = b->type};
-        if (b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && b->binding >= 32) {
+                                      .descriptorCount = b->count ? b->count : 1, .descriptorType = b->type};
+        if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && b->binding == 120 && surf) {
+            bi[n] = (VkDescriptorBufferInfo){surf->map_buf, 0, (VkDeviceSize)surf->map_count * 8};
+            w[n].pBufferInfo = &bi[n];
+        } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && b->binding == 121 && surf) {
+            w[n].descriptorCount = MAXWELL_BINDLESS_IMAGES;
+            w[n].pImageInfo = surf->write;
+        } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && b->binding == 122 && surf) {
+            w[n].descriptorCount = MAXWELL_BINDLESS_IMAGES;
+            w[n].pImageInfo = surf->atomic;
+        } else if (b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && b->binding >= 32) {
             int ti = (int)b->binding - 32;
             float sc[2]; uint32_t wh[2];
             if (ti < si->ntex && pre_ii && ti < 64) { ii[n] = pre_ii[ti]; sc[0] = tex_sc[sg][ti][0]; sc[1] = tex_sc[sg][ti][1]; wh[0] = tex_wh[sg][ti][0]; wh[1] = tex_wh[sg][ti][1]; }
@@ -1923,6 +2028,7 @@ static CsProg *compute_program(NvnProgram *np) {
     maxwell_gmem_size = HEAP_MAX;
     ShaderKey k = {0};
     k.glsl = 1;
+    k.bindless_storage = g_vk.bindless_storage ? 1 : 0;
     cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
     cp->p.vi = cp->si;
     if (!cp->si->msl) {
@@ -2052,6 +2158,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
+    vkey.bindless_storage = fkey.bindless_storage = g_vk.bindless_storage ? 1 : 0;
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
