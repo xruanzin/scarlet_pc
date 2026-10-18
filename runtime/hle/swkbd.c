@@ -170,7 +170,7 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
         //   SwkbdTextCheckResult cb(char *tmp_string, size_t tmp_string_size)
         // tmp_string enters as UTF-8. On failure the callback may replace it
         // with the message the applet must show.
-        enum { TEXTCHECK_BUF = 0x800 };
+        enum { TEXTCHECK_BUF = 0x7D4 };
         char *tmp = hle_alloc(TEXTCHECK_BUF);
         snprintf(tmp, TEXTCHECK_BUF, "%s", text);
         c->x[0] = (uint64_t)(uintptr_t)tmp;
