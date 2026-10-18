@@ -3,6 +3,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $Exe = Join-Path $RepoRoot "build\ScarletRecomp.exe"
 $GameDll = Join-Path $RepoRoot "build\lasgame.dll"
@@ -14,6 +15,7 @@ foreach ($P in @($Exe, $GameDll, (Join-Path $ExeFs "main"), (Join-Path $ExeFs "m
         throw "Arquivo necessario ausente: $P"
     }
 }
+
 if (-not (Test-Path -LiteralPath $RomFs -PathType Container)) {
     throw "RomFS extraido nao encontrado: $RomFs"
 }
@@ -36,5 +38,14 @@ Write-Host "[scarlet-run] Game root: $GameRoot"
 Write-Host "[scarlet-run] Log: $Log"
 Write-Host ""
 
-& $Exe $GameRoot --play 2>&1 | Tee-Object -FilePath $Log
-exit $LASTEXITCODE
+# Windows PowerShell 5.1 turns native stderr into NativeCommandError when
+# ErrorActionPreference is Stop. cmd.exe merges stderr into stdout before
+# PowerShell sees it, so the runtime can log normally without being aborted.
+$Q = [char]34
+$CmdLine = $Q + $Exe + $Q + " " + $Q + $GameRoot + $Q + " --play 2>&1"
+& $env:ComSpec /d /s /c $CmdLine | Tee-Object -FilePath $Log
+
+$Code = $LASTEXITCODE
+Write-Host ""
+Write-Host "[scarlet-run] Processo terminou com exit code $Code"
+exit $Code
