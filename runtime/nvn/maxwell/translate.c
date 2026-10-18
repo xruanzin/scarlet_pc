@@ -740,6 +740,43 @@ static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
     write_tex_result(c, slot, call, mask, d0, d1, true, !bits(w, 59, 1));  // 0xd0/0xd2: .F16 results
 }
 
+// TLD4S: gather one component from four neighboring texels. Unlike TEXS, precision is bit 55 and
+// all four results are written (two per destination pair, or packed half pairs for .F16).
+// Encoding reference: Citron frontend/maxwell/translate/impl/texture_gather_swizzled.cpp.
+static void emit_tld4s(Ctx *c, uint64_t w) {
+    if (!c->glsl) { fail(c, "TLD4S requires the Vulkan GLSL backend"); return; }
+    int d0 = (int)bits(w, 0, 8), d1 = (int)bits(w, 28, 8);
+    int a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
+    bool dc = bits(w, 50, 1), offset = bits(w, 51, 1), f16 = bits(w, 55, 1);
+    int component = (int)bits(w, 52, 2);
+    if (((offset || dc) && (a & 1)) || (offset && dc && (b & 1)) ||
+        (!f16 && ((d0 != RZ && (d0 & 1)) || (d1 != RZ && (d1 & 1))))) {
+        fail(c, "unaligned TLD4S register pair"); return;
+    }
+    int slot = tex_slot(c, (uint32_t)bits(w, 36, 13), TEXTYPE_2D, dc, false);
+    char ra[16], ry[16], rb[16], rd[16], coords[160], args[320], call[640];
+    const char *A = reg(c, a, ra);
+    const char *Y = reg(c, offset || dc ? a + 1 : b, ry);
+    snprintf(coords, sizeof coords, "vec2(as_type<float>(%s), as_type<float>(%s))", A, Y);
+    args[0] = 0;
+    if (dc) {
+        const char *D = reg(c, offset ? b + 1 : b, rd);
+        snprintf(args, sizeof args, ", as_type<float>(%s)", D);
+    }
+    if (offset) {
+        const char *Bv = reg(c, b, rb);
+        // Maxwell packs signed six-bit offsets in bits 0..5 and 8..13 of Rb.
+        size_t used = strlen(args);
+        snprintf(args + used, sizeof args - used, ", ivec2(int(%s << 26) >> 26, int(%s << 18) >> 26)", Bv, Bv);
+    }
+    if (!dc) {
+        size_t used = strlen(args);
+        snprintf(args + used, sizeof args - used, ", %d", component);
+    }
+    snprintf(call, sizeof call, "%s(t%d, %s%s)", offset ? "textureGatherOffset" : "textureGather", slot, coords, args);
+    write_tex_result(c, slot, call, 15, d0, d1, true, f16);
+}
+
 // TEX (full form): coordinates from consecutive registers at gpr8, extra parameters at gpr20.
 static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
     int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
@@ -908,6 +945,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         emit_texs(c, w, false);
     } else if (OPM(0xd200000000000000ull, 0xf600000000000000ull)) {  // TLDS
         emit_texs(c, w, true);
+    } else if (OPM(0xdf00000000000000ull, 0xff40000000000000ull)) {  // TLD4S
+        emit_tld4s(c, w);
     } else if (OPM(0xc038000000000000ull, 0xfc38000000000000ull)) {  // TEX
         emit_tex(c, w, false);
     } else if (OPM(0xdeb8000000000000ull, 0xfff8000000000000ull)) {  // TEX.B (bindless)

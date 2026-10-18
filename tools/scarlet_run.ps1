@@ -1,5 +1,6 @@
 param(
-    [string]$GameRoot = "D:\Pokemon Scarlet\Extracted\Base"
+    [string]$GameRoot = "D:\Pokemon Scarlet\Extracted\Base",
+    [switch]$Profile
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,9 +46,18 @@ Write-Host ""
 # PowerShell sees it, so the runtime can log normally without being aborted.
 $Q = [char]34
 $CmdLine = $Q + $Exe + $Q + " " + $Q + $GameRoot + $Q + " --play 2>&1"
-& $env:ComSpec /d /s /c $CmdLine | Tee-Object -FilePath $Log
-
-$Code = $LASTEXITCODE
+$PreviousVkProf = $env:LARECOMP_VK_PROF
+try {
+    if ($Profile) {
+        $env:LARECOMP_VK_PROF = "1"
+        Write-Host "[scarlet-run] Perfil Vulkan ativo: tempos de CPU, GPU e apresentacao no log."
+    }
+    & $env:ComSpec /d /s /c $CmdLine | Tee-Object -FilePath $Log
+    $Code = $LASTEXITCODE
+}
+finally {
+    $env:LARECOMP_VK_PROF = $PreviousVkProf
+}
 
 # Inspect narrow fast-boot guards too: LR is the return address, so LR-4 is
 # the guest instruction that made the bad indirect call.
