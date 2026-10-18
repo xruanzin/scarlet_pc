@@ -720,7 +720,34 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[2] = 0xF;
         break;
     }
-    case 0x0F: x[0] = R_OK; break;  // SetThreadCoreMask
+    case 0x0F: {  // SetThreadCoreMask(handle, ideal core, affinity mask)
+        KObject *o = handle_get((uint32_t)x[0]);
+        if (!o || o->type != KOBJ_THREAD) { x[0] = R_INVALID_HANDLE; break; }
+        KThread *t = (KThread *)o;
+        int32_t ideal = (int32_t)x[1];
+        uint64_t mask = x[2];
+
+        // Horizon special values: -3 keeps the current ideal core; -2 uses
+        // the process default. Scarlet's job system has per-core queues and
+        // selects them via GetCurrentProcessorNumber, so this logical core
+        // assignment must not be ignored even though host OS affinity is separate.
+        if (ideal != -3) {
+            if (ideal == -2) ideal = 0;
+            if (ideal < 0 || ideal >= 4 || !(mask & (1ull << ideal))) {
+                ideal = -1;
+                for (int k = 0; k < 4; k++)
+                    if (mask & (1ull << k)) { ideal = k; break; }
+            }
+            if (ideal >= 0) t->core = ideal;
+        }
+        static unsigned nlog;
+        if (nlog++ < 32)
+            LOG("[kernel] SetThreadCoreMask h=%llx ideal=%lld mask=%#llx -> core %d\n",
+                (unsigned long long)x[0], (long long)(int32_t)x[1],
+                (unsigned long long)mask, t->core);
+        x[0] = R_OK;
+        break;
+    }
     case 0x10: x[0] = t_cur->core; break;  // GetCurrentProcessorNumber
     case 0x11: case 0x12: case 0x17: {  // SignalEvent / ClearEvent / ResetSignal
         pthread_mutex_lock(&g_klock);
