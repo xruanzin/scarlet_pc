@@ -111,8 +111,9 @@ int osk_keys(char *text, size_t cap, int max_chars, bool appearing, float scale,
     ImGui::PushFont(big);
     ImGui::Text("%s_", text);
     ImGui::PopFont();
-    static const char *rows_u[] = {"ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ-.'!", "0123456789"};
-    static const char *rows_l[] = {"abcdefghij", "klmnopqrst", "uvwxyz-.'!", "0123456789"};
+    // Switch-like QWERTY layout (the old debug OSK used alphabetical rows).
+    static const char *rows_u[] = {"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM-.'", "1234567890"};
+    static const char *rows_l[] = {"qwertyuiop", "asdfghjkl", "zxcvbnm-.'", "1234567890"};
     const char **rows = upper ? rows_u : rows_l;
     float k = 70 * scale;
     for (int row = 0; row < 4; row++) {
