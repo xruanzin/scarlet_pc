@@ -204,8 +204,11 @@ GuestFn dispatch_lookup(uint64_t addr) {
     return NULL;
 }
 
-// Small direct-mapped cache in front of the binary search
-#define DCACHE 4096
+// Per-thread direct-mapped cache in front of the binary search.
+// Scarlet has ~271k lifted functions/resume targets and a 4096-entry table
+// thrashed badly in engine/job-system indirect calls. 32768 entries cost
+// 512 KiB per active guest thread but avoid most repeated binary searches.
+#define DCACHE 32768
 static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
 
 static GuestFn dispatch_slow(Cpu *c) {
