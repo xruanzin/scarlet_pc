@@ -1222,6 +1222,22 @@ static void translate_program(void *arg) {
                 (unsigned long long)p->code[0], (unsigned long long)p->code[1]);
     }
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
+
+    // A translated graphics vertex stage must eventually export position.
+    // Keep this diagnostic tied to the guest code address: large dispatcher
+    // shaders previously produced a GLSL file that only contained our default
+    // gl_Position initializer, making it impossible to identify the offending
+    // Maxwell program from the source-hash filename alone.
+    const char *pos_init = strstr(p->vi->msl, "gl_Position = vec4(0, 0, 0, 1);");
+    const char *pos_after = pos_init ? strstr(pos_init + strlen("gl_Position = vec4(0, 0, 0, 1);"), "gl_Position") : NULL;
+    if (pos_init && !pos_after) {
+        static _Atomic unsigned no_pos_logs;
+        if (atomic_fetch_add(&no_pos_logs, 1) < 32)
+            LOG("[shader] VS has no position export: code=%llx source=%zu bytes inst=%u cases=%u\n",
+                (unsigned long long)p->code[0], strlen(p->vi->msl),
+                p->vi->num_insts, p->vi->dispatch_labels);
+    }
+
     log_shader_flow(p->vi, p->code[0], "vs");
     log_shader_flow(p->fi, p->code[1], "fs");
     save_glsl(p->vi->msl, p->code[0], "vs");
