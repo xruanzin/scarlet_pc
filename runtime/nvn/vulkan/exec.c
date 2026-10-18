@@ -49,7 +49,7 @@ static uint64_t stat_shader_wait_ns;  // draws waiting for their program / pipel
 static _Atomic int new_pipes;  // pipelines created since the pipeline cache was last saved
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
-static char stats_text[640];
+static char stats_text[768];
 void vk_collect_dead(void);
 
 // ================================================================== submissions
@@ -696,11 +696,13 @@ const char *renderer_stats(void) {
         snprintf(stats_text + n, sizeof stats_text - n, " | gpu %.0f cpu exec %.0f draw %.0f (pre %.0f key %.0f dyn %.0f sets %.0f tex %.0f (upload %.0f) vtx %.0f) submit %.0f ms",
                  prof_gpu / 1e6, prof_exec / 1e6, prof_draw / 1e6, prof_pre / 1e6, prof_key / 1e6, prof_dyn / 1e6, prof_sets / 1e6,
                  prof_tex / 1e6, prof_up / 1e6, prof_vtx / 1e6, prof_submit / 1e6);
-        extern uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn;
+        extern uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn, prof_tex_watch_skips;
         n = strlen(stats_text);
-        snprintf(stats_text + n, sizeof stats_text - n, " | tex checks %llu samples %llu full %llu (%.1f MB, dynamic %llu)",
+        snprintf(stats_text + n, sizeof stats_text - n,
+                 " | tex checks %llu samples %llu full %llu (%.1f MB, dynamic %llu, watch-skip %llu)",
                  (unsigned long long)prof_tex_checks, (unsigned long long)prof_tex_samples, (unsigned long long)prof_tex_full,
-                 prof_tex_full_bytes / 1048576.0, (unsigned long long)prof_tex_dyn);
+                 prof_tex_full_bytes / 1048576.0, (unsigned long long)prof_tex_dyn,
+                 (unsigned long long)prof_tex_watch_skips);
         n = strlen(stats_text);
         snprintf(stats_text + n, sizeof stats_text - n, " | pass ends:");
         for (int l = 0; l < 4096; l++)
@@ -709,7 +711,7 @@ const char *renderer_stats(void) {
         n = strlen(stats_text);
         snprintf(stats_text + n, sizeof stats_text - n, " | views created %llu", (unsigned long long)prof_views_created);
         prof_views_created = 0;
-        prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = 0;
+        prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = prof_tex_watch_skips = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
     stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
