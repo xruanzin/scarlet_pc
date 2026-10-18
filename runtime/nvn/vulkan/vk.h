@@ -59,6 +59,8 @@ uint64_t vk_completed_seq(void);
 void vk_wait_seq(uint64_t seq);
 void vk_full_barrier(VkCommandBuffer cb);
 void vk_end_pass(void);
+void vk_big_lock(void);    // serializes renderer recording / present across threads (exec.c)
+void vk_big_unlock(void);
 void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra);  // submit + one more cb (present)
 
 // Transient GPU-visible memory that lives until the submission it was allocated for completes.

@@ -512,10 +512,13 @@ void backend_represent(void) {
 }
 
 static void backend_represent_now(void) {
+    vk_big_lock();
     if (g_last_presented) backend_present(g_last_presented);
+    vk_big_unlock();
 }
 
 void backend_present(NvnTexture *t) {
+    vk_big_lock();
     pthread_mutex_lock(&g_present_lock);
     g_last_presented = t;
     TexBackend *b = vk_tex(t, true);
@@ -700,6 +703,7 @@ void backend_present(NvnTexture *t) {
         last_fps_time = now;
     }
     pthread_mutex_unlock(&g_present_lock);
+    vk_big_unlock();
 }
 
 // ================================================================== UI thread

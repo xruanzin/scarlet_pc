@@ -3746,7 +3746,29 @@ static void vk_exec_diag_leave(bool enabled) {
         atomic_store_explicit(&vk_exec_owner, 0, memory_order_release);
 }
 
+// One renderer lock for every thread that records or presents (guest render threads in backend_execute, the guest's
+// present, and the UI thread's re-present, device.c backend_represent_now). The recording state above (current Sub,
+// command buffer, pass, descriptor pools, ...) is global: Scarlet's overlapping backend_execute / present calls
+// interleaved commands into one VkCommandBuffer and crashed inside the driver (amdvlk64 null access in
+// vk_frame_begin, called from the UI thread while a render thread was recording). Recursive: present can run
+// exec code. Lock order: vk_big_lock, then g_present_lock.
+static pthread_mutex_t g_vk_big;
+static pthread_once_t g_vk_big_once = PTHREAD_ONCE_INIT;
+static void vk_big_init(void) {
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_vk_big, &a);
+    pthread_mutexattr_destroy(&a);
+}
+void vk_big_lock(void) {
+    pthread_once(&g_vk_big_once, vk_big_init);
+    pthread_mutex_lock(&g_vk_big);
+}
+void vk_big_unlock(void) { pthread_mutex_unlock(&g_vk_big); }
+
 void backend_execute(uint64_t handle) {
+    vk_big_lock();
     bool thread_diag = vk_exec_diag_enter(handle);
     PROF_T0();
     if (ip_enabled()) ip_note_list(handle);
@@ -3758,6 +3780,7 @@ void backend_execute(uint64_t handle) {
     if (sync_submit) renderer_flush();
     else renderer_submit();
     vk_exec_diag_leave(thread_diag);
+    vk_big_unlock();
 }
 
 // ================================================================== frame interpolation (prototype)
