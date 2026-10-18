@@ -1120,6 +1120,16 @@ static void translate_program(void *arg) {
                 p->vi->surface_fallbacks, p->fi->surface_fallbacks,
                 (unsigned long long)p->code[0], (unsigned long long)p->code[1]);
     }
+    if (p->vi->uses_surface_write || p->vi->uses_surface_atomic ||
+        p->fi->uses_surface_write || p->fi->uses_surface_atomic) {
+        static _Atomic unsigned native_log;
+        unsigned n = atomic_fetch_add(&native_log, 1);
+        if (n < 32)
+            LOG("[shader] native storage images: vs(write=%d atomic=%d) fs(write=%d atomic=%d) (vs %llx fs %llx)\n",
+                p->vi->uses_surface_write, p->vi->uses_surface_atomic,
+                p->fi->uses_surface_write, p->fi->uses_surface_atomic,
+                (unsigned long long)p->code[0], (unsigned long long)p->code[1]);
+    }
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
@@ -1868,7 +1878,8 @@ static SurfaceBindlessCache *surface_cache_get(NvnDescPool *pool) {
     }
 
     uint32_t gen = pool ? pool->generation : 0;
-    if (c->generation != gen || !c->generation) {
+    uint32_t token = gen + 1u;
+    if (c->generation != token) {
         for (uint32_t i = 0; i < c->map_count; i++) {
             c->map_ptr[i * 2 + 0] = UINT32_MAX;
             c->map_ptr[i * 2 + 1] = UINT32_MAX;
@@ -1910,11 +1921,11 @@ static SurfaceBindlessCache *surface_cache_get(NvnDescPool *pool) {
             }
         }
         vmaFlushAllocation(g_vk.vma, c->map_mem, 0, VK_WHOLE_SIZE);
-        c->generation = gen ? gen : 1;
+        c->generation = token;
         static unsigned nlog;
         if (nlog++ < 24)
-            LOG("[shader] bindless image map: pool=%p count=%u generation=%u\n",
-                (void *)pool, count, gen);
+            LOG("[shader] bindless image map: pool=%p count=%u generation=%u write=%d atomic=%d\n",
+                (void *)pool, count, gen, nw, na);
     }
     return c;
 }
@@ -2039,6 +2050,10 @@ static CsProg *compute_program(NvnProgram *np) {
     if (cp->si->surface_fallbacks)
         LOG("[compute] storage-image compatibility: %u ops (code %llx)\n",
             cp->si->surface_fallbacks, (unsigned long long)ss->code_addr);
+    if (cp->si->uses_surface_write || cp->si->uses_surface_atomic)
+        LOG("[compute] native storage images: write=%d atomic=%d (code %llx)\n",
+            cp->si->uses_surface_write, cp->si->uses_surface_atomic,
+            (unsigned long long)ss->code_addr);
     for (int i = 0; i < 3; i++) {
         cp->local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
         if (!cp->local[i]) cp->local[i] = 1;
