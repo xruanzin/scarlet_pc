@@ -146,6 +146,32 @@ uint64_t guest_sym(const char *name) {
 static uint64_t hle_next = HLE_HEAP;
 RT_ON_RESET(hle_heap_reset) { hle_next = HLE_HEAP; }  // (guest memory, wiped by the reboot)
 
+// Immutable exact-entry lookup built before guest threads start. Scarlet has
+// ~271k lifted function entries; a 2^20 open-addressing table stays under 30%
+// load, making cold indirect calls O(1) instead of a binary search per module.
+#define EXACT_TAB (1u << 20)
+typedef struct { uint64_t addr; GuestFn fn; } ExactEnt;
+static ExactEnt *exact_tab;
+
+static inline uint32_t exact_hash(uint64_t a) {
+    return (uint32_t)(((a >> 2) * 11400714819323198485ull) >> (64 - 20));
+}
+static void exact_insert(uint64_t addr, GuestFn fn) {
+    uint32_t h = exact_hash(addr);
+    while (exact_tab[h].addr && exact_tab[h].addr != addr) h = (h + 1) & (EXACT_TAB - 1);
+    exact_tab[h] = (ExactEnt){addr, fn};
+}
+static GuestFn exact_lookup(uint64_t addr) {
+    if (!exact_tab) return NULL;
+    uint32_t h = exact_hash(addr);
+    for (;;) {
+        uint64_t a = exact_tab[h].addr;
+        if (a == addr) return exact_tab[h].fn;
+        if (!a) return NULL;
+        h = (h + 1) & (EXACT_TAB - 1);
+    }
+}
+
 void *hle_alloc(uint64_t size) {
     static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&m);
@@ -161,6 +187,9 @@ void *hle_alloc(uint64_t size) {
 void dispatch_init(void) {  // (after gamelib_load)
     const GameLibTables *g = gamelib_tables();
     memset(dcache, 0, sizeof dcache);
+    if (!exact_tab) exact_tab = calloc(EXACT_TAB, sizeof *exact_tab);
+    else memset(exact_tab, 0, EXACT_TAB * sizeof *exact_tab);
+    if (!exact_tab) FATAL("cannot allocate exact guest dispatch table\n");
     ntables = 0;
     for (uint32_t i = 0; i < g->nmods && i < GAMELIB_MAX_MODULES; i++) {
         const GameLibModule *m = &g->mods[i];
@@ -174,28 +203,22 @@ void dispatch_init(void) {  // (after gamelib_load)
                 LOG("[dispatch] %s: %llu static resume ranges\n", m->name, (unsigned long long)nr);
             }
             tables[ntables++] = (FnTable){m->addrs, m->fns, n, lo, hi, m->resumes, nr};
+            for (uint64_t k = 0; k < n; k++) exact_insert(m->addrs[k], m->fns[k]);
         }
     }
 }
 
 GuestFn dispatch_lookup(uint64_t addr) {
+    GuestFn exact = exact_lookup(addr);
+    if (exact) return exact;
+
+    // Only computed jumps into the middle of a lifted fragment need the slower
+    // resume-range search. Normal indirect calls never reach this loop now.
+    if (addr & 3) return NULL;
     for (int t = 0; t < ntables; t++) {
         FnTable *ft = &tables[t];
-        if (addr < ft->lo || addr > ft->hi) continue;
-        uint64_t lo = 0, hi = ft->count;
-        while (lo < hi) {
-            uint64_t mid = (lo + hi) / 2;
-            if (ft->addrs[mid] < addr) lo = mid + 1;
-            else hi = mid;
-        }
-        if (lo < ft->count && ft->addrs[lo] == addr) return ft->fns[lo];
-        // Indirect jumps can land in the middle of an emitted fragment (for
-        // example musl's printf switch tables). Resume generated C at that exact
-        // instruction; calling the containing function's entry would corrupt
-        // its stack/register state by running the prologue a second time.
-        if (addr & 3) continue;
-        lo = 0;
-        hi = ft->resume_count;
+        if (addr < ft->lo || addr > ft->hi || !ft->resume_count) continue;
+        uint64_t lo = 0, hi = ft->resume_count;
         while (lo < hi) {
             uint64_t mid = (lo + hi) / 2;
             if (ft->resumes[mid].lo <= addr) lo = mid + 1;
