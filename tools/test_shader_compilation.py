@@ -173,8 +173,15 @@ layout(location=0, xfb_buffer=0, xfb_offset=0, xfb_stride=12) out vec3 v0;
 layout(location=1, xfb_buffer=1, xfb_offset=0, xfb_stride=4) out float v1;
 layout(location=2, xfb_buffer=2, xfb_offset=0, xfb_stride=4) out float v2;
 void main() {
-    v0 = vec3(float(gl_VertexIndex), 2.0, 3.0);
-    v1 = 4.0; v2 = 5.0;
+    // Scarlet shaders can write xyz for all three generic outputs while the
+    // stream-output layout captures only xyz/x/x. Keep the extra components
+    // in temporaries and pack the selected TF components at the end.
+    vec4 t0 = vec4(float(gl_VertexIndex), 2.0, 3.0, 1.0);
+    vec4 t1 = vec4(4.0, 40.0, 400.0, 1.0);
+    vec4 t2 = vec4(5.0, 50.0, 500.0, 1.0);
+    v0 = t0.xyz;
+    v1 = t1.x;
+    v2 = t2.x;
     gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
 }
 '''
