@@ -1,5 +1,9 @@
 // Windows host layer (runtime/platform.h).
 #include <windows.h>
+#include <wct.h>
+#ifndef WCT_MAX_NODE_COUNT  // some MinGW SDK versions omit this documented limit
+#define WCT_MAX_NODE_COUNT 16
+#endif
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -528,63 +532,83 @@ void plat_print_backtrace(void) {
 }
 
 
-// ---- hang report: call stacks of the other threads
+// ---- hang report: passive OS wait chains. Do not SuspendThread in this process:
+// a target can own stdio, loader or memory-manager locks needed by the reporter.
 #define MAX_REG_THREADS 128
 static HANDLE g_reg_threads[MAX_REG_THREADS];
 static DWORD g_reg_tids[MAX_REG_THREADS];
 static volatile LONG g_nreg_threads;
+static __thread bool g_thread_registered;
 
-void plat_register_thread(void) {
+uint64_t plat_register_thread(void) {
+    DWORD tid = GetCurrentThreadId();
+    if (g_thread_registered) return tid;
+    g_thread_registered = true;
     LONG k = InterlockedIncrement(&g_nreg_threads) - 1;
-    if (k >= MAX_REG_THREADS) return;
+    if (k >= MAX_REG_THREADS) return tid;
     HANDLE h = NULL;
     if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,
-                        THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, 0)) {
-        g_reg_tids[k] = GetCurrentThreadId();
-        g_reg_threads[k] = h;
+                        THREAD_QUERY_INFORMATION, FALSE, 0)) {
+        g_reg_tids[k] = tid;
+        // Publish the handle only once the associated tid is ready. Keep it alive
+        // for exit-status checks, rather than blindly querying a potentially recycled tid.
+        InterlockedExchangePointer((PVOID volatile *)&g_reg_threads[k], h);
     }
+    return tid;
 }
 
-static void print_frame(int i, uint64_t pc, uint64_t exe) {
-    uint64_t off = 0;
-    const char *s = rt_host_fn_name(pc, &off);
-    if (!s) s = plat_symbol(pc, &off);
-    if (s) fprintf(stderr, "    #%-2d %016llx %s+%llx\n", i, (unsigned long long)pc, s, (unsigned long long)off);
-    else fprintf(stderr, "    #%-2d %016llx lasrecomp+%llx\n", i, (unsigned long long)pc, (unsigned long long)(pc - exe));
-}
+typedef HWCT (WINAPI *OpenWctFn)(DWORD, PWAITCHAINCALLBACK);
+typedef BOOL (WINAPI *GetWctFn)(HWCT, DWORD_PTR, DWORD, DWORD, LPDWORD, PWAITCHAIN_NODE_INFO, LPBOOL);
+typedef VOID (WINAPI *CloseWctFn)(HWCT);
+static uint64_t filetime_ticks(FILETIME t) { return ((uint64_t)t.dwHighDateTime << 32) | t.dwLowDateTime; }
 
 void plat_dump_other_threads(void) {
+    // Resolve optional diagnostics dynamically: no new linker or privilege requirement for launching the game.
+    HMODULE dll = LoadLibraryW(L"advapi32.dll");
+    OpenWctFn open = dll ? (OpenWctFn)GetProcAddress(dll, "OpenThreadWaitChainSession") : NULL;
+    GetWctFn get = dll ? (GetWctFn)GetProcAddress(dll, "GetThreadWaitChain") : NULL;
+    CloseWctFn close = dll ? (CloseWctFn)GetProcAddress(dll, "CloseThreadWaitChainSession") : NULL;
+    HWCT session = open && get && close ? open(0, NULL) : NULL;
+    fprintf(stderr, "[hang] passive Windows thread state (CPU times cumulative; no thread suspension):\n");
+    if (!session) fprintf(stderr, "[hang] wait-chain service unavailable (%lu); CPU times only\n", GetLastError());
     DWORD self = GetCurrentThreadId();
-    uint64_t exe = (uint64_t)(uintptr_t)GetModuleHandleA(NULL);
-    LONG n = g_nreg_threads < MAX_REG_THREADS ? g_nreg_threads : MAX_REG_THREADS;
+    LONG count = InterlockedCompareExchange(&g_nreg_threads, 0, 0);
+    LONG n = count < MAX_REG_THREADS ? count : MAX_REG_THREADS;
     for (LONG k = 0; k < n; k++) {
-        HANDLE h = g_reg_threads[k];
+        HANDLE h = InterlockedCompareExchangePointer((PVOID volatile *)&g_reg_threads[k], NULL, NULL);
         if (!h || g_reg_tids[k] == self) continue;
-        if (SuspendThread(h) == (DWORD)-1) continue;
-        CONTEXT ctx;
-        memset(&ctx, 0, sizeof ctx);
-        ctx.ContextFlags = CONTEXT_FULL;
-        fprintf(stderr, "  thread #%ld (os tid %lu):\n", (long)k, (unsigned long)g_reg_tids[k]);
-        if (GetThreadContext(h, &ctx)) {
-            for (int i = 0; i < 24 && ctx.Rip; i++) {
-                print_frame(i, ctx.Rip, exe);
-                DWORD64 base = 0;
-                PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(ctx.Rip, &base, NULL);
-                if (!rf) {  // leaf without unwind info: return address is on top of the stack
-                    if (!ctx.Rsp) break;
-                    ctx.Rip = *(DWORD64 *)(uintptr_t)ctx.Rsp;
-                    ctx.Rsp += 8;
-                } else {
-                    PVOID handler_data = NULL;
-                    DWORD64 frame = 0;
-                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, rf, &ctx, &handler_data, &frame, NULL);
-                }
-            }
-        } else {
-            fprintf(stderr, "    (no context)\n");
+        DWORD code = 0;
+        if (!GetExitCodeThread(h, &code) || code != STILL_ACTIVE) continue;
+        fprintf(stderr, "  thread #%ld (os tid %lu):", (long)k, (unsigned long)g_reg_tids[k]);
+        FILETIME created, exited, kernel, user;
+        if (GetThreadTimes(h, &created, &exited, &kernel, &user))
+            fprintf(stderr, " CPU user=%llu ms kernel=%llu ms", (unsigned long long)(filetime_ticks(user) / 10000),
+                    (unsigned long long)(filetime_ticks(kernel) / 10000));
+        fputc('\n', stderr);
+        if (!session) continue;
+        WAITCHAIN_NODE_INFO nodes[WCT_MAX_NODE_COUNT] = {0};
+        DWORD nn = WCT_MAX_NODE_COUNT;
+        BOOL cycle = FALSE;
+        BOOL ok = get(session, 0, 0, g_reg_tids[k], &nn, nodes, &cycle);
+        DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+        if (!ok && error != ERROR_MORE_DATA && error != ERROR_TOO_MANY_THREADS) {
+            fprintf(stderr, "    wait chain unavailable (%lu)\n", (unsigned long)error);
+            continue;
         }
-        ResumeThread(h);
+        if (nn > WCT_MAX_NODE_COUNT) nn = WCT_MAX_NODE_COUNT;
+        fprintf(stderr, "    wait chain nodes=%lu cycle=%s%s\n", (unsigned long)nn, cycle ? "YES" : "no", ok ? "" : " (truncated)");
+        for (DWORD i = 0; i < nn; i++) {
+            fprintf(stderr, "      node %lu type=%d status=%d", (unsigned long)i, (int)nodes[i].ObjectType, (int)nodes[i].ObjectStatus);
+            if (nodes[i].ObjectType == WctThreadType)
+                fprintf(stderr, " pid=%lu tid=%lu", (unsigned long)nodes[i].ThreadObject.ProcessId,
+                        (unsigned long)nodes[i].ThreadObject.ThreadId);
+            fputc('\n', stderr);
+        }
+        if (nn == 1) fprintf(stderr, "    (running or waiting on an unsupported object; this does not exclude a GPU wait)\n");
     }
+    if (count > MAX_REG_THREADS) fprintf(stderr, "[hang] OS thread registry full; later threads omitted\n");
+    if (session) close(session);
+    if (dll) FreeLibrary(dll);
 }
 
 static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep) {

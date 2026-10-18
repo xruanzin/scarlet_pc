@@ -433,6 +433,8 @@ static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
 
 static void *worker(void *a) {
     (void)a;
+    uint64_t tid = plat_register_thread();
+    LOG("[shader] worker os tid %llu ready\n", (unsigned long long)tid);
     // Shader compilation is background work. Keeping these workers below the
     // guest/render/audio threads prevents cold-cache compilation from stalling
     // gameplay for seconds on 6c/12t APUs.

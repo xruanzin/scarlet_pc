@@ -221,3 +221,53 @@ O Job Object não foi executado neste ambiente Linux. Não há arquivos do jogo
 para medir o boot completo ou verificar a seleção de personagem e os textos.
 O novo tempo de abertura e a resposta do Windows continuam dependendo do teste
 no computador do usuário; não há promessa de voltar exatamente a cinco segundos.
+
+## Watchdog da transição de personagem
+
+O relato recebido em 18/10/2026 confirma primeira imagem em aproximadamente
+4,3 s e o shader grande com 38 casos, mas a transição posterior continua parando.
+O aumento do limite de espera para 30 s não restaurou os textos. Ainda não há
+evidência para atribuir a parada ao driver, à sincronização do jogo ou a uma
+compilação específica.
+
+O watchdog anterior suspendia uma thread e imprimia/simbolizava sua pilha antes
+de retomá-la. Se a thread possuísse um lock de stdio/loader, o diagnóstico também
+poderia travar. A versão atual não suspende threads nem lê suas pilhas: usa as
+cadeias de espera do Windows (WCT) e tempos acumulados de CPU. Essa consulta roda
+numa thread de diagnóstico, com no máximo um relatório pendente, para manter o
+loop de eventos da janela livre. Falhas de acesso ao WCT aparecem no log e não
+impedem a execução; não é preciso iniciar o jogo como administrador.
+
+Threads do jogo são registradas desde a entrada e os workers de shader também
+participam. O histórico HLE usa memória que dura até o fim do processo, sem
+ponteiros para TLS de threads encerradas. Snapshots usam uma tentativa de acesso
+e liberam o histórico antes de escrever no log; o jogo nunca espera pelo leitor.
+Os IDs do Windows permitem correlacionar históricos, workers e cadeias de espera.
+O contador de frames compartilhado com a interface agora é atômico.
+
+Após atualizar e compilar pelos comandos acima, reproduza a transição. Se surgir
+`SEM RESPOSTA`, espere cerca de 15 segundos, feche a janela e envie o
+`scarlet_boot.log` completo da raiz do repositório. O primeiro relatório começa
+após 8 segundos sem apresentar frames. Não é necessário esperar vários minutos.
+Se o runner produzir `build/scarlet_shader_failure.zip`, envie esse arquivo também.
+
+O relatório contém `hang report`, últimas chamadas HLE por thread e, quando o
+Windows permitir, `wait chain` e `cycle=YES/no`. Uma cadeia de um único nó pode
+significar execução ou espera não suportada pelo WCT; não exclui espera na GPU.
+Isso substitui o desenrolamento de pilhas do watchdog; não é uma pilha completa.
+CPU user/kernel são tempos totais desde o início da thread, não porcentagens.
+O registro é limitado a 128 threads por processo e avisa se exceder sua capacidade.
+
+Validação desta mudança: testes C de histórico concorrente, thread encerrada,
+ring cheio e leitor ocupado; seis cenários Win32 simulados (consulta, serviço
+indisponível, acesso negado, cadeia truncada, thread encerrada, falha de registro);
+teste do worker de diagnóstico e falha de criação; compilação do arquivo completo
+de plataforma para Windows x64 com o SDK real. Dispatch, kernel, device e exec
+também foram compilados para Windows x64, e os arquivos afetados no Linux.
+Regressões de dispatch/protected calls e limites do Windows passaram (24 testes
+ao todo, incluindo os quatro novos). Esses checks não executam o jogo no Windows nem confirmam a
+correção da transição, dos textos ou da renderização 3D.
+
+Referências: [SuspendThread](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-suspendthread),
+[WCT](https://learn.microsoft.com/en-us/windows/win32/debug/wait-chain-traversal)
+e [GetThreadWaitChain](https://learn.microsoft.com/en-us/windows/win32/api/wct/nf-wct-getthreadwaitchain).

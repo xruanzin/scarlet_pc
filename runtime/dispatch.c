@@ -96,35 +96,49 @@ void hle_override(uint64_t addr, HostFn fn, const char *name) {
     override_count++;
 }
 
-// ---- recent-HLE ring (crash debugging: what the game asked the host just before dying)
+// ---- recent-HLE ring. Shared histories outlive their writer threads (TLS does not).
 #define HHIST 128
-typedef struct { const char *name; uint64_t x0, x1, x30; } HhEntry;
-typedef struct { HhEntry e[HHIST]; int n; int tid; } Hh;
-static __thread Hh hh_local;
-static __thread bool hh_registered;
 #define MAX_HH_THREADS 128
-static Hh *volatile hh_all[MAX_HH_THREADS];
-static volatile int hh_nall;
+typedef struct { const char *name; uint64_t x0, x1, x30; } HhEntry;
+typedef struct { HhEntry e[HHIST]; uint64_t n, tid; _Atomic bool busy; } Hh;
+typedef struct { HhEntry e[HHIST]; uint64_t n, tid; } HhSnapshot;
+static Hh hh_all[MAX_HH_THREADS];
+static _Atomic unsigned hh_nall;
+static __thread Hh hh_fallback;
+static __thread Hh *hh_current;
+
 static void hhist_push(const char *name, Cpu *c) {
-    if (!hh_registered) {  // first HLE call on this thread: make its history (and OS handle) visible to the hang report
-        hh_registered = true;
-        int k = __atomic_fetch_add(&hh_nall, 1, __ATOMIC_SEQ_CST);
-        if (k < MAX_HH_THREADS) { hh_local.tid = k; hh_all[k] = &hh_local; }
-        plat_register_thread();
+    if (!hh_current) {
+        unsigned k = atomic_fetch_add_explicit(&hh_nall, 1, memory_order_relaxed);
+        hh_current = k < MAX_HH_THREADS ? &hh_all[k] : &hh_fallback;
+        // tid is protected by busy, just like the entries. Never publish a pointer to TLS.
     }
-    Hh *h = &hh_local;
-    int i = h->n++ & (HHIST - 1);
-    h->e[i].name = name;
-    h->e[i].x0 = c->x[0];
-    h->e[i].x1 = c->x[1];
-    h->e[i].x30 = c->x[30];
+    Hh *h = hh_current;
+    bool expected = false;
+    // Never delay a guest call for diagnostics: a concurrent snapshot may drop one record.
+    if (!atomic_compare_exchange_strong_explicit(&h->busy, &expected, true, memory_order_acquire, memory_order_relaxed)) return;
+    if (!h->tid) h->tid = plat_register_thread();
+    unsigned i = h->n & (HHIST - 1);
+    h->e[i] = (HhEntry){name, c->x[0], c->x[1], c->x[30]};
+    h->n++;
+    atomic_store_explicit(&h->busy, false, memory_order_release);
 }
-static void hhist_print(Hh *h, int last) {
-    int n = h->n < HHIST ? h->n : HHIST;
-    if (last > 0 && n > last) n = last;
-    int start = h->n - n;
-    for (int k = 0; k < n; k++) {
-        int i = (start + k) & (HHIST - 1);
+static bool hhist_snapshot(Hh *h, HhSnapshot *out) {
+    if (!h) return false;
+    bool expected = false;
+    if (!atomic_compare_exchange_strong_explicit(&h->busy, &expected, true, memory_order_acquire, memory_order_relaxed)) return false;
+    memcpy(out->e, h->e, sizeof out->e);
+    out->n = h->n;
+    out->tid = h->tid;
+    atomic_store_explicit(&h->busy, false, memory_order_release);
+    return true;
+}
+static void hhist_print(const HhSnapshot *h, int last) {
+    unsigned n = h->n < HHIST ? (unsigned)h->n : HHIST;
+    if (last > 0 && n > (unsigned)last) n = (unsigned)last;
+    uint64_t start = h->n - n;
+    for (unsigned k = 0; k < n; k++) {
+        unsigned i = (start + k) & (HHIST - 1);
         uint64_t off = 0;
         const char *sym = loader_symbol_at(h->e[i].x30, &off);
         fprintf(stderr, "  %s x0=%llx x1=%llx lr=%llx", h->e[i].name ? h->e[i].name : "?",
@@ -134,22 +148,29 @@ static void hhist_print(Hh *h, int last) {
     }
 }
 static void hhist_dump(void) {
-    int n = hh_local.n < HHIST ? hh_local.n : HHIST;
-    fprintf(stderr, "last %d host calls:\n", n);
-    hhist_print(&hh_local, 0);
+    HhSnapshot h;
+    if (!hhist_snapshot(hh_current, &h)) return;
+    fprintf(stderr, "last %u host calls:\n", h.n < HHIST ? (unsigned)h.n : HHIST);
+    hhist_print(&h, 0);
 }
 
-// Hang report (called by the UI-thread watchdog when no frame was presented for a while): for every thread that has
-// called the host, its last HLE calls with guest symbol names, then (Windows) its current host/guest call stack.
+// Runs on a dedicated diagnostic thread, never suspends game threads or blocks the SDL event loop.
 void rt_hang_report(void) {
     fprintf(stderr, "\n===== hang report: no frame presented, per-thread state =====\n");
-    int n = hh_nall < MAX_HH_THREADS ? hh_nall : MAX_HH_THREADS;
-    for (int k = 0; k < n; k++) {
-        if (!hh_all[k]) continue;
-        fprintf(stderr, "[hang] thread #%d: %d HLE calls so far, last ones:\n", k, hh_all[k]->n);
-        hhist_print(hh_all[k], 6);
+    unsigned count = atomic_load_explicit(&hh_nall, memory_order_relaxed);
+    unsigned n = count < MAX_HH_THREADS ? count : MAX_HH_THREADS;
+    for (unsigned k = 0; k < n; k++) {
+        HhSnapshot h;
+        if (!hhist_snapshot(&hh_all[k], &h)) {
+            fprintf(stderr, "[hang] history #%u busy; snapshot skipped\n", k);
+            continue;
+        }
+        if (!h.n) continue;
+        fprintf(stderr, "[hang] history #%u (os tid %llu): %llu HLE calls, last ones:\n", k,
+                (unsigned long long)h.tid, (unsigned long long)h.n);
+        hhist_print(&h, 6);
     }
-    fprintf(stderr, "[hang] call stacks (guest functions are f_<addr>):\n");
+    if (count > MAX_HH_THREADS) fprintf(stderr, "[hang] history capacity reached; later threads omitted\n");
     plat_dump_other_threads();
     fprintf(stderr, "===== end of hang report =====\n");
     fflush(stderr);

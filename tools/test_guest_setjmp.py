@@ -68,6 +68,8 @@ void rt_unwind_point(void) {}
 Cpu *kernel_current_cpu(void) { return NULL; }
 const char *loader_symbol_at(uint64_t a, uint64_t *off) { (void)a; *off=0; return NULL; }
 void plat_print_backtrace(void) {}
+uint64_t plat_register_thread(void) { return 1; }
+void plat_dump_other_threads(void) {}
 void plat_fatal_notice(void) {}
 static __thread Cpu saved[2];
 static __thread int level, mode, value, calls, inner_returned;

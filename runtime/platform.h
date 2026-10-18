@@ -74,8 +74,8 @@ bool plat_remove_tree(const char *dir);      // rm -rf
 // Name of the host function containing pc (guest functions are f_<addr>), NULL if unknown.
 const char *plat_symbol(uint64_t pc, uint64_t *offset);
 void plat_print_backtrace(void);
-void plat_register_thread(void);      // remember the calling thread for plat_dump_other_threads
-void plat_dump_other_threads(void);   // hang report: current call stack of every registered thread (Windows)
+uint64_t plat_register_thread(void);  // register once per thread; return its host OS identifier
+void plat_dump_other_threads(void);   // Windows: thread CPU times and wait chains, without suspending threads
 void rt_hang_report(void);            // runtime/dispatch.c
 void plat_fatal_notice(void);  // a fatal error is about to end the process: tell the user (Windows release: message box)
 void plat_crash_handler_install(void);  // per thread where the OS needs it (alternate signal stack)

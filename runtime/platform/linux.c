@@ -172,8 +172,8 @@ void plat_fatal_notice(void) {
 
 const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c
 
-void plat_register_thread(void) {}
-void plat_dump_other_threads(void) { fprintf(stderr, "  (per-thread call stacks are only available on Windows)\n"); }
+uint64_t plat_register_thread(void) { return (uint64_t)(uintptr_t)pthread_self(); }
+void plat_dump_other_threads(void) { fprintf(stderr, "  (OS wait chains are only available on Windows)\n"); }
 
 void plat_print_backtrace(void) {
     void *bt[64];

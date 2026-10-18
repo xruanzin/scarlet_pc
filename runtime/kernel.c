@@ -184,6 +184,7 @@ void rt_unwind_point(void) {
 static void *thread_main(void *arg) {
     KThread *t = arg;
     t_cur = t;
+    plat_register_thread();
     crash_handler_install();
 #ifdef _WIN32
     plat_guest_thread_config(t->prio, t->core);

@@ -490,7 +490,8 @@ void renderer_set_scale(float sx, float sy);
 uint64_t renderer_present_count(void);
 void renderer_save_texture_tex(TexBackend *b, const char *path);
 
-static uint64_t frames, total_frames, g_frame_counter;
+static uint64_t frames, g_frame_counter;
+static _Atomic uint64_t total_frames;
 uint64_t renderer_present_count(void) { return total_frames; }
 uint64_t vk_frame_counter(void) { return g_frame_counter; }
 static float g_shot_crop[4] = {0, 0, 1, 1};
@@ -770,6 +771,24 @@ void backend_clear_window(void) {
 // Window-title FPS / hang indicator. It runs on the UI thread, so it keeps updating even when the game thread is stuck:
 // "sem resposta" appears when no frame was presented for 2 s (a freeze, a long shader build or a deadlock).
 void rt_hang_report(void);  // runtime/dispatch.c
+static atomic_bool hang_report_pending;
+static void *hang_report_worker(void *arg) {
+    (void)arg;
+    rt_hang_report();
+    atomic_store(&hang_report_pending, false);
+    return NULL;
+}
+static void request_hang_report(void) {
+    bool expected = false;
+    if (!atomic_compare_exchange_strong(&hang_report_pending, &expected, true)) return;
+    pthread_t thread;
+    int error = pthread_create(&thread, NULL, hang_report_worker, NULL);
+    if (!error) pthread_detach(thread);
+    else {
+        atomic_store(&hang_report_pending, false);
+        LOG("[watchdog] cannot start diagnostic thread: %d\n", error);
+    }
+}
 static void title_fps_update(void) {
     static uint64_t last_ms, last_frames, last_change_ms;
     static double fps;
@@ -796,7 +815,7 @@ static void title_fps_update(void) {
         reports++;
         LOG("[watchdog] no frame presented for %llu s (last frame %llu)\n", (unsigned long long)(stuck_ms / 1000),
             (unsigned long long)f);
-        rt_hang_report();
+        request_hang_report();
     }
     if (stuck_ms < 2000) reports = 0;
 }
