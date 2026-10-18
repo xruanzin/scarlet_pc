@@ -341,22 +341,50 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
 }
 
 // ================================================================== transient memory ring
-// 64 MB host-visible chunks (device-local when the GPU exposes resizable BAR); a chunk is reused once every
-// submission that allocated from it has completed.
-#define CHUNK_SIZE (64ull << 20)
+// Keep the host-visible staging pool bounded. Character creation can upload hundreds of MB/s;
+// letting differently-sized or GPU-backlogged chunks accumulate eventually exhausted the AMD APU's
+// host-visible Vulkan heap even though old submissions were already recyclable.
+#define CHUNK_SIZE (32ull << 20)
 typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq; } Chunk;
 static Chunk *chunks;
 static int nchunks, active = -1;
+static uint64_t transient_bytes;
+
+static uint64_t transient_cap(void) {
+    static uint64_t cap;
+    if (!cap) {
+        const char *e = getenv("LARECOMP_TRANSIENT_MB");
+        long mb = e ? atol(e) : 384;
+        if (mb < 128) mb = 128;
+        cap = (uint64_t)mb << 20;
+    }
+    return cap;
+}
 
 static void flush_transient_writes(void) {
     uint64_t seq = vk_pending_seq();
-    for (int i = 0; i < nchunks; i++) if (chunks[i].seq == seq && chunks[i].used)
-        vmaFlushAllocation(g_vk.vma, chunks[i].mem, 0, chunks[i].used);
+    for (int i = 0; i < nchunks; i++)
+        if (chunks[i].buf && chunks[i].seq == seq && chunks[i].used)
+            vmaFlushAllocation(g_vk.vma, chunks[i].mem, 0, chunks[i].used);
+}
+
+static void drop_chunk(int i) {
+    Chunk *c = &chunks[i];
+    if (!c->buf) return;
+    transient_bytes -= c->size;
+    vmaDestroyBuffer(g_vk.vma, c->buf, c->mem);
+    memset(c, 0, sizeof *c);
+    if (active == i) active = -1;
 }
 
 static int new_chunk(uint64_t size) {
-    chunks = realloc(chunks, (nchunks + 1) * sizeof *chunks);
-    Chunk *c = &chunks[nchunks];
+    int slot = -1;
+    for (int i = 0; i < nchunks; i++) if (!chunks[i].buf) { slot = i; break; }
+    if (slot < 0) {
+        chunks = realloc(chunks, (nchunks + 1) * sizeof *chunks);
+        slot = nchunks++;
+    }
+    Chunk *c = &chunks[slot];
     memset(c, 0, sizeof *c);
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
                              .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
@@ -365,10 +393,18 @@ static int new_chunk(uint64_t size) {
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO,
                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
     VmaAllocationInfo info;
-    VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->buf, &c->mem, &info));
+    VkResult r = vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->buf, &c->mem, &info);
+    if (r != VK_SUCCESS) {
+        memset(c, 0, sizeof *c);
+        FATAL("transient vmaCreateBuffer %llu MB failed: %d (pool %llu/%llu MB)\n",
+              (unsigned long long)(size >> 20), r,
+              (unsigned long long)(transient_bytes >> 20),
+              (unsigned long long)(transient_cap() >> 20));
+    }
     c->ptr = info.pMappedData;
     c->size = size;
-    return nchunks++;
+    transient_bytes += size;
+    return slot;
 }
 
 static void ring_retire(void) {}  // chunks are recycled lazily in vk_transient
@@ -386,11 +422,49 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
             return (VkSpan){c->buf, off, c->ptr + off};
         }
     }
+
     uint64_t done = vk_completed_seq();
     int pick = -1;
     for (int i = 0; i < nchunks; i++)
-        if (i != active && chunks[i].seq <= done && chunks[i].size >= size) { pick = i; break; }
-    if (pick < 0) pick = new_chunk(size > CHUNK_SIZE ? size : CHUNK_SIZE);
+        if (i != active && chunks[i].buf && chunks[i].seq <= done && chunks[i].size >= size) {
+            pick = i;
+            break;
+        }
+
+    if (pick < 0) {
+        uint64_t alloc = size > CHUNK_SIZE ? size : CHUNK_SIZE;
+        uint64_t cap = transient_cap();
+
+        // Completed chunks too small for this request are dead weight. Drop them before growing the pool.
+        for (int i = 0; i < nchunks && transient_bytes + alloc > cap; i++)
+            if (i != active && chunks[i].buf && chunks[i].seq <= done) drop_chunk(i);
+
+        // If the GPU is behind, wait for the oldest already-submitted chunk instead of allocating forever.
+        while (transient_bytes + alloc > cap) {
+            int oldest = -1;
+            uint64_t oldest_seq = UINT64_MAX;
+            for (int i = 0; i < nchunks; i++) {
+                if (i == active || !chunks[i].buf) continue;
+                if (chunks[i].seq && chunks[i].seq < pending && chunks[i].seq < oldest_seq) {
+                    oldest = i;
+                    oldest_seq = chunks[i].seq;
+                }
+            }
+            if (oldest < 0) break;  // current submission alone is unusually large; it cannot be recycled yet
+            static uint64_t pressure_waits;
+            uint64_t n = ++pressure_waits;
+            if (n <= 8 || !(n & 255))
+                LOG("[vk] transient pressure #%llu: %llu MB resident, waiting seq %llu (cap %llu MB)\n",
+                    (unsigned long long)n, (unsigned long long)(transient_bytes >> 20),
+                    (unsigned long long)oldest_seq, (unsigned long long)(cap >> 20));
+            vk_wait_seq(oldest_seq);
+            done = vk_completed_seq();
+            for (int i = 0; i < nchunks && transient_bytes + alloc > cap; i++)
+                if (i != active && chunks[i].buf && chunks[i].seq <= done) drop_chunk(i);
+        }
+        pick = new_chunk(alloc);
+    }
+
     active = pick;
     chunks[pick].used = size;
     chunks[pick].seq = pending;
