@@ -97,6 +97,12 @@ int main(int argc, char **argv) {
         nvn_diag_bind_program(&cb, NULL, 1); // stage unbinding
     }
     assert(diag_tf_nseen == 128 && !diag_snapshot_bytes);
+    // A TF output later consumed as a vertex source must be correlated.
+    Cpu tf = {.x = {0x123, 2, 0x1000, 0x100}};
+    nvn_diag_tf_call("nvnCommandBufferBindTransformFeedbackBuffer", &tf);
+    uint64_t vb_range[2] = {0x1080, 0x40};
+    nvn_diag_vertex_buffers(0x456, 5, 1, vb_range);
+    assert(diag_tf_vertex_links == 1);
     nvn_diag_tf_state(&cb, "nvnCommandBufferPauseTransformFeedback");
     assert(!cb.diag_tf_active);
     nvn_diag_tf_state(&cb, "nvnCommandBufferResumeTransformFeedback");
@@ -190,6 +196,10 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(len(code), 128)
             self.assertTrue(all(p.stat().st_size == 0x80 for p in code))
             self.assertEqual(len((out / 'tf_calls.txt').read_text().splitlines()), 128)
+            links = (out / 'tf_vertex_links.txt').read_text().splitlines()
+            self.assertEqual(len(links), 1)
+            self.assertIn('vb=1080+40', links[0])
+            self.assertIn('tf=1000+100', links[0])
 
     def test_program_replacement_and_finalize_release_snapshots(self):
         with tempfile.TemporaryDirectory() as tmp:
