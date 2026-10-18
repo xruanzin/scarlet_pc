@@ -100,7 +100,7 @@ void plat_sleep_until_ns(uint64_t t) {
 
 void plat_thread_realtime(uint64_t period_ns) {
     (void)period_ns;
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 }
 
 const void *plat_map_file_ro(int fd, uint64_t *size) {
@@ -123,12 +123,12 @@ void plat_unmap_file(const void *ptr) {
 }
 
 void plat_set_cpu_boost(bool enabled) {
-    static DWORD normal_class;
-    if (!normal_class) normal_class = GetPriorityClass(GetCurrentProcess());
-    DWORD target = enabled ? HIGH_PRIORITY_CLASS : (normal_class ? normal_class : NORMAL_PRIORITY_CLASS);
-    if (GetPriorityClass(GetCurrentProcess()) != target) {
-        SetPriorityClass(GetCurrentProcess(), target);
-        fprintf(stderr, "[plat] CPU fast-load boost %s (priority class %#lx)\n", enabled ? "on" : "off", (unsigned long)target);
+    static int last = -1;
+    // Horizon's FastLoad request must not put the whole recompiled process above the Windows desktop.
+    SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
+    if (last != (int)enabled) {
+        fprintf(stderr, "[plat] CPU fast-load request %s (normal Windows process priority)\n", enabled ? "on" : "off");
+        last = enabled;
     }
 }
 
@@ -401,6 +401,33 @@ void plat_fatal_notice(void) {
     MessageBoxA(NULL, text, RT_APP_NAME, MB_ICONERROR | MB_OK);
 }
 
+static uint64_t process_commit_limit(uint64_t physical, uint64_t available) {
+    uint64_t limit = physical / 5 * 3, spare = available / 4 * 3, cap = 8ull << 30;
+    if (limit > spare) limit = spare;
+    return limit < cap ? limit : cap;
+}
+
+static void limit_process_memory(void) {
+    static HANDLE job;
+    if (job) return;
+    MEMORYSTATUSEX status = {.dwLength = sizeof status};
+    if (!GlobalMemoryStatusEx(&status)) return;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+    limits.ProcessMemoryLimit = (SIZE_T)process_commit_limit(status.ullTotalPhys, status.ullAvailPhys);
+    job = CreateJobObjectW(NULL, NULL);
+    if (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits) ||
+        !AssignProcessToJobObject(job, GetCurrentProcess())) {
+        fprintf(stderr, "[host] process commit limit unavailable (%lu)\n", GetLastError());
+        if (job) CloseHandle(job);
+        job = NULL;
+        return;
+    }
+    // Keep the handle for this process's lifetime. This caps private commit, not address-space reservations,
+    // file-backed RomFS mappings or all GPU/system allocations. Do not impose a working-set/page-thrashing cap.
+    fprintf(stderr, "[host] private commit limit: %llu MiB\n", (unsigned long long)(limits.ProcessMemoryLimit >> 20));
+}
+
 void plat_init(void) {
     log_to_file_without_console();
     require_cpu();
@@ -416,10 +443,8 @@ void plat_init(void) {
         .StateMask = 0,
     };
     SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof pt);
-    // This runtime spends most of boot and open-world streaming on lifted guest
-    // CPU work. Keep it above ordinary desktop/background tasks; FastLoad may
-    // still raise it temporarily to HIGH_PRIORITY_CLASS.
-    SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+    SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
+    limit_process_memory();
 }
 
 bool plat_exe_path(char *buf, size_t size) {
@@ -616,3 +641,7 @@ bool plat_remove_tree(const char *dir) {
 
 // End the process at once, skipping DLL teardown (from an atexit handler, after flushing). Exit status 0.
 void plat_terminate(void) { TerminateProcess(GetCurrentProcess(), 0); }
+void plat_emergency_exit(int code) {
+    TerminateProcess(GetCurrentProcess(), (UINT)code);
+    _exit(code);
+}

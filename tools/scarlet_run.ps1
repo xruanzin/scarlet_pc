@@ -48,7 +48,11 @@ Write-Host ""
 $Q = [char]34
 $BaseCmdLine = $Q + $Exe + $Q + " " + $Q + $GameRoot + $Q + " --play"
 $PreviousVkProf = $env:LARECOMP_VK_PROF
+$LocationPushed = $false
 try {
+    # Keep save and shader caches in the repository even when invoked by absolute path from another directory.
+    Push-Location -LiteralPath $RepoRoot
+    $LocationPushed = $true
     if ($Profile) {
         $env:LARECOMP_VK_PROF = "1"
         Write-Host "[scarlet-run] Perfil Vulkan ativo: tempos de CPU, GPU e apresentacao no log."
@@ -75,6 +79,7 @@ try {
     }
 }
 finally {
+    if ($LocationPushed) { Pop-Location }
     if ($null -eq $PreviousVkProf) {
         Remove-Item Env:LARECOMP_VK_PROF -ErrorAction SilentlyContinue
     }
@@ -132,5 +137,8 @@ if (Test-Path -LiteralPath $Log) {
 
 Write-Host ""
 Write-Host "[scarlet-run] Processo terminou com exit code $Code"
+if ($Code -eq 86) {
+    Write-Host "[scarlet-run] Compilacao grafica excedeu 8 segundos. O processo foi encerrado; veja [build-timeout] no log." -ForegroundColor Yellow
+}
 exit $Code
 

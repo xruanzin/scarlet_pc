@@ -45,7 +45,7 @@ static void image(VkFormat format, VkImage *img, VkDeviceMemory *mem, VkImageVie
 }
 
 int main(int argc, char **argv) {
-    assert(argc == 3); int mode = atoi(argv[2]);
+    assert(argc == 3 || argc == 4); int mode = atoi(argv[2]);
     VkApplicationInfo app = {.sType=VK_STRUCTURE_TYPE_APPLICATION_INFO,.apiVersion=VK_API_VERSION_1_3};
     VkInstanceCreateInfo ici = {.sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,.pApplicationInfo=&app};
     VkInstance inst; CHECK(vkCreateInstance(&ici, NULL, &inst));
@@ -104,6 +104,7 @@ int main(int argc, char **argv) {
     VkShaderModuleCreateInfo sci = {.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=(size_t)length,.pCode=code};
     VkShaderModule shader; CHECK(vkCreateShaderModule(dev, &sci, NULL, &shader)); free(code);
     VkComputePipelineCreateInfo cpi = {.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,.layout=pl,
+        .flags=argc == 4 ? VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT : 0,
         .stage={.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_COMPUTE_BIT,.module=shader,.pName="main"}};
     VkPipeline pipe; CHECK(vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, NULL, &pipe));
     VkCommandPoolCreateInfo cpci = {.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,.queueFamilyIndex=family};

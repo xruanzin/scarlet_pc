@@ -8,6 +8,7 @@ import itertools
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -22,16 +23,20 @@ WAIT = r'''
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
 #define LOG(...) fprintf(stderr, __VA_ARGS__)
 static _Atomic int jobs_pending;
 static uint64_t stat_shader_wait_ns;
 static uint64_t SDL_GetTicksNS(void) {
+    if (getenv("SCARLET_TEST_STUCK_BUILD")) { static uint64_t tick; return ++tick * 1000000000ull; }
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec;
 }
-static void SDL_Delay(uint32_t ms) { usleep(ms * 1000); }
+static void SDL_Delay(uint32_t ms) { if (!getenv("SCARLET_TEST_STUCK_BUILD")) usleep(ms * 1000); }
+static void plat_emergency_exit(int code) __attribute__((noreturn));
+static void plat_emergency_exit(int code) { _Exit(code); }
 /*WAIT*/
 static void *build(void *arg) {
     usleep(40000);
@@ -39,6 +44,12 @@ static void *build(void *arg) {
     return NULL;
 }
 int main(void) {
+    const char *stuck = getenv("SCARLET_TEST_STUCK_BUILD");
+    if (stuck) {
+        _Atomic int state = 0;
+        wait_built(&state, stuck, 0x1000, 0x2000);
+        assert(!"stuck compilation escaped its deadline");
+    }
     const char *operations[] = {"program", "pipeline", "compute"};
     for (int i = 0; i < 3; i++) {
         _Atomic int state = 0; pthread_t thread;
@@ -166,10 +177,17 @@ static uint64_t words[96]; static int n;
 static void emit(uint64_t w) { if (!(n % 4)) words[n++] = 0; words[n++] = w; }
 static void mov(int r, uint32_t v) { emit(0x0100000000070000ull | ((uint64_t)v << 20) | r); }
 int main(int argc, char **argv) {
-    assert(argc == 3); int atomic = atoi(argv[1]), stage = atoi(argv[2]);
+    assert(argc == 3 || argc == 4); int atomic = atoi(argv[1]), stage = atoi(argv[2]);
     mov(0, atomic ? 7 : 1); mov(1, atomic ? 3 : 0); mov(2, 3);
     mov(4, 0x3f000000); mov(5, 0x3e800000); mov(6, 0x3f800000); mov(7, 0x3f800000);
     mov(10, 1); mov(11, 0);
+    if (argc == 4) {
+        if (!(n % 4)) words[n++] = 0;
+        int branch = n; emit(0xe24000000007000full);
+        mov(4, 0);  // must be skipped, preserving the 0.5 / raw uint value from above
+        int target = (n % 4) ? n : n + 1;
+        words[branch] |= (uint64_t)((target - branch - 1) * 8) << 20;
+    }
     emit(atomic ? 0xeb50008602070a00ull : 0xeb20010600f70004ull);
     emit(0xe30000000007000full);
     uint64_t blob[112] = {0}; int header = stage == STAGE_COMPUTE ? 0 : 16;
@@ -222,6 +240,24 @@ class SceneProgressTests(unittest.TestCase):
     def test_real_npad_batch_adapters(self):
         self.run_harness(self.harness('input', INPUT, headers=True))
 
+    def test_stuck_builds_stop_at_deadline(self):
+        source = (ROOT / 'runtime/nvn/vulkan/exec.c').read_text()
+        start = source.index('static void wait_built(')
+        end = source.index('// ================================================================== state', start)
+        exe = self.harness('stuck', WAIT.replace('/*WAIT*/', source[start:end]))
+        for kind in ('program', 'pipeline', 'compute'):
+            with self.subTest(kind=kind):
+                env = dict(os.environ, SCARLET_TEST_STUCK_BUILD=kind)
+                r = subprocess.run([str(exe)], env=env, capture_output=True, text=True, timeout=5)
+                self.assertEqual(r.returncode, 86, r.stderr)
+                self.assertIn('[build-timeout] ' + kind, r.stderr)
+                self.assertIn('exceeded 8 s', r.stderr)
+        header = (ROOT / 'runtime/platform.h').read_text()
+        self.assertIn('plat_emergency_exit(int code)', header)
+        device = (ROOT / 'runtime/nvn/vulkan/device.c').read_text()
+        begin = device.index('static void quick_exit_handler(')
+        self.assertLess(device.index('if (vk_builds_pending())', begin), device.index('vkDeviceWaitIdle', begin))
+
     def test_storage_view_probes_preserve_cpu_contents(self):
         source = (ROOT / 'runtime/nvn/vulkan/textures.c').read_text()
         start = source.index('static bool storage_float_format(')
@@ -265,12 +301,16 @@ int main(void) {
         self.run_harness(self.harness('forget', harness.replace('/*FORGET*/', source[start:end])))
         self.assertIn('forget_texture_descriptors(t); backend_texture_destroyed(t); free(t);', source)
 
-    def surface_spirv(self, atomic, stage):
+    def surface_spirv(self, atomic, stage, branch=False):
         if not hasattr(self, 'surface_generator'):
             translator = os.environ.get('SCARLET_SCENE_TRANSLATOR', str(ROOT / 'runtime/nvn/maxwell/translate.c'))
             self.surface_generator = self.harness('surface', SURFACE,
                 extra=('-I', str(ROOT / 'runtime/nvn/maxwell'), translator))
-        src = self.run_harness(self.surface_generator, int(atomic), stage)
+        args = [self.surface_generator, int(atomic), stage]
+        if branch: args.append('branch')
+        src = self.run_harness(*args)
+        if branch:
+            self.assertIn('[[dont_unroll]]', src)
         glslang = os.environ.get('GLSLANG_VALIDATOR') or shutil.which('glslangValidator')
         validator = os.environ.get('SPIRV_VAL') or shutil.which('spirv-val')
         if not glslang or not validator:
@@ -281,6 +321,34 @@ int main(void) {
         self.run_harness(glslang, '-V', '--target-env', 'vulkan1.3', '-o', spv, shader)
         self.run_harness(validator, '--target-env', 'vulkan1.3', spv)
         return spv
+
+    def test_branch_dispatcher_is_not_unrolled(self):
+        for stage in (0, 1, 5):
+            with self.subTest(stage=stage):
+                spv = self.surface_spirv(False, stage, branch=True)
+                words = struct.unpack('<%dI' % (spv.stat().st_size // 4), spv.read_bytes())
+                loops = []
+                i = 5
+                while i < len(words):
+                    count, op = words[i] >> 16, words[i] & 0xffff
+                    self.assertGreater(count, 0)
+                    if op == 246: loops.append(words[i + 3])  # OpLoopMerge's Loop Control operand
+                    i += count
+                self.assertTrue(any(mask & 2 for mask in loops), 'SPIR-V lost DontUnroll')
+
+    def test_vulkan_branch_values_with_fast_pipeline_creation(self):
+        if os.environ.get('SCARLET_VULKAN_GPU_TEST') != '1':
+            self.skipTest('set SCARLET_VULKAN_GPU_TEST=1 for Vulkan numerical execution')
+        exe = self.harness('branch_gpu', (ROOT / 'tools/test_surface_gpu.c').read_text(), headers=True,
+            extra=(os.environ.get('VULKAN_LIBRARY', '-lvulkan'),))
+        optimizer = os.environ.get('SPIRV_OPT') or shutil.which('spirv-opt')
+        for mode, fast, optimized in itertools.product((0, 1), (False, True), (False, True) if optimizer else (False,)):
+            with self.subTest(mode=mode, fast=fast, optimized=optimized):
+                spv = self.surface_spirv(False, 5, branch=True)
+                if optimized: self.run_harness(optimizer, '-O', spv, '-o', spv)
+                args = [exe, spv, mode] + (['fast'] if fast else [])
+                values = [int(v, 16) for v in self.run_harness(*args).split()]
+                self.assertEqual(values, [0, 0xffff4080, 0, 0] if mode == 0 else [11, 0x3f000000, 11, 11])
 
     def test_surface_shaders_compile_in_all_stages(self):
         for atomic, stage in itertools.product((False, True), (0, 1, 5)):

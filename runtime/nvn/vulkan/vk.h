@@ -21,6 +21,7 @@
 
 void vk_device_fault_report(void);
 void vk_pipeline_cache_save(void);  // cache/vk_pipelines.bin (any thread)
+bool vk_builds_pending(void);       // exit must not wait for a cache locked by an active driver compile
 #define VK_CHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { if (r_ == VK_ERROR_DEVICE_LOST) vk_device_fault_report(); \
     FATAL("%s failed: %d (%s:%d)\n", #x, r_, __FILE__, __LINE__); } } while (0)
 

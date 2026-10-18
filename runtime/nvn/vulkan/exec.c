@@ -43,6 +43,7 @@ uint64_t prof_up_ns = ~0ull;  // textures.c upload checks (~0: profiling off)
 #define PROF_ADD(v) do { if (prof) v += SDL_GetTicksNS() - prof_t0_; } while (0)
 static _Atomic int stat_compiles;
 static _Atomic int jobs_pending;  // queued + running jobs, independent of completed-build statistics
+bool vk_builds_pending(void) { return atomic_load(&jobs_pending) != 0; }
 static _Atomic uint64_t stat_translate_ns, stat_spirv_ns, stat_pipe_ns;  // CPU time translating / compiling programs
 static uint64_t stat_shader_wait_ns;  // draws waiting for their program / pipeline (wait_built)
 static _Atomic int new_pipes;  // pipelines created since the pipeline cache was last saved
@@ -468,9 +469,7 @@ static void run_job(void (*fn)(void *), void *arg) {
         // cores-4 policy spawned 8 compiler workers on a 12-thread Ryzen 4600G,
         // starving game/audio threads and turning shader bursts into multi-second hitches.
         int cores = SDL_GetNumLogicalCPUCores();
-        int n = cores / 3;
-        if (n < 2) n = 2;
-        if (n > 8) n = 8;
+        int n = cores <= 12 ? 1 : 2;
         for (int i = 0; i < n; i++) {
             pthread_t t;
             int error = pthread_create(&t, NULL, worker, NULL);
@@ -478,6 +477,7 @@ static void run_job(void (*fn)(void *), void *arg) {
             else LOG("[shader] worker creation failed: %d\n", error);
         }
         LOG("[shader] %d low-priority workers on %d logical CPUs\n", worker_count, cores);
+        LOG("[shader] build timeout: 8000 ms; translated AMD pipelines use fast creation\n");
     }
     if (!worker_count) { fn(arg); return; }  // no job may wait forever if the OS cannot start a worker
     Job *j = malloc(sizeof *j);
@@ -498,6 +498,14 @@ static void wait_built(_Atomic int *state, const char *kind, uint64_t code0, uin
     while (!atomic_load(state)) {
         SDL_Delay(1);
         uint64_t now = SDL_GetTicksNS();
+        if (!atomic_load(state) && now - start >= 8000000000ull) {
+            LOG("[build-timeout] %s %llx/%llx exceeded 8 s; stopping the process before further compiler work\n",
+                kind, (unsigned long long)code0, (unsigned long long)code1);
+            fflush(stderr);
+            // A Vulkan compiler call cannot be cancelled by killing its pthread or by destroying its device.
+            // End the process without driver/DLL teardown, which may otherwise wait for the stuck compiler.
+            plat_emergency_exit(86);
+        }
         if (now >= report) {
             LOG("[shader-wait] %s %llx/%llx: %.1f s, jobs=%d (command preserved)\n", kind,
                 (unsigned long long)code0, (unsigned long long)code1, (now - start) / 1e9,
@@ -1068,6 +1076,10 @@ static void compile_program(void *arg) {
     p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
     p->vs = vk_module(sv, nv);
     p->fs = vk_module(sf, nf);
+    static _Atomic unsigned module_logs;
+    if (atomic_fetch_add(&module_logs, 1) < 8)
+        LOG("[shader] modules %llx/%llx: vertex=%zu words fragment=%zu words\n",
+            (unsigned long long)p->code[0], (unsigned long long)p->code[1], nv, nf);
     free(sv);
     free(sf);
     p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -1449,6 +1461,12 @@ static VkPrimitiveTopology topo_class_base(uint8_t c) {
     return c == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : c == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 }
 
+static VkPipelineCreateFlags translated_pipeline_flags(uint32_t vendor) {
+    // Prefer bounded compilation work on the user's AMD APU. This is a driver optimization hint, separate
+    // from shaderc optimization and from SPIR-V NoContraction/depth invariance; it does not replace a shader.
+    return vendor == 0x1002 ? VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT : 0;
+}
+
 static void build_pipeline(void *arg) {
     Pipe *pp = arg;
     PipeKey *k = &pp->k;
@@ -1502,6 +1520,7 @@ static void build_pipeline(void *arg) {
                                         .pColorAttachmentFormats = k->color, .depthAttachmentFormat = k->depth,
                                         .stencilAttachmentFormat = k->stencil};
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2,
+                                       .flags = translated_pipeline_flags(g_vk.props.vendorID),
                                        .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = k->prog->layout};
@@ -2195,6 +2214,7 @@ static void build_compute(void *arg) {
     VkSpecializationMapEntry me[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
     VkSpecializationInfo spec = {3, me, 12, cp->local};
     VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                      .flags = translated_pipeline_flags(g_vk.props.vendorID),
                                       .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                                 .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main",
                                                 .pSpecializationInfo = &spec},

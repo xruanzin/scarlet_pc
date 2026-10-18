@@ -1,5 +1,10 @@
 # Scarlet: comandos de GPU preservados e entrada na seleção de personagem
 
+**Revisão posterior:** o log `scarlet_boot(20261018-150324).log` expôs uma espera
+de 119 s antes da primeira imagem. A espera descrita abaixo agora tem prazo de
+8 s, e a compilação AMD e o uso de recursos foram revistos. Consulte
+[SCARLET-BOOT-RECOVERY.md](SCARLET-BOOT-RECOVERY.md) para o comportamento atual.
+
 Análise do log `scarlet_boot(20261018-125740).log`, sobre a revisão `25afbcd`.
 O processo chegou a apresentar mais de 500 quadros e terminou com `window closed`.
 Não há crash registrado. Isso não comprova que a lógica da tela estivesse avançando.
