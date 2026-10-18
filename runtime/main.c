@@ -153,12 +153,34 @@ static void boot(const char *root) {
     }
     LOG("main thread: prio %d, stack 0x%x, program id %016llx\n", prio, stack_size, (unsigned long long)g_program_id);
 
-    uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_");
-    if (!start) FATAL("nn::init::Start not found\n");
+    // Nintendo SDKs use two known nn::init::Start ABIs. Older SDKs take
+    // (thread, args, init, fini); newer ones add an rtld "mark" callback:
+    // (thread, args, mark, init, fini). Scarlet's SDK is newer than the
+    // Let's Go baseline, so accept both instead of hardcoding the old ABI.
+    const char *start_old = "_ZN2nn4init5StartEmmPFvvES2_";
+    const char *start_new = "_ZN2nn4init5StartEmmPFvvES2_S2_";
+    uint64_t start = loader_find_symbol(start_old);
+    bool modern_start = false;
+    if (!start) {
+        start = loader_find_symbol(start_new);
+        modern_start = start != 0;
+    }
+    if (!start) {
+        loader_log_symbols_prefix("_ZN2nn4init5Start");
+        FATAL("nn::init::Start not found (old/new ABI)\n");
+    }
+
     uint64_t init_fn = hle_register("<rtld_init_sdk>", rtld_init_sdk);
     uint64_t fini_fn = hle_register("<rtld_init_main>", rtld_init_main);
+    uint64_t mark_fn = hle_register("<rtld_mark>", NULL);  // modern rtld callback: no-op is sufficient here
+    LOG("[boot] nn::init::Start %s ABI at %llx\n",
+        modern_start ? "5-arg" : "4-arg", (unsigned long long)start);
+
     KThread *t = kernel_create_main_thread(start, stack_size, prio);
-    kernel_run_main(t, t->handle, 0, init_fn, fini_fn);  // nn::init::Start(thread_handle, args_region, init, fini)
+    if (modern_start)
+        kernel_run_main(t, t->handle, 0, mark_fn, init_fn, fini_fn);
+    else
+        kernel_run_main(t, t->handle, 0, init_fn, fini_fn, 0);
 }
 
 int main(int argc, char **argv) {
