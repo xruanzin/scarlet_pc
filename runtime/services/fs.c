@@ -455,7 +455,7 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         ssize_t n = romfs_read(st->fd, (uint8_t *)(uintptr_t)b->addr, size, off);
 
         static unsigned early_reads;
-        if (early_reads < 16) {
+        if (getenv("LARECOMP_FS_PROBE") && early_reads < 16) {
             unsigned idx = ++early_reads;
             LOG("[fs-probe] read#%u off=%#llx size=%#llx dst=%#llx got=%lld\n",
                 idx, (unsigned long long)off, (unsigned long long)size,
