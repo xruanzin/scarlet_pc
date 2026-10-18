@@ -149,7 +149,8 @@ typedef struct StdAllocRec {
     uint64_t addr;
     uint64_t size;
     uint64_t align;
-    struct StdAllocRec *next;
+    // all-list is only for reset; hash chain is the hot lookup path.
+    struct StdAllocRec *next, *prev, *hnext;
 } StdAllocRec;
 
 typedef struct StdFreeRec {
@@ -159,8 +160,42 @@ typedef struct StdFreeRec {
 } StdFreeRec;
 
 static StdAllocRec *g_std_recs;
+#define STD_REC_HASH (1u << 17)
+static StdAllocRec *g_std_hash[STD_REC_HASH];
 static StdFreeRec *g_std_free;
 static pthread_mutex_t g_std_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static inline uint32_t std_rec_hash(uint64_t addr) {
+    return (uint32_t)(((addr >> 4) * 11400714819323198485ull) >> (64 - 17));
+}
+
+static void std_rec_insert_locked(StdAllocRec *r) {
+    r->prev = NULL;
+    r->next = g_std_recs;
+    if (g_std_recs) g_std_recs->prev = r;
+    g_std_recs = r;
+
+    uint32_t h = std_rec_hash(r->addr);
+    r->hnext = g_std_hash[h];
+    g_std_hash[h] = r;
+}
+
+static StdAllocRec *std_rec_find_locked(uint64_t addr) {
+    for (StdAllocRec *r = g_std_hash[std_rec_hash(addr)]; r; r = r->hnext)
+        if (r->addr == addr) return r;
+    return NULL;
+}
+
+static void std_rec_remove_locked(StdAllocRec *r) {
+    if (r->prev) r->prev->next = r->next;
+    else g_std_recs = r->next;
+    if (r->next) r->next->prev = r->prev;
+
+    uint32_t h = std_rec_hash(r->addr);
+    StdAllocRec **pp = &g_std_hash[h];
+    while (*pp && *pp != r) pp = &(*pp)->hnext;
+    if (*pp) *pp = r->hnext;
+}
 static uint64_t g_std_declared_size = 0x10000000ull;
 static uint64_t g_std_live_bytes;
 
@@ -268,8 +303,7 @@ static uint64_t std_guest_alloc(uint64_t size, uint64_t align) {
     r->addr = addr;
     r->size = size;
     r->align = align;
-    r->next = g_std_recs;
-    g_std_recs = r;
+    std_rec_insert_locked(r);
     g_std_live_bytes += size;
     pthread_mutex_unlock(&g_std_lock);
 
@@ -277,30 +311,17 @@ static uint64_t std_guest_alloc(uint64_t size, uint64_t align) {
     return addr;
 }
 
-static StdAllocRec *std_find_locked(uint64_t addr, StdAllocRec ***link_out) {
-    StdAllocRec **link = &g_std_recs;
-    while (*link) {
-        if ((*link)->addr == addr) {
-            if (link_out) *link_out = link;
-            return *link;
-        }
-        link = &(*link)->next;
-    }
-    return NULL;
-}
-
 static void std_guest_free(uint64_t addr) {
     if (!addr) return;
     pthread_mutex_lock(&g_std_lock);
-    StdAllocRec **link = NULL;
-    StdAllocRec *r = std_find_locked(addr, &link);
+    StdAllocRec *r = std_rec_find_locked(addr);
     if (!r) {
         pthread_mutex_unlock(&g_std_lock);
         LOG("[heaps] StandardAllocator::Free unknown guest pointer %#llx (ignored)\n",
             (unsigned long long)addr);
         return;
     }
-    *link = r->next;
+    std_rec_remove_locked(r);
     if (g_std_live_bytes >= r->size) g_std_live_bytes -= r->size;
     std_free_insert_locked(r->addr, r->size);
     pthread_mutex_unlock(&g_std_lock);
@@ -313,7 +334,7 @@ static uint64_t std_guest_realloc(uint64_t addr, uint64_t size) {
 
     uint64_t old_size = 0, align = 16;
     pthread_mutex_lock(&g_std_lock);
-    StdAllocRec *r = std_find_locked(addr, NULL);
+    StdAllocRec *r = std_rec_find_locked(addr);
     if (r) {
         old_size = r->size;
         align = r->align;
@@ -343,6 +364,7 @@ RT_ON_RESET(stdalloc_reset) {
     StdAllocRec *r = g_std_recs;
     StdFreeRec *f = g_std_free;
     g_std_recs = NULL;
+    memset(g_std_hash, 0, sizeof g_std_hash);
     g_std_free = NULL;
     g_std_live_bytes = 0;
     g_std_declared_size = 0x10000000ull;
