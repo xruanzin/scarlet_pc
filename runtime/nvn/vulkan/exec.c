@@ -2509,11 +2509,7 @@ static void draw_(CmdRec *r, bool indexed) {
         // capacities are consistently 12:4:4 bytes/vertex. Some shaders still
         // write v1.yz/v2.yz as ordinary outputs, but those components are not
         // part of the stream-output layout.
-        uint32_t tf0 = 0, tf1 = 0;
-        if (vs->control) {
-            memcpy(&tf0, vs->control + 0x6e8, sizeof tf0);
-            memcpy(&tf1, vs->control + 0x6ec, sizeof tf1);
-        }
+        uint32_t tf0 = vs->tf_meta0, tf1 = vs->tf_meta1;
         if (tf0 == 0x00010101u && tf1 == 0x00000103u) {
             vkey.xfb_layout = 1;
             vkey.xfb_comp[0] = 3;  // v0.xyz -> buffer 0, stride 12
