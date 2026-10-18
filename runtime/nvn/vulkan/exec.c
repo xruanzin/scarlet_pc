@@ -1269,6 +1269,19 @@ static void translate_program(void *arg) {
             LOG("[shader] VS has no position export: code=%llx source=%zu bytes inst=%u cases=%u\n",
                 (unsigned long long)p->code[0], strlen(p->vi->msl),
                 p->vi->num_insts, p->vi->dispatch_labels);
+        // Keep what is needed to analyse the shader offline: the translated GLSL and the raw Maxwell words, named
+        // by guest address (build/shader-diagnostics/nopos_<addr>_vs.{glsl,sass.bin}).
+        if (no_pos_logs < 32) {
+            char path[256];
+            mkdir("build/shader-diagnostics", 0755);
+            snprintf(path, sizeof path, "build/shader-diagnostics/nopos_%llx_vs.glsl", (unsigned long long)p->code[0]);
+            FILE *f = fopen(path, "w");
+            if (f) { fputs(p->vi->msl, f); fclose(f); }
+            size_t n = p->cmax[0] < 0x4000 ? p->cmax[0] : 0x4000;
+            snprintf(path, sizeof path, "build/shader-diagnostics/nopos_%llx_vs.sass.bin", (unsigned long long)p->code[0]);
+            f = fopen(path, "wb");
+            if (f) { fwrite((const void *)(uintptr_t)p->code[0], 1, n, f); fclose(f); }
+        }
     }
 
     log_shader_flow(p->vi, p->code[0], "vs");
