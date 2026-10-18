@@ -28,7 +28,7 @@ if (-not (Test-Path -LiteralPath $MsysBin -PathType Container)) {
 $env:Path = "$MsysBin;C:\msys64\usr\bin;$env:Path"
 $env:LARECOMP_NO_LAUNCHER = "1"
 $env:LARECOMP_LOG_HEAPS = "1"
-$env:LARECOMP_LOG_BINDINGS = "1"
+$env:LARECOMP_LOG_BINDINGS = ""
 
 $Log = Join-Path $RepoRoot "scarlet_boot.log"
 if (Test-Path -LiteralPath $Log) {
