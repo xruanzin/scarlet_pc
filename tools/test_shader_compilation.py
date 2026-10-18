@@ -167,6 +167,31 @@ class ShaderCompilationTests(unittest.TestCase):
                     i += count
                 self.assertTrue(precise)
 
+    def test_transform_feedback_layout_compiles_and_validates(self):
+        source = '''#version 460
+layout(location=0, xfb_buffer=0, xfb_offset=0, xfb_stride=12) out vec3 v0;
+layout(location=1, xfb_buffer=1, xfb_offset=0, xfb_stride=4) out float v1;
+layout(location=2, xfb_buffer=2, xfb_offset=0, xfb_stride=4) out float v2;
+void main() {
+    v0 = vec3(float(gl_VertexIndex), 2.0, 3.0);
+    v1 = 4.0; v2 = 5.0;
+    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+}
+'''
+        path, _ = self.compile(source, 0, name='xfb')
+        data = path.read_bytes()
+        words = struct.unpack('<%dI' % (len(data) // 4), data)
+        # OpExecutionMode Xfb = 11. The exact output decorations are validated
+        # by spirv-val above; this makes sure shaderc did not silently drop XFB.
+        found = False
+        i = 5
+        while i < len(words):
+            count, op = words[i] >> 16, words[i] & 0xffff
+            if op == 16 and count >= 3 and words[i + 2] == 11:
+                found = True
+            i += count
+        self.assertTrue(found)
+
     def test_fragment_register_dispatcher_renders_correct_pixels(self):
         if not os.environ.get('SCARLET_VULKAN_GPU_TEST'):
             self.skipTest('requires SCARLET_VULKAN_GPU_TEST=1 and a Vulkan device')
