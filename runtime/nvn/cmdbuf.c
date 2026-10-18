@@ -465,8 +465,8 @@ NVN(nvnCommandBufferDrawElementsBaseVertex) {
 NVN(nvnCommandBufferDrawElementsInstanced) { trace_draw(c, c->x[3]); draw_chain(c, "elements_inst", c->x[3]); Snap s = snap(c); obj_mark(c, cb_of(s.x[0])); record(c, CMD_DRAW_ELEMENTS, 0, &s); }
 PLAIN(nvnCommandBufferDrawArraysIndirect, CMD_DRAW_ARRAYS_INDIRECT)
 PLAIN(nvnCommandBufferDrawElementsIndirect, CMD_DRAW_ELEMENTS_INDIRECT)
-NVN(nvnCommandBufferMultiDrawArraysIndirectCount) { (void)c; }
-NVN(nvnCommandBufferMultiDrawElementsIndirectCount) { (void)c; }
+PLAIN(nvnCommandBufferMultiDrawArraysIndirectCount, CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT)
+PLAIN(nvnCommandBufferMultiDrawElementsIndirectCount, CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT)
 NVN(nvnCommandBufferDrawTransformFeedback) { (void)c; }
 NVN(nvnCommandBufferDrawTexture) { (void)c; }
 PLAIN(nvnCommandBufferDispatchCompute, CMD_DISPATCH)

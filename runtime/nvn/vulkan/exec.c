@@ -13,6 +13,8 @@
 
 #include "../../kernel.h"
 #include "shaders.h"
+#include "storage_ranges.h"
+#include "../indirect.h"
 #include "vk.h"
 #include "../renderer.h"
 #include "../../settings.h"
@@ -149,6 +151,7 @@ void vk_full_barrier(VkCommandBuffer cb) {
 }
 
 static void ring_retire(void);
+static void flush_transient_writes(void);
 
 // ---- LARECOMP_GPUPROF_AT=<frame>: GPU time per pass / dispatch / copy of that frame, logged as "[gpuprof]".
 // A timestamp (ALL_COMMANDS: after everything before it) at each mark; a row = the work since the previous mark.
@@ -237,6 +240,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     {
         PROF_T0();
         dl_note("submit %llu", (unsigned long long)submit_seq + 1);
+        flush_transient_writes();
         VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, VK_NULL_HANDLE);
         if (sr == VK_ERROR_DEVICE_LOST) vk_devlost_dump();
         VK_CHECK(sr);
@@ -310,6 +314,12 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
 typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq; } Chunk;
 static Chunk *chunks;
 static int nchunks, active = -1;
+
+static void flush_transient_writes(void) {
+    uint64_t seq = vk_pending_seq();
+    for (int i = 0; i < nchunks; i++) if (chunks[i].seq == seq && chunks[i].used)
+        vmaFlushAllocation(g_vk.vma, chunks[i].mem, 0, chunks[i].used);
+}
 
 static int new_chunk(uint64_t size) {
     chunks = realloc(chunks, (nchunks + 1) * sizeof *chunks);
@@ -1738,6 +1748,13 @@ static bool gmem_import(uint64_t size) {
 
 static uint64_t gmem_tried;  // heap size the import was last attempted for (gmem_info imports / re-imports)
 
+static uint8_t storage_buffer_count(void) {
+    if (g_vk.host_import) return 0;
+    uint32_t n = g_vk.props.limits.maxPerStageDescriptorStorageBuffers;
+    if (n) n--;  // leave room for the storage-image handle map
+    return (uint8_t)(n < 16 ? n : 16);
+}
+
 static VkDescriptorBufferInfo gmem_info(void) {
     static int off = -1;
     if (off < 0) off = getenv("LARECOMP_VK_NO_GMEM") != NULL || !g_vk.host_import;
@@ -1959,12 +1976,86 @@ static SurfaceBindlessCache *surface_cache_get(NvnDescPool *pool) {
 // Writes the descriptor set of one stage. gx..gz: compute group counts (driver constants).
 // pre_ii: texture descriptors already resolved by the caller (draw: fragment textures, needed earlier for the
 // viewport decision), or NULL.
+typedef struct { uint64_t addr, size; VkSpan span; } StorageWriteback;
+static StorageWriteback storage_writeback[32];
+static int storage_nwriteback;
+
+static void storage_finish_writes(void) {
+    if (!storage_nwriteback) return;
+    vk_end_pass();
+    VkMemoryBarrier2 host = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+    VkDependencyInfo dependency = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &host};
+    vkCmdPipelineBarrier2(vk_cmd(), &dependency);
+    // A conservative fallback for drivers without external_memory_host. GPU writes must reach guest memory
+    // before vertex/index/uniform/texture snapshots or the guest CPU can consume the result.
+    renderer_flush();
+    for (int i = 0; i < storage_nwriteback; i++) {
+        StorageWriteback *w = &storage_writeback[i];
+        for (int c = 0; c < nchunks; c++) if (chunks[c].buf == w->span.buf) {
+            vmaInvalidateAllocation(g_vk.vma, chunks[c].mem, w->span.off, w->size); break;
+        }
+        memcpy((void *)(uintptr_t)w->addr, w->span.ptr, w->size);
+        backend_pool_written(w->addr, w->size);
+    }
+    storage_nwriteback = 0;
+    guest_copy_flush();
+}
+
+static void storage_stage_buffers(int stage, ShaderInfo *si, VkDescriptorBufferInfo buffers[16], uint32_t map[16][4]) {
+    StorageRange input[32], merged[32];
+    int ni = 0;
+    // Merge aliases across both graphics stages. A shader can read through one binding and write through another.
+    for (int s = 0; s < 6; s++) {
+        if (stage == 5 ? s != 5 : s != 0 && s != 1) continue;
+        for (int i = 0; i < 16; i++) input[ni++] = (StorageRange){st.sbuf[s][i].addr, st.sbuf[s][i].size};
+    }
+    uint64_t align = g_vk.props.limits.minStorageBufferOffsetAlignment;
+    if (align < 256) align = 256;
+    size_t nm = storage_merge_ranges(input, (size_t)ni, align, merged, 32);
+    VkSpan spans[32] = {0};
+    memset(map, 0, 16 * 4 * sizeof(uint32_t));
+    for (int i = 0; i < si->storage_buffers; i++) {
+        Range r = st.sbuf[stage][i];
+        VkSpan span = {0};
+        uint64_t range_size = 16, delta = 0;
+        for (size_t m = 0; m < nm && r.addr && r.size; m++) {
+            if (r.addr < merged[m].addr || r.addr - merged[m].addr > merged[m].size ||
+                r.size > merged[m].size - (r.addr - merged[m].addr)) continue;
+            if (merged[m].size > g_vk.props.limits.maxStorageBufferRange) {
+                FATAL("NVN storage buffer exceeds Vulkan maxStorageBufferRange (%llu bytes)\n", (unsigned long long)merged[m].size);
+            }
+            if (!spans[m].buf) spans[m] = guest_copy(merged[m].addr, merged[m].size);
+            span = spans[m]; range_size = merged[m].size; delta = r.addr - merged[m].addr;
+            map[i][0] = (uint32_t)r.addr; map[i][1] = (uint32_t)(r.addr >> 32);
+            map[i][2] = (uint32_t)r.size; map[i][3] = (uint32_t)delta;
+            if (si->writes_gmem) {
+                bool found = false;
+                for (int j = 0; j < storage_nwriteback; j++)
+                    if (storage_writeback[j].addr == r.addr && storage_writeback[j].size == r.size) found = true;
+                if (!found && storage_nwriteback < 32) storage_writeback[storage_nwriteback++] = (StorageWriteback){r.addr, r.size,
+                    {.buf = span.buf, .off = span.off + delta, .ptr = (uint8_t *)span.ptr + delta}};
+            }
+            break;
+        }
+        if (!span.buf) { static const uint32_t zero[4]; span = vk_transient_copy(zero, sizeof zero, 256); }
+        buffers[i] = (VkDescriptorBufferInfo){span.buf, span.off, range_size};
+    }
+    static int told;
+    if (told++ < 8) LOG("[gmem] native NVN storage buffers: stage=%d slots=%u ranges=%zu writes=%d (no host import)\n",
+                        stage, si->storage_buffers, nm, si->writes_gmem);
+}
+
 static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t set, int stage, ShaderInfo *si, const float *rscale_row0,
                                  const float tint[8], uint32_t gx, uint32_t gy, uint32_t gz, const VkDescriptorImageInfo *pre_ii) {
     VkDescriptorSet ds = vk_alloc_set(layout);
     VkWriteDescriptorSet w[MAX_BIND];
     VkDescriptorBufferInfo bi[MAX_BIND];
     VkDescriptorImageInfo ii[MAX_BIND];
+    VkDescriptorBufferInfo storage[16];
+    uint32_t storage_map[16][4];
+    if (si->storage_buffers) storage_stage_buffers(stage, si, storage, storage_map);
     SurfaceBindlessCache *surf = (si->uses_surface_write || si->uses_surface_atomic) ? surface_cache_get(st.tpool) : NULL;
     int n = 0;
     int sg = stage == 1 ? 1 : 0;
@@ -1995,6 +2086,12 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
                 tex_wh[sg][ti][0] = wh[0]; tex_wh[sg][ti][1] = wh[1];
             }
             w[n].pImageInfo = &ii[n];
+        } else if (si->storage_buffers && b->binding == 17 && b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+            bi[n] = ubo_span(vk_transient_copy(storage_map, si->storage_buffers * 16, 256), si->storage_buffers * 16);
+            w[n].pBufferInfo = &bi[n];
+        } else if (si->storage_buffers && b->binding >= 64 && b->binding < 64u + si->storage_buffers && b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+            bi[n] = storage[b->binding - 64];
+            w[n].pBufferInfo = &bi[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->binding < 17) {
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
             w[n].pBufferInfo = &bi[n];
@@ -2066,6 +2163,7 @@ static CsProg *compute_program(NvnProgram *np) {
     ShaderKey k = {0};
     k.glsl = 1;
     k.bindless_storage = g_vk.bindless_storage_slots;
+    k.storage_buffers = storage_buffer_count();
     cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
     cp->p.vi = cp->si;
     if (!cp->si->msl) {
@@ -2090,6 +2188,7 @@ static CsProg *compute_program(NvnProgram *np) {
 }
 
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
+    storage_nwriteback = 0;
     snap_reason = "compute"; snapshots_invalidate(NULL);
     if (!st.program || !gx || !gy || !gz) return;
     CsProg *cp = compute_program(st.program);
@@ -2105,6 +2204,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
     vkCmdDispatch(cb, gx, gy, gz);
     stat_dispatches++;
+    storage_finish_writes();
 }
 
 // ================================================================== draws
@@ -2176,6 +2276,7 @@ static bool wait_built(_Atomic int *state) {
 
 static uint64_t prof_tp_;
 static void draw_(CmdRec *r, bool indexed) {
+    storage_nwriteback = 0;
     if (prof) prof_tp_ = SDL_GetTicksNS();
     if (!st.program) { SKIP(0); return; }
     if (ip_enabled()) {  // (frame interpolation: what identifies this draw from one frame to the next)
@@ -2200,6 +2301,7 @@ static void draw_(CmdRec *r, bool indexed) {
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.bindless_storage = fkey.bindless_storage = g_vk.bindless_storage_slots;
+    vkey.storage_buffers = fkey.storage_buffers = storage_buffer_count();
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
@@ -2573,6 +2675,7 @@ static void draw_(CmdRec *r, bool indexed) {
     // End dynamic rendering so the next operation takes begin_pass()/copy/compute's
     // normal full barrier and observes the SUST/SURED result.
     if (surface_write) vk_end_pass();
+    storage_finish_writes();
     if (g_gpuprof_frame && gp_n) {
         if (!gp_draws[gp_n - 1]) {  // first draw of the row: its fragment shader hash
             size_t l = strlen(gp_label[gp_n - 1]);
@@ -3362,6 +3465,36 @@ static void exec_list(uint64_t handle, int depth) {
                 clear(-1, 0, NULL, 0, r->x[0] != 0, r->f[0], has_stencil && r->x[2] != 0, (uint32_t)r->x[1], (uint32_t)r->x[2]);
             }
             break;
+        case CMD_DISPATCH_INDIRECT: {
+            renderer_flush();  // the argument buffer may have been produced by compute
+            if (r->x[0]) { uint32_t groups[3]; memcpy(groups, (const void *)(uintptr_t)r->x[0], sizeof groups);
+                dispatch_compute(groups[0], groups[1], groups[2]); }
+            break;
+        }
+        case CMD_DRAW_ARRAYS_INDIRECT: case CMD_DRAW_ELEMENTS_INDIRECT:
+        case CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT: case CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT: {
+            bool indexed = r->op == CMD_DRAW_ELEMENTS_INDIRECT || r->op == CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT;
+            bool multi = r->op == CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT || r->op == CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT;
+            renderer_flush();
+            uint64_t address = r->x[indexed ? 3 : 1];
+            uint32_t count = 1, stride = indexed ? 20 : 16;
+            if (multi) {
+                uint64_t count_addr = r->x[indexed ? 4 : 2];
+                uint32_t max_count = (uint32_t)r->x[indexed ? 5 : 3];
+                uint32_t requested_stride = (uint32_t)r->x[indexed ? 6 : 4];
+                if (!count_addr || !max_count || (int32_t)max_count < 0) break;
+                memcpy(&count, (const void *)(uintptr_t)count_addr, sizeof count);
+                if (count > max_count) count = max_count;
+                if (requested_stride) { if (requested_stride < stride || requested_stride % 4) break; stride = requested_stride; }
+            }
+            for (uint32_t i = 0; address && i < count; i++) {
+                CmdRec direct;
+                if (nvn_indirect_draw(r, (const void *)(uintptr_t)address, indexed, &direct)) draw(&direct, indexed);
+                if (address > UINT64_MAX - stride) break;
+                address += stride;
+            }
+            break;
+        }
         case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
         case CMD_DRAW_ARRAYS: draw(r, false); break;
         case CMD_DRAW_ELEMENTS: draw(r, true); break;

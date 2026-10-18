@@ -1557,6 +1557,27 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                                                "uint(*(device ushort *)(gmem + ga))", "uint(int(*(device short *)(gmem + ga)))"};
         int nw = size == 5 ? 2 : size >= 6 ? 4 : 1;
         if (c->glsl) {  // gmem_.w[]: 32-bit words; sub-word accesses within the containing word
+            if (c->key && c->key->storage_buffers) {
+                // NVN storage descriptors contain real GPU addresses. Resolve those against the buffers
+                // actually bound to this stage, as Citron's global-memory-to-storage-buffer pass does.
+                if (store) {
+                    c->uses_gmem_store = true;
+                    if (size < 4)
+                        sp(&c->body, "      gmem_subword(ga, %du, %s);\n", size < 2 ? 8 : 16, R(d));
+                    else for (int k = 0; k < nw; k++)
+                        sp(&c->body, "      gmem_store(ga + %dul, %s);\n", k * 4, R(d == RZ ? RZ : d + k));
+                } else if (size < 4) {
+                    char value[256];
+                    snprintf(value, sizeof value, "(gmem_load(ga & ~3ul) >> (uint(ga & %s) * 8u))", size < 2 ? "3ul" : "2ul");
+                    if (size == 0) snprintf(t, sizeof t, "%s & 255u", value);
+                    else if (size == 1) snprintf(t, sizeof t, "uint(sx8(%s))", value);
+                    else if (size == 2) snprintf(t, sizeof t, "%s & 65535u", value);
+                    else snprintf(t, sizeof t, "uint(sx16(%s))", value);
+                    set_reg(c, d, t);
+                } else for (int k = 0; k < nw && d != RZ && d + k < RZ; k++) {
+                    snprintf(t, sizeof t, "gmem_load(ga + %dul)", k * 4); set_reg(c, d + k, t);
+                }
+            } else {
             static const char *const gl_small[] = {
                 "(gmem_.w[uint(ga >> 2)] >> (uint(ga & 3ul) * 8u)) & 0xFFu",
                 "uint(sx8(gmem_.w[uint(ga >> 2)] >> (uint(ga & 3ul) * 8u)))",
@@ -1581,6 +1602,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                 else
                     for (int k = 0; k < nw; k++)
                         sp(&c->body, "      if (ok) gmem_.w[uint(ga >> 2) + %du] = %s;\n", k, R(d == RZ ? RZ : d + k));
+            }
             }
         } else if (!store) {
             if (size < 4) {
@@ -1923,7 +1945,33 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (!n) n = 1;
         sp(&s, "layout(std140, set = %d, binding = %d) uniform CB%d { uvec4 cb%d[%u]; };\n", set, i, i, i, n);
     }
-    if (info->uses_gmem)
+    info->writes_gmem = c->uses_gmem_store;
+    info->storage_buffers = info->uses_gmem && key ? key->storage_buffers : 0;
+    if (info->storage_buffers > 16) info->storage_buffers = 16;
+    if (info->storage_buffers) {
+        sp(&s, "layout(std140, set = %d, binding = 17) uniform GMemMap { uvec4 range[%u]; } gmmap_;\n", set, info->storage_buffers);
+        for (int i = 0; i < info->storage_buffers; i++)
+            sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem%d { uint w[]; } gm%d_;\n",
+               set, 64 + i, c->uses_gmem_store ? "" : "readonly ", i, i);
+        sp(&s, "uint gmem_load(uint64_t ga) { uint64_t a = ga + 0x%llxul;\n", (unsigned long long)maxwell_gmem_base);
+        for (int i = 0; i < info->storage_buffers; i++)
+            sp(&s, "{ uvec4 r = gmmap_.range[%d]; uint64_t b = uint64_t(r.x) | (uint64_t(r.y) << 32); "
+               "if (a >= b && a - b + 4ul <= uint64_t(r.z)) return gm%d_.w[uint((a - b + r.w) >> 2)]; }\n", i, i);
+        sp(&s, "return 0u; }\n");
+        if (c->uses_gmem_store) {
+            sp(&s, "void gmem_store(uint64_t ga, uint v) { uint64_t a = ga + 0x%llxul;\n", (unsigned long long)maxwell_gmem_base);
+            for (int i = 0; i < info->storage_buffers; i++)
+                sp(&s, "{ uvec4 r = gmmap_.range[%d]; uint64_t b = uint64_t(r.x) | (uint64_t(r.y) << 32); "
+                   "if (a >= b && a - b + 4ul <= uint64_t(r.z)) { gm%d_.w[uint((a - b + r.w) >> 2)] = v; return; } }\n", i, i);
+            sp(&s, "}\nvoid gmem_subword(uint64_t ga, uint bits, uint v) { uint64_t a = (ga & ~3ul) + 0x%llxul; "
+               "uint sh = uint(ga & (bits == 8u ? 3ul : 2ul)) * 8u; uint m = ((1u << bits) - 1u) << sh;\n", (unsigned long long)maxwell_gmem_base);
+            for (int i = 0; i < info->storage_buffers; i++)
+                sp(&s, "{ uvec4 r = gmmap_.range[%d]; uint64_t b = uint64_t(r.x) | (uint64_t(r.y) << 32); "
+                   "if (a >= b && a - b + 4ul <= uint64_t(r.z)) { uint k = uint((a - b + r.w) >> 2); "
+                   "atomicAnd(gm%d_.w[k], ~m); atomicOr(gm%d_.w[k], (v << sh) & m); return; } }\n", i, i, i);
+            sp(&s, "}\n");
+        }
+    } else if (info->uses_gmem)
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");
     if (info->uses_surface_write || info->uses_surface_atomic) {

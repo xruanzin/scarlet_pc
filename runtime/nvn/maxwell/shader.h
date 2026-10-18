@@ -10,6 +10,9 @@
 //    `layout(std430, set=S, binding=17) [readonly] buffer GMem { uint w[]; } gmem_;`, 32-bit words relative to
 //    maxwell_gmem_base. `readonly` unless the shader stores (needs vertexPipeline/fragmentStoresAndAtomics then);
 //    byte / short stores are atomicAnd + atomicOr on the containing word.
+//    Without host-memory import, key.storage_buffers selects a range map (UBO 17) and the actual bound NVN
+//    storage buffers (SSBOs 64..79). LDG/STG resolve addresses against those ranges; GPU writes are read back
+//    before later guest/graphics consumers. No synthetic zero heap is used for this path.
 //  - rscale table -> binding 18: `uniform RScale { vec4 rscale[65]; };` (std140, the MSL buffer 18 contents).
 //  - per-draw tint -> binding 19: `uniform Tint { vec4 ltint[2]; };` (fragment, when uses_tint).
 //  - texture slot i (ShaderInfo.tex[i]) -> binding 32 + i, a combined image sampler: sampler1D/2D/3D/Cube/
@@ -47,6 +50,7 @@ typedef struct {
     uint32_t vs_out_mask;   // fragment: varyings the vertex shader provides
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
     uint8_t bindless_storage; // Vulkan backend can execute bindless SUST/SURED through storage images
+    uint8_t storage_buffers;  // LDG/STG through the bound NVN storage buffers (no host-memory import required)
 } ShaderKey;
 
 typedef struct {
@@ -68,6 +72,8 @@ typedef struct {
     uint32_t out_mask;      // vertex: output varyings; fragment: render targets written
     bool writes_depth, uses_discard, writes_point_size;
     bool uses_gmem;         // global memory access: bind the guest heap at GMEM_BUFFER_INDEX
+    bool writes_gmem;
+    uint8_t storage_buffers;
     bool uses_tint;         // fragment: reads the per-draw tint (buffer 19, float4[2]) applied to color target 0
     bool uses_rscale;       // reads the resolution-scale table (fragment/compute buffer 18): float4 [0] = render
                             // target scale, [1 + i] = allocation scale of texture i

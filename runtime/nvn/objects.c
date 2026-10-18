@@ -721,14 +721,21 @@ NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
     if (w && i >= 0 && i < w->num) {
-        static NvnTexture *last_tex;
-        static int last_i = -1;
+        static struct { NvnWindow *window; NvnTexture *texture; int index; uint32_t width, height, format; } seen[16];
+        static unsigned next_seen;
         NvnTexture *pt = HOST(NvnTexture, w->textures[i]);
-        if (pt != last_tex || i != last_i) {
+        bool known = false;
+        for (int n = 0; n < 16; n++)
+            if (seen[n].window == w && seen[n].texture == pt && seen[n].index == i &&
+                seen[n].width == (pt ? pt->width : 0) && seen[n].height == (pt ? pt->height : 0) &&
+                seen[n].format == (pt ? pt->format : 0)) known = true;
+        if (!known || getenv("LARECOMP_TRACE_PRESENT")) {
             LOG("[present] window texture %d/%d -> %p (%ux%u fmt %#x)\n",
                 i, w->num, (void *)pt,
                 pt ? pt->width : 0, pt ? pt->height : 0, pt ? pt->format : 0);
-            last_tex = pt; last_i = i;
+            unsigned n = next_seen++ % 16;
+            seen[n].window = w; seen[n].texture = pt; seen[n].index = i;
+            seen[n].width = pt ? pt->width : 0; seen[n].height = pt ? pt->height : 0; seen[n].format = pt ? pt->format : 0;
         }
     }
     {   // LARECOMP_POKE32="<guest addr>=<value>[;...]": 32-bit values written to the game's memory before every present

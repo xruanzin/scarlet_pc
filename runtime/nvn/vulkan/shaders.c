@@ -19,8 +19,17 @@ static shaderc_shader_kind kind_of(int stage) {
 
 // SPIR-V disk cache: cache/spirv/<hash of stage + source>.spv, so a known shader costs a file read instead of a
 // GLSL compile (the driver's pipeline cache only covers the step after this one).
+static shaderc_optimization_level optimization_level(int stage) {
+    const char *e = getenv("LARECOMP_VK_OPT");
+    if (e && !strcmp(e, "0")) return shaderc_optimization_level_zero;
+    // Preserve the established vertex depth invariance; optimize fragment/compute register state machines.
+    if (stage == STAGE_VERTEX && !e) return shaderc_optimization_level_zero;
+    return shaderc_optimization_level_performance;
+}
+
 static uint64_t src_hash(const char *src, int stage) {
-    uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage) + 3;  // + version of the post-processing (no_contraction)
+    // Include compiler mode: a previously cached unoptimized module must not bypass the new optimizer.
+    uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage ^ ((uint64_t)optimization_level(stage) << 32)) + 4;
     for (const char *p = src; *p; p++) { h ^= (uint8_t)*p; h *= 0x100000001B3ull; }
     return h;
 }
@@ -110,9 +119,8 @@ static uint32_t *no_contraction(uint32_t *spv, size_t *nwords) {
 
 // SPIR-V words of src, or NULL (error logged with the source). *nwords set on success. Thread-safe: one shaderc
 // compiler per thread (a shared one behind a lock serialised all the pipeline workers).
-// No spirv-opt by default: it rewrote the depth pre-pass and colour-pass vertex shaders differently enough that
-// their depths stopped matching (EQUAL test: black holes in foliage), and it was most of the compile time; the
-// driver optimises anyway. LARECOMP_VK_OPT=1 turns it back on (experiments).
+// Vertex optimization stays off by default: different depth-prepass/color-pass rewrites broke EQUAL testing.
+// Fragment and compute use the performance optimizer. LARECOMP_VK_OPT=0 disables it; =1 includes vertex shaders.
 uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t *nwords) {
     uint64_t h = src_hash(src, stage);
     static int nocache = -1;
@@ -123,8 +131,7 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
     if (!comp) comp = shaderc_compiler_initialize();
     shaderc_compile_options_t o = shaderc_compile_options_initialize();
     shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
-    shaderc_compile_options_set_optimization_level(o, getenv("LARECOMP_VK_OPT") ? shaderc_optimization_level_performance
-                                                                                  : shaderc_optimization_level_zero);
+    shaderc_compile_options_set_optimization_level(o, optimization_level(stage));
     shaderc_compilation_result_t r = shaderc_compile_into_spv(comp, src, strlen(src), kind_of(stage), name, "main", o);
     shaderc_compile_options_release(o);
     if (shaderc_result_get_compilation_status(r) != shaderc_compilation_status_success) {
