@@ -663,6 +663,25 @@ typedef struct {
     uint8_t has_dview;
 } RtState;
 
+static bool rt_view_equal(const NvnTextureView *a, bool ha, const NvnTextureView *b, bool hb) {
+    uint32_t ma = ha ? a->setmask & 7u : 0u;  // level/layer/format affect attachment views; swizzle does not
+    uint32_t mb = hb ? b->setmask & 7u : 0u;
+    if (ma != mb) return false;
+    if ((ma & 1u) && (a->base_level != b->base_level || a->num_levels != b->num_levels)) return false;
+    if ((ma & 2u) && (a->min_layer != b->min_layer || a->num_layers != b->num_layers)) return false;
+    if ((ma & 4u) && a->format != b->format) return false;
+    return true;
+}
+
+static bool rt_state_equal(const RtState *a, const RtState *b) {
+    if (a->ncolor != b->ncolor || a->depth != b->depth) return false;
+    for (int i = 0; i < a->ncolor; i++) {
+        if (a->color[i] != b->color[i]) return false;
+        if (!rt_view_equal(&a->cview[i], a->has_cview[i] != 0, &b->cview[i], b->has_cview[i] != 0)) return false;
+    }
+    return rt_view_equal(&a->dview, a->has_dview != 0, &b->dview, b->has_dview != 0);
+}
+
 typedef struct { uint64_t addr, size; } Range;
 
 // Extension commands are not exported by vulkan-1.lib on Windows. Resolve them
@@ -3899,7 +3918,7 @@ static void exec_list(uint64_t handle, int depth) {
             st.rt.has_dview = rt->has_dview;
             static int always = -1;
             if (always < 0) always = getenv("LARECOMP_VK_PASS_RESTART") != NULL;
-            if (always || memcmp(&prev, &st.rt, sizeof prev)) st.rt_dirty = true;
+            if (always || !rt_state_equal(&prev, &st.rt)) st.rt_dirty = true;
             break;
         }
         case CMD_SET_VIEWPORTS:
