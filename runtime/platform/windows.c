@@ -127,7 +127,7 @@ void plat_set_cpu_boost(bool enabled) {
     DWORD target = enabled ? HIGH_PRIORITY_CLASS : (normal_class ? normal_class : NORMAL_PRIORITY_CLASS);
     if (GetPriorityClass(GetCurrentProcess()) != target) {
         SetPriorityClass(GetCurrentProcess(), target);
-        LOG("[plat] CPU fast-load boost %s (priority class %#lx)\n", enabled ? "on" : "off", (unsigned long)target);
+        fprintf(stderr, "[plat] CPU fast-load boost %s (priority class %#lx)\n", enabled ? "on" : "off", (unsigned long)target);
     }
 }
 
