@@ -75,9 +75,17 @@ static void self_controller(Service *s, IpcReq *req, IpcResp *resp) {
     switch (req->cmd) {
     case 0: LOG("[am] application requested exit\n"); exit(0);
     case 9: resp->copy_handles[resp->ncopy++] = new_event(); break;
+    case 11: break;  // SetOperationModeChangedNotification
+    case 12: break;  // SetPerformanceModeChangedNotification
     case 13: break;  // SetFocusHandlingMode
     case 16: break;  // SetOutOfFocusSuspendingEnabled
     case 40: OUT(uint64_t, 0) = 1; resp_size(resp, 8); break;  // CreateManagedDisplayLayer
+    case 44:  // CreateManagedDisplaySeparableLayer (10.0.0+)
+        OUT(uint64_t, 0) = 1;
+        OUT(uint64_t, 8) = 2;
+        resp_size(resp, 16);
+        LOG("[gfx-milestone] AM separable display layers 1,2 created\n");
+        break;
     case 69: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;
     case 90: OUT(uint64_t, 0) = 0; resp_size(resp, 8); break;  // GetAccumulatedSuspendedTickValue
     case 91: resp->copy_handles[resp->ncopy++] = new_event(); break; // GetAccumulatedSuspendedTickChangedEvent
