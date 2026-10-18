@@ -87,6 +87,7 @@ class Module:
         # B+A; ABS64/GLOB_DAT/JUMP_SLOT give S+A. Discover every relocation
         # whose resolved value is inside this module's .text so indirect BLR/BR
         # can dispatch to it after relocation.
+        reloc_target = {}
         for off, typ, symidx, add in n.relocs:
             target = None
             if typ == R_AARCH64_RELATIVE:
@@ -96,8 +97,32 @@ class Module:
                     name, info, shndx, value, size = n.syms[symidx]
                     if shndx:
                         target = b + value + add
-            if target is not None and self.in_text(target):
-                starts.add(target)
+            if target is not None:
+                reloc_target[off] = target
+                if self.in_text(target):
+                    starts.add(target)
+
+        # rtld / __nnmusl_init_dso call DT_INIT and constructor-array entries
+        # indirectly. These pointers are not guaranteed to appear as BL/ADR
+        # targets, so explicitly seed them as callable entries.
+        for off in (getattr(n, 'init', 0), getattr(n, 'fini', 0)):
+            if off and self.in_text(b + off):
+                starts.add(b + off)
+
+        for arr, size in ((getattr(n, 'init_array', 0), getattr(n, 'init_array_size', 0)),
+                          (getattr(n, 'fini_array', 0), getattr(n, 'fini_array_size', 0))):
+            if not arr or not size:
+                continue
+            for slot in range(arr, arr + size, 8):
+                target = reloc_target.get(slot)
+                if target is None and slot + 8 <= len(n.image):
+                    raw = n.u64(slot)
+                    if self.in_text(raw):
+                        target = raw
+                    elif self.in_text(b + raw):
+                        target = b + raw
+                if target is not None and self.in_text(target):
+                    starts.add(target)
 
         starts = sorted(starts)
         return starts
