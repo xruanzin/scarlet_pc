@@ -298,7 +298,9 @@ static void attr_store(Ctx *c, int src, uint32_t addr) {
         c->out_attr_mask |= 1u << a;
         c->info->out_comp_mask[a] |= (uint8_t)(1u << ((addr >> 2) & 3));
         int comp = (addr >> 2) & 3;
-        if (c->key && c->key->xfb && c->key->glsl)
+        bool xfb_capture = c->key && c->key->xfb && c->key->glsl && a < 4 &&
+                           (!c->key->xfb_layout || c->key->xfb_comp[a]);
+        if (xfb_capture)
             sp(&c->body, "    xfbtmp%d[%d] = as_type<float>(%s);\n", a, comp, v);
         else
             sp(&c->body, "    out.v%d[%d] = as_type<float>(%s);\n", a, comp, v);
@@ -2040,8 +2042,11 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         for (int i = 0; i < 32; i++) {
             if (!(c->out_attr_mask & (1u << i))) continue;
             uint8_t cm = info->out_comp_mask[i];
-            if (key && key->xfb && i < 4 && cm) {
-                int nc = __builtin_popcount((unsigned)cm & 0xFu);
+            int nc = 0;
+            if (key && key->xfb && i < 4) {
+                nc = key->xfb_layout ? key->xfb_comp[i] : __builtin_popcount((unsigned)cm & 0xFu);
+            }
+            if (nc > 0) {
                 if (nc == 1)
                     sp(&s, "layout(location = %d, xfb_buffer = %d, xfb_offset = 0, xfb_stride = 4) out float v%d;\n", i, i, i);
                 else
@@ -2072,7 +2077,9 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         for (int i = 0; i < 32; i++) {
             if (!(c->out_attr_mask & (1u << i))) continue;
             uint8_t cm = info->out_comp_mask[i];
-            if (key && key->xfb && i < 4 && cm)
+            int nc = key && key->xfb && i < 4 ?
+                     (key->xfb_layout ? key->xfb_comp[i] : __builtin_popcount((unsigned)cm & 0xFu)) : 0;
+            if (nc > 0)
                 sp(&s, "  vec4 xfbtmp%d = vec4(0, 0, 0, 1);\n", i);
             else
                 sp(&s, "  v%d = vec4(0, 0, 0, 1);\n", i);
@@ -2103,13 +2110,19 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             for (int i = 0; i < 4; i++) {
                 uint8_t cm = info->out_comp_mask[i] & 0xFu;
                 if (!(c->out_attr_mask & (1u << i)) || !cm) continue;
-                int nc = __builtin_popcount((unsigned)cm);
+                int nc = key->xfb_layout ? key->xfb_comp[i] : __builtin_popcount((unsigned)cm);
+                if (nc <= 0) continue;
+                // The captured Scarlet layout is contiguous from x: xyz / x / x.
+                // Unknown layouts retain the old mask-derived swizzle.
                 char sw[5]; int sn = 0;
                 static const char comp[] = "xyzw";
-                for (int j = 0; j < 4; j++) if (cm & (1u << j)) sw[sn++] = comp[j];
+                if (key->xfb_layout) {
+                    for (int j = 0; j < nc && j < 4; j++) sw[sn++] = comp[j];
+                } else {
+                    for (int j = 0; j < 4; j++) if (cm & (1u << j)) sw[sn++] = comp[j];
+                }
                 sw[sn] = 0;
-                if (nc == 1) sp(&s, "  v%d = xfbtmp%d.%s;\n", i, i, sw);
-                else sp(&s, "  v%d = xfbtmp%d.%s;\n", i, i, sw);
+                sp(&s, "  v%d = xfbtmp%d.%s;\n", i, i, sw);
             }
         }
         if (key && key->flip_y) sp(&s, "  gl_Position.y = -gl_Position.y;\n");
