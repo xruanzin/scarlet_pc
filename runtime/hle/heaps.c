@@ -207,7 +207,12 @@ static uint64_t g_std_live_bytes;
 // in HIPC descriptors and provides up to 3.25 GiB without host-pointer truncation.
 #define STD_GUEST_BASE HEAP_BASE
 #define STD_GUEST_LIMIT (HEAP_BASE + HEAP_MAX)
+// Commit ahead in 16 MiB slabs. This keeps Windows out of the per-allocation
+// hot path while guaranteeing that every pointer returned to lifted guest code
+// is writable immediately. Freed/reused spans are already below this frontier.
+#define STD_COMMIT_GRANULE 0x01000000ull
 static uint64_t g_std_next = STD_GUEST_BASE;
+static uint64_t g_std_committed_to = STD_GUEST_BASE;
 
 static uint64_t std_align(uint64_t a) {
     if (a < 16) a = 16;
@@ -302,13 +307,23 @@ static uint64_t std_guest_alloc(uint64_t size, uint64_t align) {
     r->align = align;
     std_rec_insert_locked(r);
     g_std_live_bytes += size;
-    pthread_mutex_unlock(&g_std_lock);
 
-    // The whole guest window is already reserved on Windows and its vectored
-    // handler commits 64 KiB chunks on first touch. Committing every malloc here
-    // turned object-heavy loading into thousands of VirtualAlloc syscalls.
-    // Host APIs that cannot trigger a user-mode page fault (notably ReadFile)
-    // explicitly commit their destination buffers before use.
+    // Never return an uncommitted guest pointer. The previous pure lazy-commit
+    // path could miss a lifted-code write before the Windows handler serviced it
+    // (Scarlet crashed constructing an object at returned_ptr + 0x10).
+    //
+    // Do this while holding g_std_lock: another guest thread must not observe an
+    // advanced commit frontier until VirtualAlloc has actually completed.
+    uint64_t end = addr + size;
+    if (end > g_std_committed_to) {
+        uint64_t want = align_up_u64(end, STD_COMMIT_GRANULE);
+        if (want > STD_GUEST_LIMIT) want = STD_GUEST_LIMIT;
+        if (want > g_std_committed_to) {
+            plat_commit(g_std_committed_to, want - g_std_committed_to);
+            g_std_committed_to = want;
+        }
+    }
+    pthread_mutex_unlock(&g_std_lock);
     return addr;
 }
 
@@ -372,6 +387,7 @@ RT_ON_RESET(stdalloc_reset) {
     g_std_live_bytes = 0;
     g_std_declared_size = 0x10000000ull;
     g_std_next = STD_GUEST_BASE;
+    g_std_committed_to = STD_GUEST_BASE;
     pthread_mutex_unlock(&g_std_lock);
     while (r) {
         StdAllocRec *n = r->next;
