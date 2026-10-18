@@ -296,7 +296,12 @@ static void attr_store(Ctx *c, int src, uint32_t addr) {
     } else if (addr >= 0x80 && addr < 0x280) {
         int a = (addr - 0x80) >> 4;
         c->out_attr_mask |= 1u << a;
-        sp(&c->body, "    out.v%d[%d] = as_type<float>(%s);\n", a, (addr >> 2) & 3, v);
+        c->info->out_comp_mask[a] |= (uint8_t)(1u << ((addr >> 2) & 3));
+        int comp = (addr >> 2) & 3;
+        if (c->key && c->key->xfb && c->key->glsl && c->info->out_comp_mask[a] == 1 && comp == 0)
+            sp(&c->body, "    out.v%d = as_type<float>(%s);\n", a, v);
+        else
+            sp(&c->body, "    out.v%d[%d] = as_type<float>(%s);\n", a, comp, v);
     } else if (addr == 0x6C) {
         c->info->writes_point_size = true;
         sp(&c->body, "    out.psize = as_type<float>(%s);\n", v);
@@ -2032,8 +2037,20 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         // compiler fuses or reorders the math feeding it (MSL gets this from preserveInvariance; without it foliage
         // drawn twice flickered black)
         sp(&s, "invariant gl_Position;\nprecise gl_Position;\n");
-        for (int i = 0; i < 32; i++)
-            if (c->out_attr_mask & (1u << i)) sp(&s, "layout(location = %d) out vec4 v%d;\n", i, i);
+        for (int i = 0; i < 32; i++) {
+            if (!(c->out_attr_mask & (1u << i))) continue;
+            uint8_t cm = info->out_comp_mask[i];
+            if (key && key->xfb && i < 4 && (cm == 1 || cm == 3 || cm == 7 || cm == 15)) {
+                int nc = cm == 1 ? 1 : cm == 3 ? 2 : cm == 7 ? 3 : 4;
+                if (nc == 1)
+                    sp(&s, "layout(location = %d, xfb_buffer = %d, xfb_offset = 0, xfb_stride = 4) out float v%d;\n", i, i, i);
+                else
+                    sp(&s, "layout(location = %d, xfb_buffer = %d, xfb_offset = 0, xfb_stride = %d) out vec%d v%d;\n",
+                       i, i, nc * 4, nc, i);
+            } else {
+                sp(&s, "layout(location = %d) out vec4 v%d;\n", i, i);
+            }
+        }
     } else if (stage == STAGE_FRAGMENT) {
         for (int i = 0; i < 32; i++) {
             if (!(c->in_attr_mask & (1u << i))) continue;
@@ -2052,8 +2069,14 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     sp(&s, "void main() {\n");
     if (stage == STAGE_VERTEX) {
         sp(&s, "  gl_Position = vec4(0, 0, 0, 1);\n");
-        for (int i = 0; i < 32; i++)
-            if (c->out_attr_mask & (1u << i)) sp(&s, "  v%d = vec4(0, 0, 0, 1);\n", i);
+        for (int i = 0; i < 32; i++) {
+            if (!(c->out_attr_mask & (1u << i))) continue;
+            uint8_t cm = info->out_comp_mask[i];
+            if (key && key->xfb && i < 4 && cm == 1) sp(&s, "  v%d = 0.0;\n", i);
+            else if (key && key->xfb && i < 4 && cm == 3) sp(&s, "  v%d = vec2(0);\n", i);
+            else if (key && key->xfb && i < 4 && cm == 7) sp(&s, "  v%d = vec3(0);\n", i);
+            else sp(&s, "  v%d = vec4(0, 0, 0, 1);\n", i);
+        }
         if (info->writes_point_size) sp(&s, "  gl_PointSize = 0.0f;\n");
     }
     for (int i = 0; i < 256; i++)
