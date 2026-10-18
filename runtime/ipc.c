@@ -188,6 +188,26 @@ int ipc_handle_request(Cpu *c, uint32_t handle) {
         if (sess->domain) {
             target = req.domain_obj < 256 ? sess->domain->objs[req.domain_obj] : NULL;
             if (!target) { LOG("[ipc] domain object %u missing\n", req.domain_obj); return 0xE401; }
+            for (int i = 0; i < req.ndomain_in && i < 8; i++) {
+                uint32_t id = req.domain_in_objs[i];
+                Service *in = id < 256 ? sess->domain->objs[id] : NULL;
+                if (in) req.in_objects[req.nin_objects++] = in;
+                else LOG("[ipc] domain input object %u missing for %s cmd %u\n", id, target->name, req.cmd);
+            }
+        } else {
+            // CMIF object parameters are move handles outside domain mode.
+            // Accept copy handles too for SDK variants which retain a reference.
+            for (int pass = 0; pass < 2 && req.nin_objects < 8; pass++) {
+                uint32_t *hs = pass ? req.copy_handles : req.move_handles;
+                int nh = pass ? req.ncopy : req.nmove;
+                for (int i = 0; i < nh && req.nin_objects < 8; i++) {
+                    KObject *ko = handle_get(hs[i]);
+                    if (ko && ko->type == KOBJ_SESSION) {
+                        KSession *ks = (KSession *)ko;
+                        if (ks->svc) req.in_objects[req.nin_objects++] = ks->svc;
+                    }
+                }
+            }
         }
         target->handler(target, &req, &resp);
     } else if (req.type == 5 || req.type == 7) {  // control
