@@ -412,7 +412,18 @@ NVN(nvnTextureGetStride) { RET(TEX->stride); }
 NVN(nvnTextureGetTextureAddress) { RET(TEX->addr); }
 NVN(nvnTextureGetMemoryPool) { RET(0); }
 NVN(nvnTextureGetMemoryOffset) { RET(TEX->pool_offset); }
-NVN(nvnTextureGetStorageSize) { RET(tegra_total_size(&TEX->layout)); }
+static uint64_t texture_storage_size(const NvnTexture *t) {
+    if (t->target == 10) {
+        const FormatInfo *fi = t->layout.fmt;
+        return fi ? (uint64_t)t->width * fi->bpb : 0;
+    }
+    // Linear NVN textures are pitched surfaces. Mirror TextureBuilderGetStorageSize:
+    // using the block-linear size here breaks mapped/dirty ranges for CPU-updated
+    // atlases whose pitch is larger than the tight row size.
+    if (t->flags & 0x10) return t->stride * t->height;
+    return tegra_total_size(&t->layout);
+}
+NVN(nvnTextureGetStorageSize) { RET(texture_storage_size(TEX)); }
 NVN(nvnTextureGetDebugID) { RET(TEX->debug_id); }
 NVN(nvnTextureGetViewOffset) { RET(0); }
 NVN(nvnTextureGetStorageClass) { RET(0); }
@@ -420,7 +431,12 @@ NVN(nvnTextureGetRawStorageClass) { RET(0); }
 NVN(nvnTextureGetSparseTileLayout) { RET(0); }
 NVN(nvnTextureGetZCullStorageSize) { RET(0); }
 NVN(nvnTextureCompare) { RET(A(0) == A(1)); }
-NVN(nvnTextureFlushTexels) { (void)c; }
+NVN(nvnTextureFlushTexels) {
+    // CPU writes to mapped texture storage become visible to the Vulkan copy
+    // path on the next sample. The guest API has no explicit range here.
+    NvnTexture *t = TEX;
+    if (t && t->addr) backend_pool_written(t->addr, texture_storage_size(t));
+}
 NVN(nvnTextureInvalidateTexels) { (void)c; }
 
 // Texture views (our layout of the 0x28-byte guest struct)
@@ -444,20 +460,85 @@ NVN(nvnTextureViewGetDepthStencilMode) { NvnTextureView *v = AP(0); *(uint32_t *
 NVN(nvnTextureViewGetTarget) { NvnTextureView *v = AP(0); *(uint32_t *)AP(1) = v->target; RET(!!(v->setmask & 32)); }
 NVN(nvnTextureViewCompare) { RET(memcmp(AP(0), AP(1), 0x1C) == 0); }
 
-NVN(nvnTextureWriteTexels) {
-    // (texture, view, region, data) -- linear data into block-linear storage
-    NvnTexture *t = HOST(NvnTexture, A(0));
-    const int32_t *r = AP(2);  // xoffset, yoffset, zoffset, width, height, depth
-    LevelLayout l = tegra_level(&t->layout, 0);
-    if (r && r[0] == 0 && r[1] == 0 && (uint32_t)r[3] == t->width && (uint32_t)r[4] == t->height) {
-        tegra_swizzle(AP(3), (uint8_t *)(uintptr_t)t->addr + l.offset, l.wb, l.hb, r[5] > 0 ? (uint32_t)r[5] : 1,
-                      t->layout.fmt->bpb, l.block_height_log2, l.block_depth_log2);
-        backend_pool_written(t->addr, tegra_total_size(&t->layout));
-    } else {
-        LOG("[nvn] partial WriteTexels not implemented\n");
+// Write CPU-linear texels into a linear NVN texture. This is the path used
+// by dynamic UI/font atlases: destination rows are separated by texture stride,
+// while WriteTexelsStrided can also provide a pitched source.
+static bool texture_write_linear(NvnTexture *t, const NvnTextureView *v, const int32_t *r,
+                                 const uint8_t *src, uint64_t src_row_stride, uint64_t src_image_stride) {
+    if (!t || !r || !src || !(t->flags & 0x10) || !t->addr || !t->layout.fmt) return false;
+
+    uint32_t level = v && (v->setmask & 1) ? v->base_level : 0;
+    // Linear mipmapped layouts need a per-level pitch/base address that NVN
+    // does not expose through this object. Scarlet's dynamic atlases are level 0.
+    if (level != 0) return false;
+
+    const FormatInfo *fi = t->layout.fmt;
+    int32_t x = r[0], y = r[1], z = r[2];
+    int32_t w = r[3], h = r[4], d = r[5] > 0 ? r[5] : 1;
+    if (x < 0 || y < 0 || z < 0 || w <= 0 || h <= 0 || d <= 0) return false;
+    if ((uint64_t)x + (uint32_t)w > t->width || (uint64_t)y + (uint32_t)h > t->height) return false;
+
+    // Work in format blocks. Compressed formats require block-aligned regions,
+    // except that the right/bottom edge may terminate on the texture edge.
+    if ((x % fi->bw) || (y % fi->bh)) return false;
+    uint32_t xb = (uint32_t)x / fi->bw, yb = (uint32_t)y / fi->bh;
+    uint32_t wb = ((uint32_t)w + fi->bw - 1) / fi->bw;
+    uint32_t hb = ((uint32_t)h + fi->bh - 1) / fi->bh;
+    uint64_t row_bytes = (uint64_t)wb * fi->bpb;
+    if (!src_row_stride) src_row_stride = row_bytes;
+    if (!src_image_stride) src_image_stride = src_row_stride * hb;
+
+    uint32_t full_hb = (t->height + fi->bh - 1) / fi->bh;
+    uint64_t dst_image_stride = t->stride * full_hb;
+    uint8_t *dst = (uint8_t *)(uintptr_t)t->addr;
+    uint64_t first = UINT64_MAX, last = 0;
+
+    for (int32_t zz = 0; zz < d; zz++) {
+        for (uint32_t yy = 0; yy < hb; yy++) {
+            uint64_t doff = ((uint64_t)(z + zz) * dst_image_stride) +
+                            ((uint64_t)yb + yy) * t->stride +
+                            (uint64_t)xb * fi->bpb;
+            memcpy(dst + doff, src + (uint64_t)zz * src_image_stride + (uint64_t)yy * src_row_stride,
+                   (size_t)row_bytes);
+            if (doff < first) first = doff;
+            if (doff + row_bytes > last) last = doff + row_bytes;
+        }
     }
+    if (first != UINT64_MAX) backend_pool_written(t->addr + first, last - first);
+    return true;
 }
-NVN(nvnTextureWriteTexelsStrided) { LOG("[nvn] WriteTexelsStrided not implemented\n"); (void)c; }
+
+static void texture_write_texels(Cpu *c, bool strided) {
+    NvnTexture *t = HOST(NvnTexture, A(0));
+    const NvnTextureView *v = A(1) ? (const NvnTextureView *)AP(1) : NULL;
+    const int32_t *r = AP(2);  // xoffset, yoffset, zoffset, width, height, depth
+    const uint8_t *src = AP(3);
+    if (!t || !r || !src || !t->layout.fmt) return;
+
+    uint64_t row_stride = strided ? A(4) : 0;
+    uint64_t image_stride = strided ? A(5) : 0;
+    if (texture_write_linear(t, v, r, src, row_stride, image_stride)) return;
+
+    // Existing block-linear fast path for a complete level-0 image.
+    uint32_t level = v && (v->setmask & 1) ? v->base_level : 0;
+    LevelLayout l = tegra_level(&t->layout, level);
+    if (!(t->flags & 0x10) && level == 0 && r[0] == 0 && r[1] == 0 &&
+        (uint32_t)r[3] == t->width && (uint32_t)r[4] == t->height && !strided) {
+        tegra_swizzle(src, (uint8_t *)(uintptr_t)t->addr + l.offset, l.wb, l.hb,
+                      r[5] > 0 ? (uint32_t)r[5] : 1, t->layout.fmt->bpb,
+                      l.block_height_log2, l.block_depth_log2);
+        backend_pool_written(t->addr, tegra_total_size(&t->layout));
+        return;
+    }
+
+    static int warned;
+    if (warned++ < 8)
+        LOG("[nvn] WriteTexels: unsupported block-linear partial/strided region level=%u %d,%d %dx%d\n",
+            level, r[0], r[1], r[3], r[4]);
+}
+
+NVN(nvnTextureWriteTexels) { texture_write_texels(c, false); }
+NVN(nvnTextureWriteTexelsStrided) { texture_write_texels(c, true); }
 NVN(nvnTextureReadTexels) { LOG("[nvn] ReadTexels not implemented\n"); (void)c; }
 NVN(nvnTextureReadTexelsStrided) { (void)c; }
 
