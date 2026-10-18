@@ -9,6 +9,7 @@
 
 #include "gamelib.h"
 #include "hle.h"
+#include "kernel.h"
 
 typedef struct {
     const uint64_t *addrs;
