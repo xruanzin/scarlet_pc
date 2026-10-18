@@ -292,7 +292,7 @@ static void waitlist_remove(KThread *t) {
         if (*p == t) { *p = t->wnext; return; }
 }
 
-// Block until wait_kind is cleared by a waker, timeout, or cancel. Caller holds g_klock.
+// Block until wait_kind is cleared by a waker or timeout (not cancellable: see below). Caller holds g_klock.
 static uint32_t block_current(int64_t timeout_ns) {
     KThread *t = t_cur;
     struct timespec ts;
@@ -304,12 +304,12 @@ static uint32_t block_current(int64_t timeout_ns) {
             t->wait_result = R_CANCELLED;
             break;
         }
-        if (t->cancel) {
-            t->cancel = false;
-            t->wait_kind = WAIT_NONE;
-            t->wait_result = R_CANCELLED;
-            break;
-        }
+        // (svcCancelSynchronization is deliberately NOT honoured here. On the console only a wait on kernel
+        // synchronization objects (svcWaitSynchronization, svcReplyAndReceive) is cancellable; a thread blocked on a
+        // mutex, a condition variable or an address arbiter keeps waiting and the cancel stays pending for its next
+        // svcWaitSynchronization (Atmosphere KThread::WaitCancel / Citron k_thread.cpp: m_cancellable). Consuming it
+        // here made svcWaitProcessWideKeyAtomic / svcWaitForAddress return 0xEC01 (2001-0118, "Cancelled"), which the
+        // SDK does not expect there: nn::diag::detail::Abort -> svcBreak; suspected cause of the Scarlet boot abort.)
         if (!kwait(timeout_ns, &ts)) {
             // A waker may have run while this thread's timed wait was expiring (it holds g_klock, so it got there
             // first): it already cleared wait_kind, set the result and - for a condition variable - handed this
