@@ -124,26 +124,23 @@ static size_t utf8_to_u16(const char *src, uint16_t *out, size_t cap_units, size
 }
 
 
-static uint64_t swkbd_store_string(uint64_t string_obj, const char *text, uint8_t use_utf8, size_t max_len) {
+// nn::swkbd::String is always a byte/UTF-8 string: NintendoSDK defines it as
+// { char *strBuf; size_t bufsize; }. KeyboardConfig::isUseUtf8 only selects the
+// library-applet wire format. It must not change the String ABI seen by the
+// caller or by TextCheckCallback.
+static uint64_t swkbd_store_string(uint64_t string_obj, const char *text) {
     uint64_t ptr = LD64(string_obj);
     uint64_t cap = LD64(string_obj + 8);
     if (!ptr || !cap) return 0;
 
     memset((void *)(uintptr_t)ptr, 0, (size_t)cap);
-    if (use_utf8) {
-        size_t n = strlen(text);
-        if (n >= cap) n = (size_t)cap - 1;
-        // Do not split a UTF-8 continuation sequence at the buffer boundary.
-        while (n && (((const unsigned char *)text)[n] & 0xC0) == 0x80) n--;
-        memcpy((void *)(uintptr_t)ptr, text, n);
-        ((char *)(uintptr_t)ptr)[n] = 0;
-        return (uint64_t)n + 1;
-    }
-
-    size_t cap_units = (size_t)cap / 2;
-    if (!cap_units) return 0;
-    size_t units = utf8_to_u16(text, (uint16_t *)(uintptr_t)ptr, cap_units, max_len);
-    return (uint64_t)(units + 1) * 2;
+    size_t n = strlen(text);
+    if (n >= cap) n = (size_t)cap - 1;
+    // Do not split a UTF-8 continuation sequence at the buffer boundary.
+    while (n && (((const unsigned char *)text)[n] & 0xC0) == 0x80) n--;
+    memcpy((void *)(uintptr_t)ptr, text, n);
+    ((char *)(uintptr_t)ptr)[n] = 0;
+    return (uint64_t)n + 1;
 }
 
 static void swkbd_check_message_utf8(uint64_t check_buf, uint64_t check_cap, uint64_t message_size,
@@ -167,7 +164,7 @@ static void swkbd_check_message_utf8(uint64_t check_buf, uint64_t check_cap, uin
 }
 
 // nn::swkbd::ShowKeyboard(nn::swkbd::String *out, const nn::swkbd::ShowKeyboardArg &arg) -> nn::Result
-// String = {void *ptr; size_t byteCapacity}
+// String = {char *strBuf; size_t byteCapacity}; String payload is always UTF-8
 HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swkbd_show) {
     uint64_t out_obj = c->x[0], arg = c->x[1];
     uint64_t ptr = LD64(out_obj), size = LD64(out_obj + 8);
@@ -216,7 +213,7 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
         // Store the candidate in the caller's nn::swkbd::String first. The NintendoSDK
         // text-check callback receives that same String object, with bufSize temporarily
         // changed from capacity to the actual encoded string size.
-        uint64_t bytes = swkbd_store_string(out_obj, text, use_utf8, (size_t)max_len);
+        uint64_t bytes = swkbd_store_string(out_obj, text);
 
         if (!use_text_check || !text_check_cb) break;
 
@@ -266,7 +263,7 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
                                            check_message[0] ? check_message : "Use this text anyway?", 1,
                                            text, sizeof text);
             if (prompt == 2) {
-                swkbd_store_string(out_obj, text, use_utf8, (size_t)max_len);
+                swkbd_store_string(out_obj, text);
                 break;
             }
             if (!prompt) { ok = 0; break; }
@@ -285,8 +282,12 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
         return;
     }
 
-    if (ptr && size)
-        swkbd_store_string(out_obj, text, use_utf8, (size_t)max_len);
+    if (ptr && size) {
+        uint64_t final_bytes = swkbd_store_string(out_obj, text);
+        LOG("[swkbd] return UTF-8 string bytes=%llu capacity=%llu ptr=%llx\n",
+            (unsigned long long)final_bytes, (unsigned long long)size,
+            (unsigned long long)ptr);
+    }
 
     c->x[0] = 0;
 }
