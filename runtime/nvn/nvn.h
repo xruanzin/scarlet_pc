@@ -68,6 +68,7 @@ typedef struct NvnShaderStage {
     uint64_t code_addr;       // GPU (== CPU) address of the code
     const uint8_t *control;   // control section
     uint32_t const_offset, const_size;  // compiler constants (bound as c1), within the code blob
+    uint32_t tf_meta0, tf_meta1;  // immutable copy of control +0x6e8/+0x6ec (Scarlet stream-output layout)
     void *backend;
     void *diag_snapshot;      // opt-in immutable control/header copy, owned by this stage
 } NvnShaderStage;
