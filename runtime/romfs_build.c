@@ -1,7 +1,7 @@
-// RomFS image builder (romfs_build.h). Layout as the game's own image: a 0x50-byte header, file data
-// from 0x200 (each file 16-byte aligned), then the directory hash table, directory entries, file hash table and file
-// entries. Entries are found by hash (the game's RomFS code walks the tables itself), so the order inside them only
-// has to be consistent: directories and files are sorted by name, children before siblings' children.
+// RomFS image builder (romfs_build.h). Use the canonical Horizon RomFS layout:
+// 0x50-byte header, directory hash table, directory metadata, file hash table,
+// file metadata, then 16-byte-aligned file data. Entries are found by hash, so
+// directories/files are sorted only to make the generated image deterministic.
 #include "romfs_build.h"
 
 #include "platform.h"  // (Windows: POSIX mkdir)
@@ -21,7 +21,6 @@
 #endif
 
 #define EMPTY 0xFFFFFFFFu
-#define DATA_START 0x200u
 
 typedef struct Dir Dir;
 typedef struct {
@@ -166,14 +165,8 @@ bool romfs_build(const char *dir, const char *out_path, void (*progress)(uint64_
     uint32_t dsize = 0, fsize = 0;
     for (int i = 0; i < l.nd; i++) l.dirs[i]->off = dsize, dsize += 0x18 + align4((uint32_t)strlen(l.dirs[i]->name));
     for (int i = 0; i < l.nf; i++) l.files[i]->off = fsize, fsize += 0x20 + align4((uint32_t)strlen(l.files[i]->name));
-    // file data offsets (relative to the data start), each 16-byte aligned
-    uint64_t data = 0, total = 0;
-    for (int i = 0; i < l.nf; i++) {
-        data = align16(data);
-        l.files[i]->data_off = data;
-        data += l.files[i]->size;
-        total += l.files[i]->size;
-    }
+    uint64_t total = 0;
+    for (int i = 0; i < l.nf; i++) total += l.files[i]->size;
 
     uint32_t nbd = bucket_count((uint32_t)l.nd), nbf = bucket_count((uint32_t)l.nf);
     dbuckets = malloc(4 * nbd), fbuckets = malloc(4 * nbf);
@@ -215,32 +208,64 @@ bool romfs_build(const char *dir, const char *out_path, void (*progress)(uint64_
         fbuckets[h] = f->off;
     }
 
-    // header: tables after the file data (4-byte aligned)
-    uint64_t dhash_off = (DATA_START + data + 3) & ~3ull;
-    uint64_t dmeta_off = dhash_off + 4ull * nbd, fhash_off = dmeta_off + dsize, fmeta_off = fhash_off + 4ull * nbf;
-    uint8_t hdr[DATA_START] = {0};
-    uint64_t hv[10] = {0x50, dhash_off, 4ull * nbd, dmeta_off, dsize, fhash_off, 4ull * nbf, fmeta_off, fsize, DATA_START};
+    // Canonical Horizon RomFS layout: metadata first, file data last.
+    uint64_t dhash_off = 0x50;
+    uint64_t dmeta_off = dhash_off + 4ull * nbd;
+    uint64_t fhash_off = dmeta_off + dsize;
+    uint64_t fmeta_off = fhash_off + 4ull * nbf;
+    uint64_t data_off = align16(fmeta_off + fsize);
+
+    // File offsets stored in entries are relative to data_off.
+    uint64_t data = 0;
+    for (int i = 0; i < l.nf; i++) {
+        data = align16(data);
+        l.files[i]->data_off = data;
+        data += l.files[i]->size;
+    }
+
+    // data_off wasn't known when ftab was first assembled; refresh the file
+    // data offsets now (all other entry fields stay unchanged).
+    for (int i = 0; i < l.nf; i++) {
+        File *f = l.files[i];
+        put64(ftab + f->off + 8, f->data_off);
+    }
+
+    uint8_t hdr[0x50] = {0};
+    uint64_t hv[10] = {0x50, dhash_off, 4ull * nbd, dmeta_off, dsize,
+                       fhash_off, 4ull * nbf, fmeta_off, fsize, data_off};
     memcpy(hdr, hv, sizeof hv);
 
     out = fopen(out_path, "wb");
     if (!out) FAIL("can't write %s", out_path);
-    if (fwrite(hdr, 1, DATA_START, out) != DATA_START) FAIL("write failed (disk full?)");
+    if (fwrite(hdr, 1, sizeof hdr, out) != sizeof hdr ||
+        fwrite(dbuckets, 4, nbd, out) != nbd ||
+        fwrite(dtab, 1, dsize, out) != dsize ||
+        fwrite(fbuckets, 4, nbf, out) != nbf ||
+        fwrite(ftab, 1, fsize, out) != fsize)
+        FAIL("write failed (disk full?)");
+
+    static const uint8_t zero[16] = {0};
+    uint64_t meta_end = fmeta_off + fsize;
+    uint64_t pad = data_off - meta_end;
+    if (pad && fwrite(zero, 1, (size_t)pad, out) != pad) FAIL("write failed (disk full?)");
+
     size_t bufsize = 4u << 20;
     buf = malloc(bufsize);
     uint64_t pos = 0, done = 0;
-    static const uint8_t zero[16];
     for (int i = 0; i < l.nf; i++) {
         File *f = l.files[i];
-        if (f->data_off > pos && fwrite(zero, 1, (size_t)(f->data_off - pos), out) != f->data_off - pos)
-            FAIL("write failed (disk full?)");
-        if (!copy_data(out, f->path, f->size, buf, bufsize, &done, total, progress)) FAIL("can't copy %s", f->path);
+        if (f->data_off > pos) {
+            uint64_t gap = f->data_off - pos;
+            while (gap) {
+                size_t z = gap > sizeof zero ? sizeof zero : (size_t)gap;
+                if (fwrite(zero, 1, z, out) != z) FAIL("write failed (disk full?)");
+                gap -= z;
+            }
+        }
+        if (!copy_data(out, f->path, f->size, buf, bufsize, &done, total, progress))
+            FAIL("can't copy %s", f->path);
         pos = f->data_off + f->size;
     }
-    uint64_t tail = dhash_off - DATA_START - pos;
-    if (tail && fwrite(zero, 1, (size_t)tail, out) != tail) FAIL("write failed (disk full?)");
-    if (fwrite(dbuckets, 4, nbd, out) != nbd || fwrite(dtab, 1, dsize, out) != dsize ||
-        fwrite(fbuckets, 4, nbf, out) != nbf || fwrite(ftab, 1, fsize, out) != fsize)
-        FAIL("write failed (disk full?)");
     if (fclose(out) != 0) { out = NULL; FAIL("write failed (disk full?)"); }
     out = NULL;
     ok = true;
