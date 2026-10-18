@@ -527,6 +527,66 @@ void plat_print_backtrace(void) {
     }
 }
 
+
+// ---- hang report: call stacks of the other threads
+#define MAX_REG_THREADS 128
+static HANDLE g_reg_threads[MAX_REG_THREADS];
+static DWORD g_reg_tids[MAX_REG_THREADS];
+static volatile LONG g_nreg_threads;
+
+void plat_register_thread(void) {
+    LONG k = InterlockedIncrement(&g_nreg_threads) - 1;
+    if (k >= MAX_REG_THREADS) return;
+    HANDLE h = NULL;
+    if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,
+                        THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, 0)) {
+        g_reg_tids[k] = GetCurrentThreadId();
+        g_reg_threads[k] = h;
+    }
+}
+
+static void print_frame(int i, uint64_t pc, uint64_t exe) {
+    uint64_t off = 0;
+    const char *s = rt_host_fn_name(pc, &off);
+    if (!s) s = plat_symbol(pc, &off);
+    if (s) fprintf(stderr, "    #%-2d %016llx %s+%llx\n", i, (unsigned long long)pc, s, (unsigned long long)off);
+    else fprintf(stderr, "    #%-2d %016llx lasrecomp+%llx\n", i, (unsigned long long)pc, (unsigned long long)(pc - exe));
+}
+
+void plat_dump_other_threads(void) {
+    DWORD self = GetCurrentThreadId();
+    uint64_t exe = (uint64_t)(uintptr_t)GetModuleHandleA(NULL);
+    LONG n = g_nreg_threads < MAX_REG_THREADS ? g_nreg_threads : MAX_REG_THREADS;
+    for (LONG k = 0; k < n; k++) {
+        HANDLE h = g_reg_threads[k];
+        if (!h || g_reg_tids[k] == self) continue;
+        if (SuspendThread(h) == (DWORD)-1) continue;
+        CONTEXT ctx;
+        memset(&ctx, 0, sizeof ctx);
+        ctx.ContextFlags = CONTEXT_FULL;
+        fprintf(stderr, "  thread #%ld (os tid %lu):\n", (long)k, (unsigned long)g_reg_tids[k]);
+        if (GetThreadContext(h, &ctx)) {
+            for (int i = 0; i < 24 && ctx.Rip; i++) {
+                print_frame(i, ctx.Rip, exe);
+                DWORD64 base = 0;
+                PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(ctx.Rip, &base, NULL);
+                if (!rf) {  // leaf without unwind info: return address is on top of the stack
+                    if (!ctx.Rsp) break;
+                    ctx.Rip = *(DWORD64 *)(uintptr_t)ctx.Rsp;
+                    ctx.Rsp += 8;
+                } else {
+                    PVOID handler_data = NULL;
+                    DWORD64 frame = 0;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, rf, &ctx, &handler_data, &frame, NULL);
+                }
+            }
+        } else {
+            fprintf(stderr, "    (no context)\n");
+        }
+        ResumeThread(h);
+    }
+}
+
 static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
     uint64_t fa = er->NumberParameters >= 2 ? er->ExceptionInformation[1] : 0;

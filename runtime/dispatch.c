@@ -98,23 +98,61 @@ void hle_override(uint64_t addr, HostFn fn, const char *name) {
 
 // ---- recent-HLE ring (crash debugging: what the game asked the host just before dying)
 #define HHIST 128
-static __thread struct { const char *name; uint64_t x0, x1, x30; } hhist[HHIST];
-static __thread int hhist_n;
+typedef struct { const char *name; uint64_t x0, x1, x30; } HhEntry;
+typedef struct { HhEntry e[HHIST]; int n; int tid; } Hh;
+static __thread Hh hh_local;
+static __thread bool hh_registered;
+#define MAX_HH_THREADS 128
+static Hh *volatile hh_all[MAX_HH_THREADS];
+static volatile int hh_nall;
 static void hhist_push(const char *name, Cpu *c) {
-    int i = hhist_n++ & (HHIST - 1);
-    hhist[i].name = name;
-    hhist[i].x0 = c->x[0];
-    hhist[i].x1 = c->x[1];
-    hhist[i].x30 = c->x[30];
+    if (!hh_registered) {  // first HLE call on this thread: make its history (and OS handle) visible to the hang report
+        hh_registered = true;
+        int k = __atomic_fetch_add(&hh_nall, 1, __ATOMIC_SEQ_CST);
+        if (k < MAX_HH_THREADS) { hh_local.tid = k; hh_all[k] = &hh_local; }
+        plat_register_thread();
+    }
+    Hh *h = &hh_local;
+    int i = h->n++ & (HHIST - 1);
+    h->e[i].name = name;
+    h->e[i].x0 = c->x[0];
+    h->e[i].x1 = c->x[1];
+    h->e[i].x30 = c->x[30];
 }
-static void hhist_dump(void) {
-    int n = hhist_n < HHIST ? hhist_n : HHIST, start = hhist_n - n;
-    fprintf(stderr, "last %d host calls:\n", n);
+static void hhist_print(Hh *h, int last) {
+    int n = h->n < HHIST ? h->n : HHIST;
+    if (last > 0 && n > last) n = last;
+    int start = h->n - n;
     for (int k = 0; k < n; k++) {
         int i = (start + k) & (HHIST - 1);
-        fprintf(stderr, "  %s x0=%llx x1=%llx lr=%llx\n", hhist[i].name ? hhist[i].name : "?",
-                (unsigned long long)hhist[i].x0, (unsigned long long)hhist[i].x1, (unsigned long long)hhist[i].x30);
+        uint64_t off = 0;
+        const char *sym = loader_symbol_at(h->e[i].x30, &off);
+        fprintf(stderr, "  %s x0=%llx x1=%llx lr=%llx", h->e[i].name ? h->e[i].name : "?",
+                (unsigned long long)h->e[i].x0, (unsigned long long)h->e[i].x1, (unsigned long long)h->e[i].x30);
+        if (sym) fprintf(stderr, " (%s+%llx)", sym, (unsigned long long)off);
+        fputc('\n', stderr);
     }
+}
+static void hhist_dump(void) {
+    int n = hh_local.n < HHIST ? hh_local.n : HHIST;
+    fprintf(stderr, "last %d host calls:\n", n);
+    hhist_print(&hh_local, 0);
+}
+
+// Hang report (called by the UI-thread watchdog when no frame was presented for a while): for every thread that has
+// called the host, its last HLE calls with guest symbol names, then (Windows) its current host/guest call stack.
+void rt_hang_report(void) {
+    fprintf(stderr, "\n===== hang report: no frame presented, per-thread state =====\n");
+    int n = hh_nall < MAX_HH_THREADS ? hh_nall : MAX_HH_THREADS;
+    for (int k = 0; k < n; k++) {
+        if (!hh_all[k]) continue;
+        fprintf(stderr, "[hang] thread #%d: %d HLE calls so far, last ones:\n", k, hh_all[k]->n);
+        hhist_print(hh_all[k], 6);
+    }
+    fprintf(stderr, "[hang] call stacks (guest functions are f_<addr>):\n");
+    plat_dump_other_threads();
+    fprintf(stderr, "===== end of hang report =====\n");
+    fflush(stderr);
 }
 
 static __thread uint64_t unimpl_pc;

@@ -769,6 +769,7 @@ void backend_clear_window(void) {
 
 // Window-title FPS / hang indicator. It runs on the UI thread, so it keeps updating even when the game thread is stuck:
 // "sem resposta" appears when no frame was presented for 2 s (a freeze, a long shader build or a deadlock).
+void rt_hang_report(void);  // runtime/dispatch.c
 static void title_fps_update(void) {
     static uint64_t last_ms, last_frames, last_change_ms;
     static double fps;
@@ -788,6 +789,16 @@ static void title_fps_update(void) {
         snprintf(title, sizeof title, "%s - %.0f fps (%.0f ms) - frame %llu", RT_APP_NAME, fps, fps > 0 ? 1000.0 / fps : 0.0,
                  (unsigned long long)f);
     SDL_SetWindowTitle(window, title);
+    // Hang watchdog: after 8 s with no frame, write what every game thread is doing to the log (again after 60 s).
+    static int reports;
+    uint64_t stuck_ms = now - last_change_ms;
+    if ((reports == 0 && stuck_ms >= 8000) || (reports == 1 && stuck_ms >= 60000)) {
+        reports++;
+        LOG("[watchdog] no frame presented for %llu s (last frame %llu)\n", (unsigned long long)(stuck_ms / 1000),
+            (unsigned long long)f);
+        rt_hang_report();
+    }
+    if (stuck_ms < 2000) reports = 0;
 }
 
 int ui_run(void) {

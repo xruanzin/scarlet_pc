@@ -172,6 +172,9 @@ void plat_fatal_notice(void) {
 
 const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c
 
+void plat_register_thread(void) {}
+void plat_dump_other_threads(void) { fprintf(stderr, "  (per-thread call stacks are only available on Windows)\n"); }
+
 void plat_print_backtrace(void) {
     void *bt[64];
     int n = backtrace(bt, 64);
