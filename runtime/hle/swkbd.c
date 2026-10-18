@@ -87,6 +87,57 @@ static size_t u16_to_utf8(const uint16_t *src, size_t units, char *out, size_t c
     return o;
 }
 
+static size_t utf8_to_u16(const char *src, uint16_t *out, size_t cap_units) {
+    size_t o = 0;
+    const unsigned char *p = (const unsigned char *)src;
+    while (*p && o + 1 < cap_units) {
+        uint32_t cp;
+        int n;
+        if (p[0] < 0x80) { cp = p[0]; n = 1; }
+        else if ((p[0] & 0xE0) == 0xC0 && (p[1] & 0xC0) == 0x80) { cp = ((p[0] & 0x1Fu) << 6) | (p[1] & 0x3Fu); n = 2; }
+        else if ((p[0] & 0xF0) == 0xE0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) {
+            cp = ((p[0] & 0x0Fu) << 12) | ((p[1] & 0x3Fu) << 6) | (p[2] & 0x3Fu); n = 3;
+        } else if ((p[0] & 0xF8) == 0xF0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80 && (p[3] & 0xC0) == 0x80) {
+            cp = ((p[0] & 0x07u) << 18) | ((p[1] & 0x3Fu) << 12) | ((p[2] & 0x3Fu) << 6) | (p[3] & 0x3Fu); n = 4;
+        } else { cp = 0xFFFD; n = 1; }
+        p += n;
+        if (cp >= 0x10000) {
+            if (o + 2 >= cap_units) break;
+            cp -= 0x10000;
+            out[o++] = (uint16_t)(0xD800 + (cp >> 10));
+            out[o++] = (uint16_t)(0xDC00 + (cp & 0x3FF));
+        } else out[o++] = (uint16_t)cp;
+    }
+    out[o] = 0;
+    return o;
+}
+
+// How the candidate is handed to the game's text-check callback (and, for utf16, returned). The default is the
+// encoding this port always used (UTF-8, byte size including the NUL), which Scarlet's own callback rejects for
+// every name ("You can't use ..."). LARECOMP_SWKBD_CHECK picks another to find what the game expects:
+//   skip   accept without calling the callback (to get past the screen)
+//   utf16  UTF-16LE String, byte size including the NUL (what isUseUtf8=0 normally means)
+//   utf8n  UTF-8 String, byte size without the NUL
+enum { ENC_UTF8Z, ENC_SKIP, ENC_UTF16, ENC_UTF8N };
+static int swkbd_enc_mode(void) {
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("LARECOMP_SWKBD_CHECK");
+        mode = !e ? ENC_UTF8Z : !strcmp(e, "skip") ? ENC_SKIP : !strcmp(e, "utf16") ? ENC_UTF16
+             : !strcmp(e, "utf8n") ? ENC_UTF8N : ENC_UTF8Z;
+        if (mode != ENC_UTF8Z) LOG("[swkbd] LARECOMP_SWKBD_CHECK=%s\n", e);
+    }
+    return mode;
+}
+
+static void swkbd_dump(const char *what, uint64_t ptr, uint64_t n) {
+    char hex[3 * 40 + 1];
+    size_t k = n < 40 ? (size_t)n : 40, o = 0;
+    for (size_t i = 0; i < k; i++) o += (size_t)snprintf(hex + o, sizeof hex - o, "%02x ", ((const uint8_t *)(uintptr_t)ptr)[i]);
+    hex[o] = 0;
+    LOG("[swkbd] %s: %s\n", what, hex);
+}
+
 // nn::swkbd::String is always a byte/UTF-8 string: NintendoSDK defines it as
 // { char *strBuf; size_t bufsize; }. KeyboardConfig::isUseUtf8 only selects the
 // library-applet wire format. It must not change the String ABI seen by the
@@ -104,6 +155,15 @@ static uint64_t swkbd_store_string(uint64_t string_obj, const char *text) {
     memcpy((void *)(uintptr_t)ptr, text, n);
     ((char *)(uintptr_t)ptr)[n] = 0;
     return (uint64_t)n + 1;
+}
+
+static uint64_t swkbd_store_string_u16(uint64_t string_obj, const char *text) {
+    uint64_t ptr = LD64(string_obj);
+    uint64_t cap = LD64(string_obj + 8);
+    if (!ptr || cap < 2) return 0;
+    memset((void *)(uintptr_t)ptr, 0, (size_t)cap);
+    size_t units = utf8_to_u16(text, (uint16_t *)(uintptr_t)ptr, (size_t)(cap / 2));
+    return (uint64_t)(units + 1) * 2;
 }
 
 static void swkbd_check_message_utf8(uint64_t check_buf, uint64_t check_cap, uint64_t message_size,
@@ -176,9 +236,11 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
         // Store the candidate in the caller's nn::swkbd::String first. The NintendoSDK
         // text-check callback receives that same String object, with bufSize temporarily
         // changed from capacity to the actual encoded string size.
-        uint64_t bytes = swkbd_store_string(out_obj, text);
+        int enc = swkbd_enc_mode();
+        uint64_t bytes = enc == ENC_UTF16 ? swkbd_store_string_u16(out_obj, text) : swkbd_store_string(out_obj, text);
+        if (enc == ENC_UTF8N && bytes) bytes--;
 
-        if (!use_text_check || !text_check_cb) break;
+        if (!use_text_check || !text_check_cb || enc == ENC_SKIP) break;
 
         if (!check_buf || check_buf_size < 2) {
             LOG("[swkbd] text-check requested but ShowKeyboardArg has no work buffer (buf=%llx size=%llu); accepting candidate safely\n",
@@ -190,7 +252,8 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
         //   TextCheckResult cb(void *textCheckWorkBuf, size_t *outMessageSize, String *text)
         // Scarlet uses the pre-8.0 64-bit size_t form (the callback symbol encodes Pm).
         memset((void *)(uintptr_t)check_buf, 0, (size_t)check_buf_size);
-        uint64_t *message_size = (uint64_t *)hle_alloc(sizeof(uint64_t));
+        static uint64_t *message_size;  // (one slot for every attempt: hle_alloc'd memory is never freed)
+        if (!message_size) message_size = (uint64_t *)hle_alloc(sizeof(uint64_t));
         *message_size = 0;
 
         uint64_t saved_cap = LD64(out_obj + 8);
@@ -206,6 +269,7 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
             (unsigned long long)check_buf_size, (unsigned long long)(uintptr_t)message_size,
             (unsigned long long)out_obj, (unsigned long long)bytes);
 
+        swkbd_dump("text-check String bytes", LD64(out_obj), bytes + 2);
         guest_call(c, text_check_cb);
         uint32_t check = (uint32_t)c->x[0];
 
@@ -218,6 +282,7 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
         LOG("[swkbd] text-check result=%u messageSize=%llu message=\"%s\"\n",
             check, (unsigned long long)*message_size, check_message);
 
+        swkbd_dump("text-check message bytes", check_buf, *message_size < 64 ? *message_size + 2 : 64);
         if (check == 0) break;  // Success
 
         snprintf(current, sizeof current, "%s", text);
@@ -226,7 +291,7 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
                                            check_message[0] ? check_message : "Use this text anyway?", 1,
                                            text, sizeof text);
             if (prompt == 2) {
-                swkbd_store_string(out_obj, text);
+                if (swkbd_enc_mode() == ENC_UTF16) swkbd_store_string_u16(out_obj, text); else swkbd_store_string(out_obj, text);
                 break;
             }
             if (!prompt) { ok = 0; break; }
@@ -246,7 +311,7 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
     }
 
     if (ptr && size) {
-        uint64_t final_bytes = swkbd_store_string(out_obj, text);
+        uint64_t final_bytes = swkbd_enc_mode() == ENC_UTF16 ? swkbd_store_string_u16(out_obj, text) : swkbd_store_string(out_obj, text);
         LOG("[swkbd] return UTF-8 string bytes=%llu capacity=%llu ptr=%llx\n",
             (unsigned long long)final_bytes, (unsigned long long)size,
             (unsigned long long)ptr);
