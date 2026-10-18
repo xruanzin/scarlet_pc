@@ -26,9 +26,10 @@
 // Expanded host records must not consume the game's real NVN command-memory
 // budget. Every recording gets a tiny opaque handle in guest memory and the
 // actual CmdRec stream lives in host segments chained from that handle.
-#define HOSTSEG_SIZE (128u << 10)
-// The pool cap was 256 MB; a scene change in Scarlet (right after the name-entry screen) records thousands of lists
-// at once and exhausted it ("host command segment pool exhausted"). LARECOMP_HOSTSEG_MB overrides the 1024 MB default.
+#define HOSTSEG_BASE_SIZE (32u << 10)
+// Most Scarlet command lists are small. A fixed 128 KB allocation per live list grew to >800 MB in character
+// creation. Use 32 KB base segments and allocate a larger segment only when one expanded record actually needs it.
+// LARECOMP_HOSTSEG_MB is a safety ceiling for backing allocations, not a target pool size.
 static uint64_t hostseg_cap(void) {
     static uint64_t cap;
     if (!cap) {
@@ -41,6 +42,7 @@ static uint64_t hostseg_cap(void) {
 typedef struct {
     uint64_t born;  // hostseg_take count when it was taken (reclaim leaves the newest alone)
     uint8_t *mem;
+    uint32_t size;
     bool busy;
     bool pending_release;
     uint32_t refs;
@@ -50,6 +52,7 @@ static HostSeg *g_hostseg;
 static int g_nhostseg, g_caphostseg;
 static pthread_mutex_t g_hostseg_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_take_count;
+static uint64_t g_hostseg_bytes;
 
 // Pool pressure only (caller holds g_hostseg_lock): free the chains whose game handle is dead. A chain's handle is the
 // CMD_JUMP in the game's command memory at origin_lo; when the game freed or reused that memory for anything else
@@ -104,64 +107,102 @@ static void hostseg_release_range(uint64_t lo, uint64_t hi) {
     pthread_mutex_unlock(&g_hostseg_lock);
 }
 
-static uint64_t hostseg_take(NvnCmdBuf *cb) {
+static uint32_t hostseg_alloc_size(uint32_t need) {
+    uint64_t n = need > HOSTSEG_BASE_SIZE ? need : HOSTSEG_BASE_SIZE;
+    n = (n + 4095u) & ~4095ull;
+    if (n > UINT32_MAX) FATAL("nvn: expanded command segment request too large (%llu bytes)\n",
+                              (unsigned long long)n);
+    return (uint32_t)n;
+}
+
+static int hostseg_best_free_locked(uint32_t need) {
+    int best = -1;
+    for (int i = 0; i < g_nhostseg; i++) {
+        HostSeg *s = &g_hostseg[i];
+        if (s->busy || s->refs || s->size < need) continue;
+        if (best < 0 || s->size < g_hostseg[best].size) best = i;
+    }
+    return best;
+}
+
+static uint64_t hostseg_take(NvnCmdBuf *cb, uint32_t need, uint32_t *actual_size) {
     static uint64_t total;
     uint8_t *mem = NULL;
+    uint32_t want = hostseg_alloc_size(need);
     pthread_mutex_lock(&g_hostseg_lock);
-    for (int i = 0; i < g_nhostseg; i++) {
-        if (!g_hostseg[i].busy && !g_hostseg[i].refs) {
-            g_hostseg[i].busy = true;
-            g_hostseg[i].pending_release = false;
-            g_hostseg[i].origin_lo = cb->host_origin_lo;
-            g_hostseg[i].origin_hi = cb->host_origin_hi;
-            g_hostseg[i].born = g_take_count + 1;
-            mem = g_hostseg[i].mem;
-            break;
-        }
-    }
-    if (!mem && (uint64_t)(g_nhostseg + 1) * HOSTSEG_SIZE > hostseg_cap()) {
+
+    int pick = hostseg_best_free_locked(want);
+    // Reclaim stale chains before growing a large backing pool. This is deliberately
+    // opportunistic: live/pinned command streams are never reclaimed.
+    if (pick < 0 && g_hostseg_bytes >= (256ull << 20)) {
         int freed = hostseg_reclaim_dead_locked();
+        if (freed) pick = hostseg_best_free_locked(want);
+        static uint64_t proactive;
+        if (freed && (++proactive <= 8 || !(proactive & 63)))
+            LOG("[nvn] proactive host command reclaim: %d segments, backing %.1f MB\n",
+                freed, (double)g_hostseg_bytes / (1024.0 * 1024.0));
+    }
+    if (pick >= 0) {
+        HostSeg *s = &g_hostseg[pick];
+        s->busy = true;
+        s->pending_release = false;
+        s->origin_lo = cb->host_origin_lo;
+        s->origin_hi = cb->host_origin_hi;
+        s->born = g_take_count + 1;
+        mem = s->mem;
+        *actual_size = s->size;
+    }
+
+    if (!mem && g_hostseg_bytes + want > hostseg_cap()) {
+        int freed = hostseg_reclaim_dead_locked();
+        pick = hostseg_best_free_locked(want);
         static uint64_t reclaims;
         if (++reclaims <= 8 || !(reclaims & 63))
-            LOG("[nvn] host segment pool at its cap (%d x %u KB): reclaimed %d dead segments (#%llu)\n", g_nhostseg,
-                HOSTSEG_SIZE >> 10, freed, (unsigned long long)reclaims);
-        for (int i = 0; i < g_nhostseg && freed; i++) {
-            if (!g_hostseg[i].busy && !g_hostseg[i].refs) {
-                g_hostseg[i].busy = true;
-                g_hostseg[i].pending_release = false;
-                g_hostseg[i].origin_lo = cb->host_origin_lo;
-                g_hostseg[i].origin_hi = cb->host_origin_hi;
-                g_hostseg[i].born = g_take_count + 1;
-                mem = g_hostseg[i].mem;
-                break;
-            }
+            LOG("[nvn] host segment backing at cap (%.1f/%llu MB): reclaimed %d dead segments (#%llu)\n",
+                (double)g_hostseg_bytes / (1024.0 * 1024.0),
+                (unsigned long long)(hostseg_cap() >> 20), freed, (unsigned long long)reclaims);
+        if (pick >= 0) {
+            HostSeg *s = &g_hostseg[pick];
+            s->busy = true;
+            s->pending_release = false;
+            s->origin_lo = cb->host_origin_lo;
+            s->origin_hi = cb->host_origin_hi;
+            s->born = g_take_count + 1;
+            mem = s->mem;
+            *actual_size = s->size;
         }
     }
-    if (!mem && (uint64_t)(g_nhostseg + 1) * HOSTSEG_SIZE <= hostseg_cap()) {
+
+    if (!mem && g_hostseg_bytes + want <= hostseg_cap()) {
         if (g_nhostseg == g_caphostseg) {
             int nc = g_caphostseg ? g_caphostseg * 2 : 64;
             HostSeg *p = realloc(g_hostseg, (size_t)nc * sizeof *p);
             if (p) { g_hostseg = p; g_caphostseg = nc; }
         }
         if (g_nhostseg < g_caphostseg) {
-            mem = malloc(HOSTSEG_SIZE);
+            mem = malloc(want);
             if (mem) {
                 g_hostseg[g_nhostseg++] = (HostSeg){
-                    .born = g_take_count + 1,
-                    .mem = mem, .busy = true, .pending_release = false, .refs = 0,
+                    .born = g_take_count + 1, .mem = mem, .size = want,
+                    .busy = true, .pending_release = false, .refs = 0,
                     .origin_lo = cb->host_origin_lo, .origin_hi = cb->host_origin_hi
                 };
+                g_hostseg_bytes += want;
+                *actual_size = want;
             }
         }
     }
+
     uint64_t n = ++total;
     g_take_count++;
     int pool = g_nhostseg;
+    uint64_t bytes = g_hostseg_bytes;
     pthread_mutex_unlock(&g_hostseg_lock);
-    if (!mem) FATAL("nvn: host command segment pool exhausted (%llu MB)\n", (unsigned long long)(hostseg_cap() >> 20));
+    if (!mem) FATAL("nvn: host command segment pool exhausted (%llu MB)\n",
+                    (unsigned long long)(hostseg_cap() >> 20));
     if (n == 1 || !(n & 1023))
-        LOG("[nvn] expanded command records -> host segments (take %llu, pool %d x %u KB)\n",
-            (unsigned long long)n, pool, HOSTSEG_SIZE >> 10);
+        LOG("[nvn] expanded command records -> host segments (take %llu, pool %d, backing %.1f MB, segment %u KB)\n",
+            (unsigned long long)n, pool, (double)bytes / (1024.0 * 1024.0), *actual_size >> 10);
     return (uint64_t)(uintptr_t)mem;
 }
 
@@ -188,7 +229,7 @@ uint64_t nvn_cmdstream_pin(uint64_t handle) {
         // by the queue-level pin; this extra ref protects the active segment too.
         for (int i = 0; i < g_nhostseg; i++) {
             HostSeg *s = &g_hostseg[i];
-            uint64_t lo = (uint64_t)(uintptr_t)s->mem, hi = lo + HOSTSEG_SIZE;
+            uint64_t lo = (uint64_t)(uintptr_t)s->mem, hi = lo + s->size;
             if (s->busy && handle >= lo && handle < hi) {
                 s->refs++;
                 break;
@@ -219,7 +260,7 @@ void nvn_cmdstream_unpin(uint64_t handle) {
     if (!matched) {
         for (int i = 0; i < g_nhostseg; i++) {
             HostSeg *s = &g_hostseg[i];
-            uint64_t lo = (uint64_t)(uintptr_t)s->mem, hi = lo + HOSTSEG_SIZE;
+            uint64_t lo = (uint64_t)(uintptr_t)s->mem, hi = lo + s->size;
             if (handle < lo || handle >= hi) continue;
             if (s->refs) s->refs--;
             if (!s->refs && s->pending_release) {
@@ -301,18 +342,20 @@ NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; }
 // callback: that callback budgets for Maxwell command bytes, not our structures.
 static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     (void)c;
-    uint32_t size = (uint32_t)((sizeof(CmdRec) + extra + 7) & ~7u);
-    if (size + JUMP_RESERVE > HOSTSEG_SIZE)
-        FATAL("nvn: single expanded command record too large (%u bytes)\n", size);
+    uint64_t total = sizeof(CmdRec) + (uint64_t)extra + 7;
+    if (total > UINT32_MAX) FATAL("nvn: expanded command record too large (%llu bytes)\n",
+                                  (unsigned long long)total);
+    uint32_t size = (uint32_t)total & ~7u;
 
     if (!cb->mem || !cb->host_segment || cb->chunk_used + size + JUMP_RESERVE > cb->size) {
-        uint64_t next = hostseg_take(cb);
+        uint32_t seg_size = 0;
+        uint64_t next = hostseg_take(cb, size + JUMP_RESERVE, &seg_size);
         if (cb->mem && cb->host_segment) {
             CmdRec *j = raw_rec(cb->mem + cb->chunk_used, CMD_JUMP, sizeof(CmdRec));
             j->x[0] = next;
         }
         cb->mem = next;
-        cb->size = HOSTSEG_SIZE;
+        cb->size = seg_size;
         cb->chunk_used = 0;
         cb->host_segment = true;
     }
@@ -406,13 +449,14 @@ NVN(nvnCommandBufferBeginRecording) {
         hostseg_release_range(slot, slot + sizeof(CmdRec));
         cb->host_origin_lo = slot;
         cb->host_origin_hi = slot + sizeof(CmdRec);
-        uint64_t host = hostseg_take(cb);
+        uint32_t host_size = 0;
+        uint64_t host = hostseg_take(cb, JUMP_RESERVE, &host_size);
         CmdRec *j = raw_rec(slot, CMD_JUMP, sizeof(CmdRec));
         j->x[0] = host;
         cb->used += sizeof(CmdRec);
         cb->start = slot;
         cb->mem = host;
-        cb->size = HOSTSEG_SIZE;
+        cb->size = host_size;
         cb->chunk_used = 0;
         cb->host_segment = true;
     } else {
@@ -420,10 +464,11 @@ NVN(nvnCommandBufferBeginRecording) {
         // Scarlet recording should never stay here frame after frame: doing so
         // is what previously exhausted the 256 MB host-segment pool.
         if (cb->guest_mem) cb->used = cb->guest_size;
-        uint64_t host = hostseg_take(cb);
+        uint32_t host_size = 0;
+        uint64_t host = hostseg_take(cb, JUMP_RESERVE, &host_size);
         cb->start = host;
         cb->mem = host;
-        cb->size = HOSTSEG_SIZE;
+        cb->size = host_size;
         cb->chunk_used = 0;
         cb->host_segment = true;
         static uint64_t fallbacks;
