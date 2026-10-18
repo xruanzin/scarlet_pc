@@ -126,6 +126,8 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
     int32_t max_len = *(const int32_t *)(uintptr_t)(arg + ARG_MAXLEN);
     int32_t min_len = *(const int32_t *)(uintptr_t)(arg + ARG_MINLEN);
     uint8_t use_utf8 = *(const uint8_t *)(uintptr_t)(arg + ARG_UTF8);
+    uint8_t use_text_check = *(const uint8_t *)(uintptr_t)(arg + 0x3d0);
+    uint64_t text_check_cb = LD64(arg + 0x3d8);
     uint32_t init_off = *(const uint32_t *)(uintptr_t)(arg + ARG_INIT_OFF);
     uint32_t init_len = *(const uint32_t *)(uintptr_t)(arg + ARG_INIT_LEN);
     uint64_t work = LD64(arg + ARG_WORKBUF);
@@ -151,8 +153,8 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
     int ok = menu_keyboard_run(initial, max_len, text, sizeof text);
 #endif
 
-    LOG("[swkbd] text input max=%d min=%d utf8=%u initial=\"%s\" -> %s%s%s\n",
-        max_len, min_len, use_utf8, initial,
+    LOG("[swkbd] text input max=%d min=%d utf8=%u textCheck=%u callback=%llx initial=\"%s\" -> %s%s%s\n",
+        max_len, min_len, use_utf8, use_text_check, (unsigned long long)text_check_cb, initial,
         ok ? "entered \"" : "cancelled", ok ? text : "", ok ? "\"" : "");
 
     if (!ok) {
