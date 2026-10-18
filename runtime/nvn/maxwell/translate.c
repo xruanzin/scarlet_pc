@@ -77,6 +77,8 @@ typedef struct {
     bool glsl;               // emit Vulkan GLSL: dialect-specific constructs here, the rest via glsl_rewrite()
     bool uses_gmem_store;    // STG present: the gmem buffer is not readonly
     uint32_t cbuf_need[18];  // highest constant vec4 index + 1 per cbuf (array size of the GLSL block)
+    int ipa_multiplier;
+    uint8_t frag_imap[32];  // SPH: 2 bits/component (unused, constant, perspective, screen-linear)
 } Ctx;
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
@@ -252,8 +254,16 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
                 strcpy(e, comp == 3 ? "0x3f800000u" : "0u");  // not provided by the vertex shader
             } else {
                 c->in_attr_mask |= 1u << a;
-                // IPA "pass" yields attr/w (the shader multiplies by w itself); Metal gives attr.
-                if (c->ipa_mode == 0) sprintf(e, "as_type<uint>(in.v%d[%d] * in.pos.w)", a, comp);
+                // Host smooth varyings are already perspective-correct. Maxwell
+                // IPA reads attr/w; IPA.MUL subsequently applies its register
+                // multiplier (usually the reciprocal of PositionW). Interpolation
+                // comes from the SPH, independently of that arithmetic mode.
+                int imap = (c->frag_imap[a] >> (comp * 2)) & 3;
+                if (!imap) for (int j = 0; j < 4 && !imap; j++) imap = (c->frag_imap[a] >> (j * 2)) & 3;
+                if (!imap) imap = c->ipa_mode == 2 ? 1 : c->ipa_mode == 3 ? 3 : 2;
+                if (imap == 1) c->flat_mask |= 1u << a;
+                if (imap == 3) c->noperspective_mask |= 1u << a;
+                if (imap == 2 && c->ipa_mode >= 0) sprintf(e, "as_type<uint>(in.v%d[%d] * in.pos.w)", a, comp);
                 else sprintf(e, "as_type<uint>(in.v%d[%d])", a, comp);
             }
         } else if (addr == 0x3FC) { c->uses_front_facing = true; strcpy(e, "(front_facing ? 0xFFFFFFFFu : 0u)"); }
@@ -262,7 +272,14 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
     } else {
         sprintf(e, "0u /* attr %#x */", addr);
     }
-    set_reg(c, dst, e);
+    if (c->ipa_mode == 1) {
+        char mul[16], value[512];
+        // One expression reads the multiplier before writing dst, including
+        // IPA.MUL Rd, attr, Rd and the zero register.
+        snprintf(value, sizeof value, "as_type<uint>(as_type<float>(%s) * as_type<float>(%s))",
+                 e, reg(c, c->ipa_multiplier, mul));
+        set_reg(c, dst, value);
+    } else set_reg(c, dst, e);
 }
 
 static void attr_store(Ctx *c, int src, uint32_t addr) {
@@ -905,15 +922,12 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         // DEPBAR / NOP / MEMBAR
     } else if (OPM(0xe00000000000ff00ull, 0xff0000400000ff00ull) || OPM(0xe000004000000000ull, 0xff00004000000000ull)) {
         // IPA: interpolate fragment input
-        bool idx = bits(w, 38, 1);
-        uint32_t addr = (uint32_t)bits(w, 28, 10);
+        bool idx = bits(w, 38, 1) && a != RZ;
+        uint32_t addr = (uint32_t)bits(w, 30, 8) * 4;
         int mode = (int)bits(w, 54, 2);  // 0 pass, 1 multiply, 2 constant, 3 sc
         if (idx) { fail(c, "ipa idx"); }
-        if (addr >= 0x80 && addr < 0x280) {
-            int at = (addr - 0x80) >> 4;
-            if (mode == 2) c->flat_mask |= 1u << at;
-        }
         c->ipa_mode = mode;
+        c->ipa_multiplier = (int)bits(w, 20, 8);
         attr_load(c, d, addr, NULL);
         c->ipa_mode = -1;
         if (bits(w, 51, 1) && d != RZ) sp(&c->body, "    r%d = as_type<uint>(saturate(as_type<float>(r%d)));\n", d, d);
@@ -2167,6 +2181,7 @@ ShaderInfo *maxwell_translate_with_constants(const uint8_t *blob, size_t max_siz
     // compute programs have neither the 0x30-byte NVN header nor an SPH: code starts at the blob
     if (stage == STAGE_COMPUTE) code = blob;
     if (stage == STAGE_FRAGMENT) {
+        memcpy(c->frag_imap, sph + 0x18, sizeof c->frag_imap);
         c->omap_target = *(const uint32_t *)(sph + 0x48);
         c->omap_depth = (*(const uint32_t *)(sph + 0x4C) >> 1) & 1;
     }

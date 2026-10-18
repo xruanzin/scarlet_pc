@@ -388,12 +388,16 @@ static uint32_t svc_arbitrate_unlock(uint64_t addr) {
 static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t tag, int64_t timeout) {
     pthread_mutex_lock(&g_klock);
     KThread *t = t_cur;
+    // The SDK's signal fast path checks this flag without entering the kernel.
+    // Publish it BEFORE releasing the guest mutex: otherwise another guest
+    // thread can acquire the mutex, see key == 0 and skip its signal entirely.
+    // g_klock alone cannot protect against that user-space fast path.
+    __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
     mutex_release(mutex);
     t->wait_kind = WAIT_CONDVAR;
     t->wait_addr = key;
     t->wait_mutex = mutex;
     t->wait_tag = tag;
-    __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
     uint32_t r = block_current(timeout);
     // Timed out / cancelled: the mutex is NOT reacquired here. As on the console, the caller does it: the SDK's
     // InternalConditionVariableImplByHorizon::TimedWait calls InternalCriticalSection::Enter on 0xea01 (TimedOut).

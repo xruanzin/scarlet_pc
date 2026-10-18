@@ -2,12 +2,24 @@
 // records, so the game's own memory management and out-of-memory callbacks work as designed.
 // A command handle is the guest address of a list's first record.
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "nvn.h"
 
 #define JUMP_RESERVE (sizeof(CmdRec) + 8)
+
+// A no-position vertex shader can be a stream-output preprocessing pass. These
+// APIs remain unimplemented; report their actual use once per entry point so
+// a missing model is not incorrectly diagnosed as a texture/driver problem.
+#define TF_UNIMPLEMENTED(name) NVN(name) { \
+    static atomic_bool reported; \
+    if (!atomic_exchange_explicit(&reported, true, memory_order_relaxed)) \
+        LOG("[nvn-unimplemented] %s cb=%llx args=%llx,%llx,%llx lr=%llx (transform feedback is not executed)\n", \
+            #name, (unsigned long long)A(0), (unsigned long long)A(1), (unsigned long long)A(2), \
+            (unsigned long long)A(3), (unsigned long long)c->x[30]); \
+}
 
 // Expanded host records must not consume the game's real NVN command-memory
 // budget. Every recording gets a tiny opaque handle in guest memory and the
@@ -530,8 +542,8 @@ NVN(nvnCommandBufferBindSeparateTexture) {
 }
 NVN(nvnCommandBufferBindSeparateSamplers) { (void)c; }
 NVN(nvnCommandBufferBindSeparateSampler) { (void)c; }
-NVN(nvnCommandBufferBindTransformFeedbackBuffers) { (void)c; }
-NVN(nvnCommandBufferBindTransformFeedbackBuffer) { (void)c; }
+TF_UNIMPLEMENTED(nvnCommandBufferBindTransformFeedbackBuffers)
+TF_UNIMPLEMENTED(nvnCommandBufferBindTransformFeedbackBuffer)
 NVN(nvnCommandBufferBindCoverageModulationTable) { (void)c; }
 
 NVN(nvnCommandBufferSetTexturePool) {
@@ -772,14 +784,14 @@ PLAIN(nvnCommandBufferDrawArraysIndirect, CMD_DRAW_ARRAYS_INDIRECT)
 PLAIN(nvnCommandBufferDrawElementsIndirect, CMD_DRAW_ELEMENTS_INDIRECT)
 PLAIN(nvnCommandBufferMultiDrawArraysIndirectCount, CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT)
 PLAIN(nvnCommandBufferMultiDrawElementsIndirectCount, CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT)
-NVN(nvnCommandBufferDrawTransformFeedback) { (void)c; }
+TF_UNIMPLEMENTED(nvnCommandBufferDrawTransformFeedback)
 NVN(nvnCommandBufferDrawTexture) { (void)c; }
 PLAIN(nvnCommandBufferDispatchCompute, CMD_DISPATCH)
 PLAIN(nvnCommandBufferDispatchComputeIndirect, CMD_DISPATCH_INDIRECT)
-NVN(nvnCommandBufferBeginTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferEndTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferPauseTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferResumeTransformFeedback) { (void)c; }
+TF_UNIMPLEMENTED(nvnCommandBufferBeginTransformFeedback)
+TF_UNIMPLEMENTED(nvnCommandBufferEndTransformFeedback)
+TF_UNIMPLEMENTED(nvnCommandBufferPauseTransformFeedback)
+TF_UNIMPLEMENTED(nvnCommandBufferResumeTransformFeedback)
 
 // ---- copies
 typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRef;
