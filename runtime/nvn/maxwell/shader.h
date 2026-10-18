@@ -54,6 +54,7 @@ typedef struct {
     uint8_t xfb;              // transform-feedback variant
     uint8_t xfb_layout;       // 0: infer legacy layout, 1: Scarlet stream-output layout from NVN control
     uint8_t xfb_comp[4];      // captured components per buffer/varying (Scarlet: 3,1,1,0)
+    uint8_t layer_from_instance; // layered 3D render target: route instance N to slice N
 } ShaderKey;
 
 typedef struct {
