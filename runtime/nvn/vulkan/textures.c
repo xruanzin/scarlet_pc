@@ -792,32 +792,43 @@ static bool storage_float_format(VkFormat f) {
     }
 }
 
+static bool storage_2d_view_params(NvnTexture *t, TexBackend *b, const NvnTextureView *v, bool has_view,
+                                   VkFormat *fmt, uint32_t *level, uint32_t *layer) {
+    if (!t || !b || !b->image || b->samples != 1 || b->aspect != VK_IMAGE_ASPECT_COLOR_BIT) return false;
+    if (b->base_type != VK_IMAGE_VIEW_TYPE_2D && b->base_type != VK_IMAGE_VIEW_TYPE_2D_ARRAY &&
+        b->base_type != VK_IMAGE_VIEW_TYPE_CUBE) return false;
+    if (!has_view) v = NULL;
+    *fmt = b->format;
+    if (v && (v->setmask & 4) && vk_format(t->format) == b->format) *fmt = fmt_of(v->format).vf;
+    *level = v && (v->setmask & 1) ? v->base_level : 0;
+    *layer = v && (v->setmask & 2) ? v->min_layer : 0;
+    if (*level >= b->levels) *level = b->levels ? b->levels - 1 : 0;
+    if (*layer >= b->layers) *layer = b->layers ? b->layers - 1 : 0;
+    return true;
+}
+
 VkImageView vk_storage_write_view(NvnTexture *t, const NvnTextureView *v, bool has_view) {
-    (void)v; (void)has_view;
     if (!t) return VK_NULL_HANDLE;
+    // Preserve current GPU contents; this descriptor is an output image, not a CPU upload request.
     TexBackend *b = vk_tex(t, true);
-    if (!b || !b->image || b->samples != 1 || b->base_type != VK_IMAGE_VIEW_TYPE_2D ||
-        b->aspect != VK_IMAGE_ASPECT_COLOR_BIT || !storage_float_format(b->format) ||
-        !format_supports(b->format, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+    VkFormat fmt;
+    uint32_t lv, ly;
+    if (!storage_2d_view_params(t, b, v, has_view, &fmt, &lv, &ly) ||
+        !storage_float_format(fmt) || !format_supports(fmt, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
         return VK_NULL_HANDLE;
-    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, b->format, 0, 1, 0, 1,
-                         (VkComponentMapping){VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                              VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY},
-                         VK_IMAGE_ASPECT_COLOR_BIT);
+    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, fmt, lv, 1, ly, 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
 }
 
 VkImageView vk_storage_atomic_u32_view(NvnTexture *t, const NvnTextureView *v, bool has_view) {
-    (void)v; (void)has_view;
     if (!t) return VK_NULL_HANDLE;
     TexBackend *b = vk_tex(t, true);
-    if (!b || !b->image || b->samples != 1 || b->base_type != VK_IMAGE_VIEW_TYPE_2D ||
-        b->aspect != VK_IMAGE_ASPECT_COLOR_BIT || b->format != VK_FORMAT_R32_UINT ||
-        !format_supports(b->format, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT))
+    VkFormat fmt;
+    uint32_t lv, ly;
+    if (!storage_2d_view_params(t, b, v, has_view, &fmt, &lv, &ly) ||
+        fmt != VK_FORMAT_R32_UINT ||
+        !format_supports(fmt, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT))
         return VK_NULL_HANDLE;
-    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_UINT, 0, 1, 0, 1,
-                         (VkComponentMapping){VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                              VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY},
-                         VK_IMAGE_ASPECT_COLOR_BIT);
+    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, fmt, lv, 1, ly, 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
 }
 
 VkImageView vk_dummy_storage_view(bool atomic_u32) {
