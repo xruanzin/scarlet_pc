@@ -298,8 +298,8 @@ static void attr_store(Ctx *c, int src, uint32_t addr) {
         c->out_attr_mask |= 1u << a;
         c->info->out_comp_mask[a] |= (uint8_t)(1u << ((addr >> 2) & 3));
         int comp = (addr >> 2) & 3;
-        if (c->key && c->key->xfb && c->key->glsl && c->info->out_comp_mask[a] == 1 && comp == 0)
-            sp(&c->body, "    out.v%d = as_type<float>(%s);\n", a, v);
+        if (c->key && c->key->xfb && c->key->glsl)
+            sp(&c->body, "    xfbtmp%d[%d] = as_type<float>(%s);\n", a, comp, v);
         else
             sp(&c->body, "    out.v%d[%d] = as_type<float>(%s);\n", a, comp, v);
     } else if (addr == 0x6C) {
@@ -2040,8 +2040,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         for (int i = 0; i < 32; i++) {
             if (!(c->out_attr_mask & (1u << i))) continue;
             uint8_t cm = info->out_comp_mask[i];
-            if (key && key->xfb && i < 4 && (cm == 1 || cm == 3 || cm == 7 || cm == 15)) {
-                int nc = cm == 1 ? 1 : cm == 3 ? 2 : cm == 7 ? 3 : 4;
+            if (key && key->xfb && i < 4 && cm) {
+                int nc = __builtin_popcount((unsigned)cm & 0xFu);
                 if (nc == 1)
                     sp(&s, "layout(location = %d, xfb_buffer = %d, xfb_offset = 0, xfb_stride = 4) out float v%d;\n", i, i, i);
                 else
@@ -2072,10 +2072,10 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         for (int i = 0; i < 32; i++) {
             if (!(c->out_attr_mask & (1u << i))) continue;
             uint8_t cm = info->out_comp_mask[i];
-            if (key && key->xfb && i < 4 && cm == 1) sp(&s, "  v%d = 0.0;\n", i);
-            else if (key && key->xfb && i < 4 && cm == 3) sp(&s, "  v%d = vec2(0);\n", i);
-            else if (key && key->xfb && i < 4 && cm == 7) sp(&s, "  v%d = vec3(0);\n", i);
-            else sp(&s, "  v%d = vec4(0, 0, 0, 1);\n", i);
+            if (key && key->xfb && i < 4 && cm)
+                sp(&s, "  vec4 xfbtmp%d = vec4(0, 0, 0, 1);\n", i);
+            else
+                sp(&s, "  v%d = vec4(0, 0, 0, 1);\n", i);
         }
         if (info->writes_point_size) sp(&s, "  gl_PointSize = 0.0f;\n");
     }
@@ -2099,6 +2099,19 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     }
     free(body.buf);
     if (stage == STAGE_VERTEX) {
+        if (key && key->xfb) {
+            for (int i = 0; i < 4; i++) {
+                uint8_t cm = info->out_comp_mask[i] & 0xFu;
+                if (!(c->out_attr_mask & (1u << i)) || !cm) continue;
+                int nc = __builtin_popcount((unsigned)cm);
+                char sw[5]; int sn = 0;
+                static const char comp[] = "xyzw";
+                for (int j = 0; j < 4; j++) if (cm & (1u << j)) sw[sn++] = comp[j];
+                sw[sn] = 0;
+                if (nc == 1) sp(&s, "  v%d = xfbtmp%d.%s;\n", i, i, sw);
+                else sp(&s, "  v%d = xfbtmp%d.%s;\n", i, i, sw);
+            }
+        }
         if (key && key->flip_y) sp(&s, "  gl_Position.y = -gl_Position.y;\n");
         if (key && key->depth_minus_one) sp(&s, "  gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5f;\n");
     } else if (stage == STAGE_FRAGMENT) {
