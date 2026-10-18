@@ -133,12 +133,22 @@ NVN(nvnQueueSubmitCommands) {
     if (!resolved) FATAL("nvn: failed to pin %d submitted command lists\n", n);
 
     for (int i = 0; i < n; i++) resolved[i] = nvn_cmdstream_pin(handles[i]);
-    for (int i = 0; i < n; i++) backend_execute(resolved[i]);
+    // One NVN QueueSubmitCommands call is one queue submission. Keep every
+    // command list in this batch in the same Vulkan command buffer instead of
+    // ending rendering + vkQueueSubmit2 once per handle. Scarlet often submits
+    // many small lists together; the old path multiplied pass breaks and driver
+    // submissions dramatically.
+    for (int i = 0; i < n; i++) backend_execute_deferred(resolved[i]);
+    renderer_submit();
     for (int i = n - 1; i >= 0; i--) nvn_cmdstream_unpin(handles[i]);
+
+    static int batch_log;
+    if (n > 1 && batch_log++ < 8)
+        LOG("[nvn] QueueSubmitCommands: %d lists -> 1 Vulkan submission\n", n);
 
     if (resolved != stack_resolved) free(resolved);
 }
-NVN(nvnQueueFlush) { (void)c; }
+NVN(nvnQueueFlush) { (void)c; renderer_submit(); }
 NVN(nvnQueueFinish) { (void)c; renderer_sync(); }
 
 static NvnSync *sync_of(uint64_t guest) {
