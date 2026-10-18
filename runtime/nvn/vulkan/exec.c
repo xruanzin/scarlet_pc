@@ -3479,7 +3479,8 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
 
 // ================================================================== executor (renderer.m exec_list)
 static void exec_list(uint64_t handle, int depth) {
-    uint64_t p = handle;
+    uint64_t pin_handle = handle;
+    uint64_t p = nvn_cmdstream_pin(handle);
     if (depth == 0) st.obj = 0, st.obj_draw = 0;  // (a submitted list starts with no object; its called lists inherit)
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
@@ -3487,7 +3488,9 @@ static void exec_list(uint64_t handle, int depth) {
         if (r->op < CMD_COUNT) op_counts[r->op]++;
         if (ip_replaying && ip_skip_op(r->op)) { p += r->size; continue; }
         switch (r->op) {
-        case CMD_END: return;
+        case CMD_END:
+            nvn_cmdstream_unpin(pin_handle);
+            return;
         case CMD_OBJECT: st.obj = r->x[0]; st.obj_draw = 0; { static int d; if (getenv("LARECOMP_OBJDBG") && vk_frame_counter() == 1450 && d++ < 80) LOG("[objdbg] depth %d object %llx\n", depth,(unsigned long long)r->x[0]); } break;
         case CMD_JUMP: p = r->x[0]; continue;
         case CMD_CALL: {
@@ -3702,6 +3705,7 @@ static void exec_list(uint64_t handle, int depth) {
         }
         p += r->size;
     }
+    nvn_cmdstream_unpin(pin_handle);
 }
 
 // Scarlet can submit NVN work from more than one guest thread. The Vulkan
