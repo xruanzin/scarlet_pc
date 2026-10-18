@@ -100,8 +100,8 @@ if (Test-Path -LiteralPath $Log) {
             if ($Lr -ge 4) { $Targets += ('0x{0:x}' -f ($Lr - 4)) }
             foreach ($Addr in $Targets) {
                 Write-Host "[scarlet-run] Inspecionando salto sem funcao $Addr ..." -ForegroundColor Yellow
-                "[missing-dispatch-inspect] $Addr" | Tee-Object -FilePath $Log -Append
-                & $Python $Inspector $ExeFs $Addr 2>&1 | Tee-Object -FilePath $Log -Append
+                Add-Content -LiteralPath $Log -Value "[missing-dispatch-inspect] $Addr" -Encoding UTF8
+                & $Python $Inspector $ExeFs $Addr 2>&1 | Out-File -LiteralPath $Log -Append -Encoding utf8
             }
         }
 
@@ -112,8 +112,8 @@ if (Test-Path -LiteralPath $Log) {
                 $Caller = ('0x{0:x}' -f ($Lr - 4))
                 Write-Host ""
                 Write-Host "[scarlet-run] Inspecionando caller do boot-guard $Caller ..." -ForegroundColor Yellow
-                "[guard-caller-inspect] $Caller" | Tee-Object -FilePath $Log -Append
-                & $Python $Inspector $ExeFs $Caller 2>&1 | Tee-Object -FilePath $Log -Append
+                Add-Content -LiteralPath $Log -Value "[guard-caller-inspect] $Caller" -Encoding UTF8
+                & $Python $Inspector $ExeFs $Caller 2>&1 | Out-File -LiteralPath $Log -Append -Encoding utf8
             }
         }
 
@@ -124,8 +124,8 @@ if (Test-Path -LiteralPath $Log) {
             $Addr = "0x" + $CrashLine.Matches[0].Groups[1].Value
             Write-Host ""
             Write-Host "[scarlet-run] Inspecionando crash guest $Addr ..." -ForegroundColor Yellow
-            "[crash-inspect] $Addr" | Tee-Object -FilePath $Log -Append
-            & $Python $Inspector $ExeFs $Addr 2>&1 | Tee-Object -FilePath $Log -Append
+            Add-Content -LiteralPath $Log -Value "[crash-inspect] $Addr" -Encoding UTF8
+            & $Python $Inspector $ExeFs $Addr 2>&1 | Out-File -LiteralPath $Log -Append -Encoding utf8
         }
     }
 }
