@@ -547,6 +547,8 @@ def main():
     ap.add_argument('--limit', type=int, default=0)
     ap.add_argument('--extra-entry', action='append', default=[],
                     help='additional absolute guest code entry (repeatable; hex accepted)')
+    ap.add_argument('--extra-entry-range', action='append', default=[],
+                    help='additional callable range start:end; every aligned instruction becomes an entry')
     ap.add_argument('--trace-stores', action='store_true')  # research build (docs/DEPURACAO.md, LARECOMP_TRACE_STORES)
     ap.add_argument('--simd', choices=('asm', 'c'),
                     default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
@@ -579,6 +581,15 @@ def main():
         if not m.in_text(a):
             raise SystemExit(f'--extra-entry {raw}: outside {args.name} .text')
         start_set.add(a)
+    for raw in args.extra_entry_range:
+        try:
+            lo_s, hi_s = raw.split(':', 1)
+            lo, hi = int(lo_s, 0), int(hi_s, 0)
+        except Exception:
+            raise SystemExit(f'--extra-entry-range {raw}: expected start:end')
+        if lo > hi or (lo & 3) or (hi & 3) or not m.in_text(lo) or not m.in_text(hi):
+            raise SystemExit(f'--extra-entry-range {raw}: invalid/outside {args.name} .text')
+        start_set.update(range(lo, hi + 4, 4))
     for i, w in enumerate(m.words):
         if (w & 0xFC000000) == 0x94000000:
             t = m.lo + i * 4 + sext26(w) * 4
