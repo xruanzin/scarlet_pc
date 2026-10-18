@@ -35,6 +35,7 @@ static void rtld_init_sdk(Cpu *c) {  // the SDK, then the subsdk modules that li
     for (int i = 1; i < g_nmodules; i++) module_init(c, &g_modules[i]);
 }
 static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
+static void rtld_mark(Cpu *c) { (void)c; }  // extra callback used by newer nn::init::Start ABIs
 
 // Claim the guest address range before anything else can map there. The host allocator places
 // regions at random addresses in the same window; on a collision, re-exec for a fresh layout.
@@ -172,7 +173,7 @@ static void boot(const char *root) {
 
     uint64_t init_fn = hle_register("<rtld_init_sdk>", rtld_init_sdk);
     uint64_t fini_fn = hle_register("<rtld_init_main>", rtld_init_main);
-    uint64_t mark_fn = hle_register("<rtld_mark>", NULL);  // modern rtld callback: no-op is sufficient here
+    uint64_t mark_fn = hle_register("<rtld_mark>", rtld_mark);
     LOG("[boot] nn::init::Start %s ABI at %llx\n",
         modern_start ? "5-arg" : "4-arg", (unsigned long long)start);
 
