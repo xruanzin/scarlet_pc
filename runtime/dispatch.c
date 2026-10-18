@@ -171,6 +171,7 @@ void rt_hang_report(void) {
         hhist_print(&h, 6);
     }
     if (count > MAX_HH_THREADS) fprintf(stderr, "[hang] history capacity reached; later threads omitted\n");
+    kernel_dump_guest_threads();
     plat_dump_other_threads();
     fprintf(stderr, "===== end of hang report =====\n");
     fflush(stderr);
