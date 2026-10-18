@@ -131,6 +131,185 @@ void plat_set_cpu_boost(bool enabled) {
     }
 }
 
+// ---- native text input (nn::swkbd replacement)
+enum { TEXTDLG_EDIT = 4101, TEXTDLG_OK = 4102, TEXTDLG_CANCEL = 4103 };
+
+typedef struct {
+    HWND hwnd, edit, owner;
+    int done, ok, min_chars;
+    char *out;
+    size_t out_cap;
+} TextInputDialog;
+
+typedef struct { HWND hwnd; LONG64 area; } TextOwnerFind;
+
+static BOOL CALLBACK text_owner_enum(HWND w, LPARAM lp) {
+    if (!IsWindowVisible(w) || GetWindow(w, GW_OWNER)) return TRUE;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(w, &pid);
+    if (pid != GetCurrentProcessId()) return TRUE;
+    wchar_t cls[64] = L"";
+    GetClassNameW(w, cls, 64);
+    if (!wcscmp(cls, L"ConsoleWindowClass")) return TRUE;
+    RECT r;
+    if (!GetWindowRect(w, &r)) return TRUE;
+    LONG64 area = (LONG64)(r.right - r.left) * (r.bottom - r.top);
+    TextOwnerFind *f = (TextOwnerFind *)lp;
+    if (area > f->area) { f->area = area; f->hwnd = w; }
+    return TRUE;
+}
+
+static int utf8_wide(const char *src, wchar_t *dst, int cap) {
+    if (!src) src = "";
+    int n = MultiByteToWideChar(CP_UTF8, 0, src, -1, dst, cap);
+    if (!n && cap) dst[0] = 0;
+    return n;
+}
+
+static LRESULT CALLBACK textdlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    TextInputDialog *d = (TextInputDialog *)(uintptr_t)GetWindowLongPtrW(h, GWLP_USERDATA);
+    if (msg == WM_NCCREATE) {
+        CREATESTRUCTW *cs = (CREATESTRUCTW *)lp;
+        d = (TextInputDialog *)cs->lpCreateParams;
+        SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)d);
+        d->hwnd = h;
+    }
+    if (!d) return DefWindowProcW(h, msg, wp, lp);
+
+    switch (msg) {
+    case WM_COMMAND:
+        if (LOWORD(wp) == TEXTDLG_OK) {
+            int n = GetWindowTextLengthW(d->edit);
+            if (n < d->min_chars) {
+                MessageBeep(MB_ICONWARNING);
+                SetFocus(d->edit);
+                return 0;
+            }
+            wchar_t *w = calloc((size_t)n + 1, sizeof *w);
+            if (!w) return 0;
+            GetWindowTextW(d->edit, w, n + 1);
+            if (d->out && d->out_cap) {
+                int got = WideCharToMultiByte(CP_UTF8, 0, w, -1, d->out, (int)d->out_cap, NULL, NULL);
+                if (!got) d->out[0] = 0;
+                d->out[d->out_cap - 1] = 0;
+            }
+            free(w);
+            d->ok = 1;
+            d->done = 1;
+            DestroyWindow(h);
+            return 0;
+        }
+        if (LOWORD(wp) == TEXTDLG_CANCEL) {
+            d->ok = 0;
+            d->done = 1;
+            DestroyWindow(h);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        d->ok = 0;
+        d->done = 1;
+        DestroyWindow(h);
+        return 0;
+    case WM_DESTROY:
+        d->done = 1;
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+int plat_text_input_dialog(const char *title, const char *subtitle, const char *guide,
+                           const char *initial, int min_chars, int max_chars,
+                           char *out, size_t out_cap) {
+    static ATOM atom;
+    if (!atom) {
+        WNDCLASSEXW wc = {0};
+        wc.cbSize = sizeof wc;
+        wc.lpfnWndProc = textdlg_proc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.hCursor = LoadCursorW(NULL, IDC_IBEAM);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = L"ScarletNativeTextInput";
+        atom = RegisterClassExW(&wc);
+        if (!atom && GetLastError() == ERROR_CLASS_ALREADY_EXISTS) atom = 1;
+    }
+    if (!atom) return 0;
+
+    TextOwnerFind find = {0};
+    EnumWindows(text_owner_enum, (LPARAM)&find);
+
+    wchar_t wtitle[256], wsub[512], wguide[768], winitial[1024], body[1280];
+    utf8_wide(title && *title ? title : "Inserir texto", wtitle, 256);
+    utf8_wide(subtitle, wsub, 512);
+    utf8_wide(guide, wguide, 768);
+    utf8_wide(initial, winitial, 1024);
+    if (wsub[0] && wguide[0]) _snwprintf(body, 1280, L"%ls\n%ls", wsub, wguide);
+    else _snwprintf(body, 1280, L"%ls", wsub[0] ? wsub : wguide);
+    body[1279] = 0;
+
+    const int ww = 580, wh = 245;
+    RECT base = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+    if (find.hwnd) GetWindowRect(find.hwnd, &base);
+    int x = base.left + ((base.right - base.left) - ww) / 2;
+    int y = base.top + ((base.bottom - base.top) - wh) / 2;
+
+    TextInputDialog d = {0};
+    d.owner = find.hwnd;
+    d.min_chars = min_chars > 0 ? min_chars : 0;
+    d.out = out;
+    d.out_cap = out_cap;
+    if (out && out_cap) out[0] = 0;
+
+    HWND h = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST | WS_EX_CONTROLPARENT,
+                             L"ScarletNativeTextInput", wtitle,
+                             WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                             x, y, ww, wh, find.hwnd, NULL, GetModuleHandleW(NULL), &d);
+    if (!h) return 0;
+
+    HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HWND label = CreateWindowExW(0, L"STATIC", body, WS_CHILD | WS_VISIBLE,
+                                 22, 18, 520, 58, h, NULL, GetModuleHandleW(NULL), NULL);
+    d.edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", winitial,
+                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                             22, 83, 520, 32, h, (HMENU)(INT_PTR)TEXTDLG_EDIT, GetModuleHandleW(NULL), NULL);
+    HWND ok = CreateWindowExW(0, L"BUTTON", L"OK",
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                              330, 145, 100, 34, h, (HMENU)(INT_PTR)TEXTDLG_OK, GetModuleHandleW(NULL), NULL);
+    HWND cancel = CreateWindowExW(0, L"BUTTON", L"Cancelar",
+                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                  442, 145, 100, 34, h, (HMENU)(INT_PTR)TEXTDLG_CANCEL, GetModuleHandleW(NULL), NULL);
+    SendMessageW(label, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(d.edit, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(ok, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(cancel, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(d.edit, EM_SETLIMITTEXT, (WPARAM)(max_chars > 0 ? max_chars : 500), 0);
+
+    if (find.hwnd) EnableWindow(find.hwnd, FALSE);
+    ShowWindow(h, SW_SHOW);
+    UpdateWindow(h);
+    SetForegroundWindow(h);
+    SetFocus(d.edit);
+    SendMessageW(d.edit, EM_SETSEL, 0, -1);
+
+    MSG msg;
+    while (!d.done && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (msg.message == WM_KEYDOWN && msg.hwnd == d.edit) {
+            if (msg.wParam == VK_RETURN) { SendMessageW(h, WM_COMMAND, TEXTDLG_OK, 0); continue; }
+            if (msg.wParam == VK_ESCAPE) { SendMessageW(h, WM_COMMAND, TEXTDLG_CANCEL, 0); continue; }
+        }
+        if (!IsDialogMessageW(h, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    if (find.hwnd) {
+        EnableWindow(find.hwnd, TRUE);
+        SetForegroundWindow(find.hwnd);
+    }
+    return d.ok;
+}
+
 // ---- process
 // Release builds are GUI-subsystem executables (no console window): stdout / stderr go to lasrecomp.log next to the
 // exe, and a fatal error shows a message box (plat_fatal_notice) instead of vanishing. Processes started by this one
