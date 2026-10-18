@@ -19,7 +19,7 @@ from unicorn import arm64_const as A
 
 from analyze import eh_frame_functions
 from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx, sext
-from nso import Nso, R_AARCH64_RELATIVE
+from nso import Nso, R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE
 
 SCRATCH_MEM = 0x7300000000
 
@@ -73,13 +73,33 @@ class Module:
         starts = set()
         for a in eh_frame_functions(n):
             starts.add(b + a)
+
+        # Dynamic symbols are useful function boundaries, but newer Nintendo
+        # SDKs also publish code addresses as STT_NOTYPE/data-like symbols.
+        # If a defined symbol value itself lands in .text, treat it as a valid
+        # callable entry regardless of ELF symbol type.
         for name, info, shndx, value, size in n.syms:
-            if shndx and (info & 0xF) == 2:
+            if shndx and self.in_text(b + value):
                 starts.add(b + value)
-        for off, typ, sym, add in n.relocs:
+
+        # Function pointers, callbacks and vtables are frequently materialized
+        # by relocations rather than direct BL/ADR references. RELATIVE gives
+        # B+A; ABS64/GLOB_DAT/JUMP_SLOT give S+A. Discover every relocation
+        # whose resolved value is inside this module's .text so indirect BLR/BR
+        # can dispatch to it after relocation.
+        for off, typ, symidx, add in n.relocs:
+            target = None
             if typ == R_AARCH64_RELATIVE:
-                starts.add(b + add)
-        starts = sorted(a for a in starts if self.in_text(a))
+                target = b + add
+            elif typ in (R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT):
+                if 0 <= symidx < len(n.syms):
+                    name, info, shndx, value, size = n.syms[symidx]
+                    if shndx:
+                        target = b + value + add
+            if target is not None and self.in_text(target):
+                starts.add(target)
+
+        starts = sorted(starts)
         return starts
 
     # ------------------------------------------------------------ jump tables
