@@ -121,7 +121,22 @@ NVN(nvnQueueResetMemoryUsageCounts) { (void)c; }
 NVN(nvnQueueSubmitCommands) {
     int n = (int)A(1);
     const uint64_t *handles = AP(2);
-    for (int i = 0; i < n; i++) backend_execute(handles[i]);
+    if (n <= 0 || !handles) return;
+
+    // Pin the complete submit batch before executing the first list. Scarlet
+    // records command buffers on worker threads; another worker may hand the
+    // same guest command-memory range back to NVN while this submit is still
+    // walking later handles. On real NVN the submit consumes a stable command
+    // stream. Keep our expanded host records equally stable for the whole batch.
+    uint64_t stack_resolved[256];
+    uint64_t *resolved = n <= 256 ? stack_resolved : malloc((size_t)n * sizeof *resolved);
+    if (!resolved) FATAL("nvn: failed to pin %d submitted command lists\n", n);
+
+    for (int i = 0; i < n; i++) resolved[i] = nvn_cmdstream_pin(handles[i]);
+    for (int i = 0; i < n; i++) backend_execute(resolved[i]);
+    for (int i = n - 1; i >= 0; i--) nvn_cmdstream_unpin(handles[i]);
+
+    if (resolved != stack_resolved) free(resolved);
 }
 NVN(nvnQueueFlush) { (void)c; }
 NVN(nvnQueueFinish) { (void)c; renderer_sync(); }
