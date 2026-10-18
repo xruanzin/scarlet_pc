@@ -1903,9 +1903,18 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->fail) { free(body.buf); free(c->body.buf); free(c); return info; }
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};
-    sp(&s, "%s", glsl_prelude);
-    if (info->uses_surface_write || info->uses_surface_atomic)
-        sp(&s, "#extension GL_EXT_nonuniform_qualifier : require\n");
+    if (info->uses_surface_write || info->uses_surface_atomic) {
+        const char *rest = strchr(glsl_prelude, '\n');
+        if (rest) {
+            size_t first = (size_t)(rest - glsl_prelude + 1);
+            sp(&s, "%.*s#extension GL_EXT_nonuniform_qualifier : require\n%s",
+               (int)first, glsl_prelude, rest + 1);
+        } else {
+            sp(&s, "%s\n#extension GL_EXT_nonuniform_qualifier : require\n", glsl_prelude);
+        }
+    } else {
+        sp(&s, "%s", glsl_prelude);
+    }
     for (int i = 0; i < 18; i++) {
         if (!(info->cbuf_mask & (1u << i))) continue;
         uint32_t n = info->cbuf_size[i] / 16;
