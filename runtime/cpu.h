@@ -13,18 +13,19 @@ typedef struct __attribute__((aligned(16))) Cpu {
     uint64_t tpidrro;        // 288
     uint64_t excl_addr;      // 296
     uint64_t excl_val;       // 304
-    void *thread;            // 312: runtime thread object
-    uint64_t fpcr;           // 320: guest FPCR/FPSR (portable FP/SIMD lowering only; the asm path uses the host's)
-    uint64_t fpsr;           // 328
-    uint8_t _pad[512 - 336];
+    uint64_t excl_val2;      // 312: second lane for LDXP/STXP
+    void *thread;            // 320: runtime thread object
+    uint64_t fpcr;           // 328: guest FPCR/FPSR (portable FP/SIMD lowering only; the asm path uses the host's)
+    uint64_t fpsr;           // 336
+    uint8_t _pad[512 - 344];
     __uint128_t v[32];       // 512
 } Cpu;
 
 _Static_assert(offsetof(Cpu, sp) == 256, "sp");
 _Static_assert(offsetof(Cpu, pc) == 264, "pc");
 _Static_assert(offsetof(Cpu, nzcv) == 272, "nzcv");
-_Static_assert(offsetof(Cpu, fpcr) == 320, "fpcr");
-_Static_assert(offsetof(Cpu, fpsr) == 328, "fpsr");
+_Static_assert(offsetof(Cpu, fpcr) == 328, "fpcr");
+_Static_assert(offsetof(Cpu, fpsr) == 336, "fpsr");
 _Static_assert(offsetof(Cpu, v) == 512, "v");
 
 typedef void (*GuestFn)(Cpu *);
@@ -117,6 +118,76 @@ EXCL(8, uint8_t)
 EXCL(16, uint16_t)
 EXCL(32, uint32_t)
 EXCL(64, uint64_t)
+
+// ---- exclusive pairs and LSE compare-and-swap
+//
+// These helpers intentionally use stronger host memory ordering (SEQ_CST) than
+// some A64 variants require. That is conservative for correctness and keeps the
+// generated code independent of the host architecture's weaker ordering.
+//
+// Pair-exclusive accesses are naturally aligned by valid A64 code. x86-64-v3
+// (the generated-code target on Windows) includes CMPXCHG16B, so Clang can
+// lower the 128-bit compare/exchange used by the X-register pair directly.
+static inline uint64_t ldxp_pair32(Cpu *c, uint64_t a) {
+    uint64_t v = __atomic_load_n((uint64_t *)(uintptr_t)a, __ATOMIC_ACQUIRE);
+    c->excl_addr = a;
+    c->excl_val = (uint32_t)v;
+    c->excl_val2 = (uint32_t)(v >> 32);
+    return v;
+}
+static inline uint32_t stxp_pair32(Cpu *c, uint64_t a, uint64_t lo, uint64_t hi) {
+    if (c->excl_addr != a) return 1;
+    c->excl_addr = ~0ull;
+    uint64_t expected = (uint32_t)c->excl_val | ((uint64_t)(uint32_t)c->excl_val2 << 32);
+    uint64_t desired = (uint32_t)lo | ((uint64_t)(uint32_t)hi << 32);
+    return !__atomic_compare_exchange_n((uint64_t *)(uintptr_t)a, &expected, desired, 0,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+static inline __uint128_t ldxp_pair64(Cpu *c, uint64_t a) {
+    __uint128_t v = __atomic_load_n((__uint128_t *)(uintptr_t)a, __ATOMIC_ACQUIRE);
+    c->excl_addr = a;
+    c->excl_val = (uint64_t)v;
+    c->excl_val2 = (uint64_t)(v >> 64);
+    return v;
+}
+static inline uint32_t stxp_pair64(Cpu *c, uint64_t a, uint64_t lo, uint64_t hi) {
+    if (c->excl_addr != a) return 1;
+    c->excl_addr = ~0ull;
+    __uint128_t expected = (__uint128_t)c->excl_val | ((__uint128_t)c->excl_val2 << 64);
+    __uint128_t desired = (__uint128_t)lo | ((__uint128_t)hi << 64);
+    return !__atomic_compare_exchange_n((__uint128_t *)(uintptr_t)a, &expected, desired, 0,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+#define CAS_SINGLE(N, T)                                                                    \
+    static inline uint64_t cas##N(uint64_t a, uint64_t expected, uint64_t desired) {         \
+        T e = (T)expected;                                                                   \
+        __atomic_compare_exchange_n((T *)(uintptr_t)a, &e, (T)desired, 0,                   \
+                                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);                     \
+        return e;                                                                            \
+    }
+CAS_SINGLE(8, uint8_t)
+CAS_SINGLE(16, uint16_t)
+CAS_SINGLE(32, uint32_t)
+CAS_SINGLE(64, uint64_t)
+
+static inline uint64_t casp_pair32(uint64_t a, uint64_t exp0, uint64_t exp1,
+                                   uint64_t new0, uint64_t new1) {
+    uint64_t expected = (uint32_t)exp0 | ((uint64_t)(uint32_t)exp1 << 32);
+    uint64_t desired = (uint32_t)new0 | ((uint64_t)(uint32_t)new1 << 32);
+    __atomic_compare_exchange_n((uint64_t *)(uintptr_t)a, &expected, desired, 0,
+                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return expected;
+}
+static inline __uint128_t casp_pair64(uint64_t a, uint64_t exp0, uint64_t exp1,
+                                     uint64_t new0, uint64_t new1) {
+    __uint128_t expected = (__uint128_t)exp0 | ((__uint128_t)exp1 << 64);
+    __uint128_t desired = (__uint128_t)new0 | ((__uint128_t)new1 << 64);
+    __atomic_compare_exchange_n((__uint128_t *)(uintptr_t)a, &expected, desired, 0,
+                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return expected;
+}
 
 // ---- flags (packed NZCV in bits 31..28)
 #define FLAG_N(c) (((c)->nzcv >> 31) & 1)

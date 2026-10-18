@@ -12,6 +12,7 @@
 #include "kernel.h"
 
 const char *g_romfs_dir;
+uint64_t g_boot_started_ns;
 
 // rtld normally passes these to nn::init::Start: run every module's init/fini arrays.
 static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
@@ -21,20 +22,73 @@ static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
     }
 }
 
-// nn::init::Start calls x2 right after nnosInitialize and x3 after nninitStartup, just before
-// nnMain: SDK constructors run early, the game's run once nninitStartup has set up its heap.
-// rtld runs a module's DT_INIT, which registers it (and its TLS template) with musl via
-// __nnmusl_init_dso and then runs its init_array; fall back to the array if there is no DT_INIT.
-static void module_init(Cpu *c, Module *m) {
-    LOG("init %s (DT_INIT %llx, %llu init_array entries)\n", m->name, m->init, m->init_array_sz / 8);
-    if (m->init) guest_call(c, m->init);
-    else run_array(c, m->init_array, m->init_array_sz);
+// Nintendo's module DT_INIT calls __nnmusl_init_dso and stores its status in a
+// module-local word. If that status is 1, constructors were deliberately left
+// for rtld/the loader instead of being run by DT_INIT. Locate that word from
+// DT_INIT's initial ADRP ... LDR W8 sequence (SDK 16 uses this same pattern).
+static uint64_t module_init_status_addr(Module *m) {
+    if (!m->init) return 0;
+    uint64_t page[32] = {0};
+    for (uint64_t pc = m->init; pc < m->init + 0x40; pc += 4) {
+        uint32_t w = *(uint32_t *)(uintptr_t)pc;
+        if ((w & 0x9F000000u) == 0x90000000u) {  // ADRP
+            uint32_t rd = w & 31u;
+            uint64_t immlo = (w >> 29) & 3u;
+            uint64_t immhi = (w >> 5) & 0x7FFFFu;
+            int64_t imm = (int64_t)((immhi << 2) | immlo);
+            if (imm & (1ll << 20)) imm -= 1ll << 21;
+            page[rd] = (pc & ~0xFFFull) + (uint64_t)(imm * 0x1000ll);
+        } else if ((w & 0xFFC0001Fu) == 0xB9400008u) {  // LDR W8,[Xn,#imm]
+            uint32_t rn = (w >> 5) & 31u;
+            if (page[rn])
+                return page[rn] + (uint64_t)((w >> 10) & 0xFFFu) * 4u;
+        }
+    }
+    return 0;
 }
 
-static void rtld_init_sdk(Cpu *c) {  // the SDK, then the subsdk modules that link against it
-    for (int i = 1; i < g_nmodules; i++) module_init(c, &g_modules[i]);
+// nn::init::Start invokes the loader init callback after nninitStartup, just
+// before nnMain. At that point the game's allocator exists, so initialize every
+// module in dependency order: SDK, subsdk(s), then main.
+static void module_init(Cpu *c, Module *m) {
+    LOG("init %s (DT_INIT %llx, %llu init_array entries)\n",
+        m->name, (unsigned long long)m->init,
+        (unsigned long long)(m->init_array_sz / 8));
+
+    if (!m->init) {
+        run_array(c, m->init_array, m->init_array_sz);
+        LOG("[boot] %s constructors: %llu (no DT_INIT)\n",
+            m->name, (unsigned long long)(m->init_array_sz / 8));
+        return;
+    }
+
+    guest_call(c, m->init);
+
+    uint64_t status_addr = module_init_status_addr(m);
+    if (!status_addr) {
+        FATAL("%s: could not locate DT_INIT status word\n", m->name);
+    }
+
+    uint32_t status = *(uint32_t *)(uintptr_t)status_addr;
+    LOG("[boot] %s DT_INIT status=%u @ %llx\n",
+        m->name, status, (unsigned long long)status_addr);
+
+    if (status == 1) {
+        run_array(c, m->init_array, m->init_array_sz);
+        LOG("[boot] %s constructors run by loader: %llu\n",
+            m->name, (unsigned long long)(m->init_array_sz / 8));
+    }
 }
-static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
+
+static void rtld_init_sdk(Cpu *c) {
+    for (int i = 1; i < g_nmodules; i++) module_init(c, &g_modules[i]);
+    if (g_nmodules > 0) module_init(c, &g_modules[0]);
+}
+
+// The second callback is rtld's companion/fini hook, not a second constructor
+// phase. Running main constructors here is too late (nnMain is already active).
+static void rtld_init_main(Cpu *c) { (void)c; }
+static void rtld_mark(Cpu *c) { (void)c; }  // extra callback used by newer nn::init::Start ABIs
 
 // Claim the guest address range before anything else can map there. The host allocator places
 // regions at random addresses in the same window; on a collision, re-exec for a fresh layout.
@@ -123,6 +177,8 @@ static void teardown(void) {
 }
 
 static void boot(const char *root) {
+    g_boot_started_ns = plat_now_ns();
+    LOG("[boot-time] boot start\n");
     char exefs[1024], romfs[1024], npdm_path[1024];
     snprintf(exefs, sizeof exefs, "%s/exefs", root);
     snprintf(romfs, sizeof romfs, "%s/romfs", root);
@@ -153,12 +209,34 @@ static void boot(const char *root) {
     }
     LOG("main thread: prio %d, stack 0x%x, program id %016llx\n", prio, stack_size, (unsigned long long)g_program_id);
 
-    uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_");
-    if (!start) FATAL("nn::init::Start not found\n");
+    // Nintendo SDKs use two known nn::init::Start ABIs. Older SDKs take
+    // (thread, args, init, fini); newer ones add an rtld "mark" callback:
+    // (thread, args, mark, init, fini). Scarlet's SDK is newer than the
+    // Let's Go baseline, so accept both instead of hardcoding the old ABI.
+    const char *start_old = "_ZN2nn4init5StartEmmPFvvES2_";
+    const char *start_new = "_ZN2nn4init5StartEmmPFvvES2_S2_";
+    uint64_t start = loader_find_symbol(start_old);
+    bool modern_start = false;
+    if (!start) {
+        start = loader_find_symbol(start_new);
+        modern_start = start != 0;
+    }
+    if (!start) {
+        loader_log_symbols_prefix("_ZN2nn4init5Start");
+        FATAL("nn::init::Start not found (old/new ABI)\n");
+    }
+
     uint64_t init_fn = hle_register("<rtld_init_sdk>", rtld_init_sdk);
     uint64_t fini_fn = hle_register("<rtld_init_main>", rtld_init_main);
+    uint64_t mark_fn = hle_register("<rtld_mark>", rtld_mark);
+    LOG("[boot] nn::init::Start %s ABI at %llx\n",
+        modern_start ? "5-arg" : "4-arg", (unsigned long long)start);
+
     KThread *t = kernel_create_main_thread(start, stack_size, prio);
-    kernel_run_main(t, t->handle, 0, init_fn, fini_fn);  // nn::init::Start(thread_handle, args_region, init, fini)
+    if (modern_start)
+        kernel_run_main(t, t->handle, 0, mark_fn, init_fn, fini_fn);
+    else
+        kernel_run_main(t, t->handle, 0, init_fn, fini_fn, 0);
 }
 
 int main(int argc, char **argv) {

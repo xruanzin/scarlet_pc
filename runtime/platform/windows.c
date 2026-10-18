@@ -1,5 +1,9 @@
 // Windows host layer (runtime/platform.h).
 #include <windows.h>
+#include <wct.h>
+#ifndef WCT_MAX_NODE_COUNT  // some MinGW SDK versions omit this documented limit
+#define WCT_MAX_NODE_COUNT 16
+#endif
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +11,7 @@
 #include <shellapi.h>
 #include <timeapi.h>
 #include <io.h>
+#include <wchar.h>
 
 #include "../platform.h"
 #include "../paths.h"
@@ -18,6 +23,11 @@
 // does not fault: such buffers must be inside committed regions.
 static uint64_t g_lo, g_hi;
 #define COMMIT_CHUNK 0x10000ull
+
+// Windows can track which guest pages the CPU has written. The Vulkan texture
+// cache uses this to avoid hashing multi-megabyte dynamic/linear textures every
+// frame when their backing memory has not changed.
+static bool g_write_watch;
 
 static bool lazy_commit(uint64_t a) {
     if (a < g_lo || a >= g_hi) return false;
@@ -39,12 +49,38 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
 }
 
 bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
-    void *p = VirtualAlloc((void *)(uintptr_t)lo, hi - lo, MEM_RESERVE, PAGE_READWRITE);
+    void *p = VirtualAlloc((void *)(uintptr_t)lo, hi - lo, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE);
+    if (p == (void *)(uintptr_t)lo) {
+        g_write_watch = true;
+    } else {
+        if (p) VirtualFree(p, 0, MEM_RELEASE);
+        p = VirtualAlloc((void *)(uintptr_t)lo, hi - lo, MEM_RESERVE, PAGE_READWRITE);
+    }
     if (p != (void *)(uintptr_t)lo) return false;
     g_lo = lo;
     g_hi = hi;
     AddVectoredExceptionHandler(1, vectored_handler);
+    fprintf(stderr, "[plat] guest write-watch %s\n", g_write_watch ? "enabled" : "unavailable");
     return true;
+}
+
+int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page_size) {
+    if (!g_write_watch || !size || addr < g_lo || addr - g_lo > g_hi - g_lo ||
+        size > g_hi - addr || !pages || max <= 0 || !page_size)
+        return -1;
+
+    ULONG_PTR n = (ULONG_PTR)max;
+    DWORD granularity = 4096;
+    if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (void *)(uintptr_t)addr, (SIZE_T)size,
+                      (PVOID *)pages, &n, &granularity) != 0)
+        return -1;
+
+    *page_size = granularity;
+    // When the caller's array filled, conservatively treat the whole queried
+    // range as dirty. ResetWriteWatch makes sure a later query starts clean.
+    if (n >= (ULONG_PTR)max)
+        ResetWriteWatch((void *)(uintptr_t)addr, (SIZE_T)size);
+    return (int)n;
 }
 
 // Decommit everything: the range stays reserved, and pages come back zeroed when committed again (lazily).
@@ -99,7 +135,233 @@ void plat_sleep_until_ns(uint64_t t) {
 
 void plat_thread_realtime(uint64_t period_ns) {
     (void)period_ns;
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+}
+
+const void *plat_map_file_ro(int fd, uint64_t *size) {
+    if (size) *size = 0;
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    LARGE_INTEGER n;
+    if (!GetFileSizeEx(h, &n) || n.QuadPart <= 0) return NULL;
+    HANDLE mapping = CreateFileMappingW(h, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!mapping) return NULL;
+    void *p = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    CloseHandle(mapping);  // the mapped view keeps the section alive
+    if (!p) return NULL;
+    if (size) *size = (uint64_t)n.QuadPart;
+    return p;
+}
+
+void plat_unmap_file(const void *ptr) {
+    if (ptr) UnmapViewOfFile(ptr);
+}
+
+void plat_set_cpu_boost(bool enabled) {
+    static int last = -1;
+    // Horizon's FastLoad request must not put the whole recompiled process above the Windows desktop.
+    SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
+    if (last != (int)enabled) {
+        fprintf(stderr, "[plat] CPU fast-load request %s (normal Windows process priority)\n", enabled ? "on" : "off");
+        last = enabled;
+    }
+}
+
+void plat_guest_thread_config(int priority, int core) {
+    // Horizon uses smaller numbers for higher priority. Scarlet's latency-sensitive
+    // renderer/audio threads sit around 42-43, main/jobs around 44-45.
+    int winprio = priority <= 43 ? THREAD_PRIORITY_ABOVE_NORMAL :
+                  priority >= 50 ? THREAD_PRIORITY_BELOW_NORMAL :
+                                   THREAD_PRIORITY_NORMAL;
+    SetThreadPriority(GetCurrentThread(), winprio);
+
+    DWORD cpus = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    if (cpus && core >= 0) {
+        // Spread virtual Switch cores over the host's logical CPUs without
+        // hard affinity: 0,3,6,9 on a 12-thread Ryzen, while Windows may still migrate.
+        DWORD ideal = ((DWORD)(core & 3) * cpus) / 4;
+        if (ideal >= cpus) ideal = cpus - 1;
+        SetThreadIdealProcessor(GetCurrentThread(), ideal);
+    }
+}
+
+// ---- native text input (nn::swkbd replacement)
+enum { TEXTDLG_EDIT = 4101, TEXTDLG_OK = 4102, TEXTDLG_CANCEL = 4103 };
+
+typedef struct {
+    HWND hwnd, edit, owner;
+    int done, ok, min_chars;
+    char *out;
+    size_t out_cap;
+} TextInputDialog;
+
+typedef struct { HWND hwnd; LONG64 area; } TextOwnerFind;
+
+static BOOL CALLBACK text_owner_enum(HWND w, LPARAM lp) {
+    if (!IsWindowVisible(w) || GetWindow(w, GW_OWNER)) return TRUE;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(w, &pid);
+    if (pid != GetCurrentProcessId()) return TRUE;
+    wchar_t cls[64] = L"";
+    GetClassNameW(w, cls, 64);
+    if (!wcscmp(cls, L"ConsoleWindowClass")) return TRUE;
+    RECT r;
+    if (!GetWindowRect(w, &r)) return TRUE;
+    LONG64 area = (LONG64)(r.right - r.left) * (r.bottom - r.top);
+    TextOwnerFind *f = (TextOwnerFind *)lp;
+    if (area > f->area) { f->area = area; f->hwnd = w; }
+    return TRUE;
+}
+
+static int utf8_wide(const char *src, wchar_t *dst, int cap) {
+    if (!src) src = "";
+    int n = MultiByteToWideChar(CP_UTF8, 0, src, -1, dst, cap);
+    if (!n && cap) dst[0] = 0;
+    return n;
+}
+
+static LRESULT CALLBACK textdlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    TextInputDialog *d = (TextInputDialog *)(uintptr_t)GetWindowLongPtrW(h, GWLP_USERDATA);
+    if (msg == WM_NCCREATE) {
+        CREATESTRUCTW *cs = (CREATESTRUCTW *)lp;
+        d = (TextInputDialog *)cs->lpCreateParams;
+        SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)d);
+        d->hwnd = h;
+    }
+    if (!d) return DefWindowProcW(h, msg, wp, lp);
+
+    switch (msg) {
+    case WM_COMMAND:
+        if (LOWORD(wp) == TEXTDLG_OK) {
+            int n = GetWindowTextLengthW(d->edit);
+            if (n < d->min_chars) {
+                MessageBeep(MB_ICONWARNING);
+                SetFocus(d->edit);
+                return 0;
+            }
+            wchar_t *w = calloc((size_t)n + 1, sizeof *w);
+            if (!w) return 0;
+            GetWindowTextW(d->edit, w, n + 1);
+            if (d->out && d->out_cap) {
+                int got = WideCharToMultiByte(CP_UTF8, 0, w, -1, d->out, (int)d->out_cap, NULL, NULL);
+                if (!got) d->out[0] = 0;
+                d->out[d->out_cap - 1] = 0;
+            }
+            free(w);
+            d->ok = 1;
+            d->done = 1;
+            DestroyWindow(h);
+            return 0;
+        }
+        if (LOWORD(wp) == TEXTDLG_CANCEL) {
+            d->ok = 0;
+            d->done = 1;
+            DestroyWindow(h);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        d->ok = 0;
+        d->done = 1;
+        DestroyWindow(h);
+        return 0;
+    case WM_DESTROY:
+        d->done = 1;
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+int plat_text_input_dialog(const char *title, const char *subtitle, const char *guide,
+                           const char *initial, int min_chars, int max_chars,
+                           char *out, size_t out_cap) {
+    static ATOM atom;
+    if (!atom) {
+        WNDCLASSEXW wc = {0};
+        wc.cbSize = sizeof wc;
+        wc.lpfnWndProc = textdlg_proc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32513));
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = L"ScarletNativeTextInput";
+        atom = RegisterClassExW(&wc);
+        if (!atom && GetLastError() == ERROR_CLASS_ALREADY_EXISTS) atom = 1;
+    }
+    if (!atom) return 0;
+
+    TextOwnerFind find = {0};
+    EnumWindows(text_owner_enum, (LPARAM)&find);
+
+    wchar_t wtitle[256], wsub[512], wguide[768], winitial[1024], body[1280];
+    utf8_wide(title && *title ? title : "Inserir texto", wtitle, 256);
+    utf8_wide(subtitle, wsub, 512);
+    utf8_wide(guide, wguide, 768);
+    utf8_wide(initial, winitial, 1024);
+    if (wsub[0] && wguide[0]) _snwprintf(body, 1280, L"%ls\n%ls", wsub, wguide);
+    else _snwprintf(body, 1280, L"%ls", wsub[0] ? wsub : wguide);
+    body[1279] = 0;
+
+    const int ww = 580, wh = 245;
+    RECT base = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+    if (find.hwnd) GetWindowRect(find.hwnd, &base);
+    int x = base.left + ((base.right - base.left) - ww) / 2;
+    int y = base.top + ((base.bottom - base.top) - wh) / 2;
+
+    TextInputDialog d = {0};
+    d.owner = find.hwnd;
+    d.min_chars = min_chars > 0 ? min_chars : 0;
+    d.out = out;
+    d.out_cap = out_cap;
+    if (out && out_cap) out[0] = 0;
+
+    HWND h = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST | WS_EX_CONTROLPARENT,
+                             L"ScarletNativeTextInput", wtitle,
+                             WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                             x, y, ww, wh, find.hwnd, NULL, GetModuleHandleW(NULL), &d);
+    if (!h) return 0;
+
+    HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HWND label = CreateWindowExW(0, L"STATIC", body, WS_CHILD | WS_VISIBLE,
+                                 22, 18, 520, 58, h, NULL, GetModuleHandleW(NULL), NULL);
+    d.edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", winitial,
+                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                             22, 83, 520, 32, h, (HMENU)(INT_PTR)TEXTDLG_EDIT, GetModuleHandleW(NULL), NULL);
+    HWND ok = CreateWindowExW(0, L"BUTTON", L"OK",
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                              330, 145, 100, 34, h, (HMENU)(INT_PTR)TEXTDLG_OK, GetModuleHandleW(NULL), NULL);
+    HWND cancel = CreateWindowExW(0, L"BUTTON", L"Cancelar",
+                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                  442, 145, 100, 34, h, (HMENU)(INT_PTR)TEXTDLG_CANCEL, GetModuleHandleW(NULL), NULL);
+    SendMessageW(label, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(d.edit, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(ok, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(cancel, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(d.edit, EM_SETLIMITTEXT, (WPARAM)(max_chars > 0 ? max_chars : 500), 0);
+
+    if (find.hwnd) EnableWindow(find.hwnd, FALSE);
+    ShowWindow(h, SW_SHOW);
+    UpdateWindow(h);
+    SetForegroundWindow(h);
+    SetFocus(d.edit);
+    SendMessageW(d.edit, EM_SETSEL, 0, -1);
+
+    MSG msg;
+    while (!d.done && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (msg.message == WM_KEYDOWN && msg.hwnd == d.edit) {
+            if (msg.wParam == VK_RETURN) { SendMessageW(h, WM_COMMAND, TEXTDLG_OK, 0); continue; }
+            if (msg.wParam == VK_ESCAPE) { SendMessageW(h, WM_COMMAND, TEXTDLG_CANCEL, 0); continue; }
+        }
+        if (!IsDialogMessageW(h, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    if (find.hwnd) {
+        EnableWindow(find.hwnd, TRUE);
+        SetForegroundWindow(find.hwnd);
+    }
+    return d.ok;
 }
 
 // ---- process
@@ -174,6 +436,33 @@ void plat_fatal_notice(void) {
     MessageBoxA(NULL, text, RT_APP_NAME, MB_ICONERROR | MB_OK);
 }
 
+static uint64_t process_commit_limit(uint64_t physical, uint64_t available) {
+    uint64_t limit = physical / 5 * 3, spare = available / 4 * 3, cap = 8ull << 30;
+    if (limit > spare) limit = spare;
+    return limit < cap ? limit : cap;
+}
+
+static void limit_process_memory(void) {
+    static HANDLE job;
+    if (job) return;
+    MEMORYSTATUSEX status = {.dwLength = sizeof status};
+    if (!GlobalMemoryStatusEx(&status)) return;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+    limits.ProcessMemoryLimit = (SIZE_T)process_commit_limit(status.ullTotalPhys, status.ullAvailPhys);
+    job = CreateJobObjectW(NULL, NULL);
+    if (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits) ||
+        !AssignProcessToJobObject(job, GetCurrentProcess())) {
+        fprintf(stderr, "[host] process commit limit unavailable (%lu)\n", GetLastError());
+        if (job) CloseHandle(job);
+        job = NULL;
+        return;
+    }
+    // Keep the handle for this process's lifetime. This caps private commit, not address-space reservations,
+    // file-backed RomFS mappings or all GPU/system allocations. Do not impose a working-set/page-thrashing cap.
+    fprintf(stderr, "[host] private commit limit: %llu MiB\n", (unsigned long long)(limits.ProcessMemoryLimit >> 20));
+}
+
 void plat_init(void) {
     log_to_file_without_console();
     require_cpu();
@@ -189,6 +478,8 @@ void plat_init(void) {
         .StateMask = 0,
     };
     SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof pt);
+    SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
+    limit_process_memory();
 }
 
 bool plat_exe_path(char *buf, size_t size) {
@@ -269,6 +560,86 @@ void plat_print_backtrace(void) {
         else fprintf(stderr, "  #%-2d %016llx lasrecomp+%llx\n", i, (unsigned long long)pc,
                      (unsigned long long)(pc - exe));
     }
+}
+
+
+// ---- hang report: passive OS wait chains. Do not SuspendThread in this process:
+// a target can own stdio, loader or memory-manager locks needed by the reporter.
+#define MAX_REG_THREADS 128
+static HANDLE g_reg_threads[MAX_REG_THREADS];
+static DWORD g_reg_tids[MAX_REG_THREADS];
+static volatile LONG g_nreg_threads;
+static __thread bool g_thread_registered;
+
+uint64_t plat_register_thread(void) {
+    DWORD tid = GetCurrentThreadId();
+    if (g_thread_registered) return tid;
+    g_thread_registered = true;
+    LONG k = InterlockedIncrement(&g_nreg_threads) - 1;
+    if (k >= MAX_REG_THREADS) return tid;
+    HANDLE h = NULL;
+    if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,
+                        THREAD_QUERY_INFORMATION, FALSE, 0)) {
+        g_reg_tids[k] = tid;
+        // Publish the handle only once the associated tid is ready. Keep it alive
+        // for exit-status checks, rather than blindly querying a potentially recycled tid.
+        InterlockedExchangePointer((PVOID volatile *)&g_reg_threads[k], h);
+    }
+    return tid;
+}
+
+typedef HWCT (WINAPI *OpenWctFn)(DWORD, PWAITCHAINCALLBACK);
+typedef BOOL (WINAPI *GetWctFn)(HWCT, DWORD_PTR, DWORD, DWORD, LPDWORD, PWAITCHAIN_NODE_INFO, LPBOOL);
+typedef VOID (WINAPI *CloseWctFn)(HWCT);
+static uint64_t filetime_ticks(FILETIME t) { return ((uint64_t)t.dwHighDateTime << 32) | t.dwLowDateTime; }
+
+void plat_dump_other_threads(void) {
+    // Resolve optional diagnostics dynamically: no new linker or privilege requirement for launching the game.
+    HMODULE dll = LoadLibraryW(L"advapi32.dll");
+    OpenWctFn open = dll ? (OpenWctFn)GetProcAddress(dll, "OpenThreadWaitChainSession") : NULL;
+    GetWctFn get = dll ? (GetWctFn)GetProcAddress(dll, "GetThreadWaitChain") : NULL;
+    CloseWctFn close = dll ? (CloseWctFn)GetProcAddress(dll, "CloseThreadWaitChainSession") : NULL;
+    HWCT session = open && get && close ? open(0, NULL) : NULL;
+    fprintf(stderr, "[hang] passive Windows thread state (CPU times cumulative; no thread suspension):\n");
+    if (!session) fprintf(stderr, "[hang] wait-chain service unavailable (%lu); CPU times only\n", GetLastError());
+    DWORD self = GetCurrentThreadId();
+    LONG count = InterlockedCompareExchange(&g_nreg_threads, 0, 0);
+    LONG n = count < MAX_REG_THREADS ? count : MAX_REG_THREADS;
+    for (LONG k = 0; k < n; k++) {
+        HANDLE h = InterlockedCompareExchangePointer((PVOID volatile *)&g_reg_threads[k], NULL, NULL);
+        if (!h || g_reg_tids[k] == self) continue;
+        DWORD code = 0;
+        if (!GetExitCodeThread(h, &code) || code != STILL_ACTIVE) continue;
+        fprintf(stderr, "  thread #%ld (os tid %lu):", (long)k, (unsigned long)g_reg_tids[k]);
+        FILETIME created, exited, kernel, user;
+        if (GetThreadTimes(h, &created, &exited, &kernel, &user))
+            fprintf(stderr, " CPU user=%llu ms kernel=%llu ms", (unsigned long long)(filetime_ticks(user) / 10000),
+                    (unsigned long long)(filetime_ticks(kernel) / 10000));
+        fputc('\n', stderr);
+        if (!session) continue;
+        WAITCHAIN_NODE_INFO nodes[WCT_MAX_NODE_COUNT] = {0};
+        DWORD nn = WCT_MAX_NODE_COUNT;
+        BOOL cycle = FALSE;
+        BOOL ok = get(session, 0, 0, g_reg_tids[k], &nn, nodes, &cycle);
+        DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+        if (!ok && error != ERROR_MORE_DATA && error != ERROR_TOO_MANY_THREADS) {
+            fprintf(stderr, "    wait chain unavailable (%lu)\n", (unsigned long)error);
+            continue;
+        }
+        if (nn > WCT_MAX_NODE_COUNT) nn = WCT_MAX_NODE_COUNT;
+        fprintf(stderr, "    wait chain nodes=%lu cycle=%s%s\n", (unsigned long)nn, cycle ? "YES" : "no", ok ? "" : " (truncated)");
+        for (DWORD i = 0; i < nn; i++) {
+            fprintf(stderr, "      node %lu type=%d status=%d", (unsigned long)i, (int)nodes[i].ObjectType, (int)nodes[i].ObjectStatus);
+            if (nodes[i].ObjectType == WctThreadType)
+                fprintf(stderr, " pid=%lu tid=%lu", (unsigned long)nodes[i].ThreadObject.ProcessId,
+                        (unsigned long)nodes[i].ThreadObject.ThreadId);
+            fputc('\n', stderr);
+        }
+        if (nn == 1) fprintf(stderr, "    (running or waiting on an unsupported object; this does not exclude a GPU wait)\n");
+    }
+    if (count > MAX_REG_THREADS) fprintf(stderr, "[hang] OS thread registry full; later threads omitted\n");
+    if (session) close(session);
+    if (dll) FreeLibrary(dll);
 }
 
 static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep) {
@@ -385,3 +756,7 @@ bool plat_remove_tree(const char *dir) {
 
 // End the process at once, skipping DLL teardown (from an atexit handler, after flushing). Exit status 0.
 void plat_terminate(void) { TerminateProcess(GetCurrentProcess(), 0); }
+void plat_emergency_exit(int code) {
+    TerminateProcess(GetCurrentProcess(), (UINT)code);
+    _exit(code);
+}

@@ -32,6 +32,8 @@ static _Atomic int32_t key_lx, key_ly, key_rx, key_ry, pad_lx, pad_ly, pad_rx, p
 static uint8_t keys_down[SDL_SCANCODE_COUNT];
 static SDL_Gamepad *pad;
 static _Atomic int64_t sampling;
+static _Atomic uint64_t npad_reads, npad_batch_reads;
+static void input_trace_frame(void);
 
 // Host keys / buttons held by a test script (LARECOMP_HOST_INPUT, input_frame): they go through the bindings
 static uint8_t test_keys[SDL_SCANCODE_COUNT];
@@ -245,7 +247,7 @@ void input_handle_event(const SDL_Event *e) {
         break;
     }
     case SDL_EVENT_WINDOW_FOCUS_LOST:
-        mouse_release();
+        input_reset();
         break;
     case SDL_EVENT_GAMEPAD_ADDED:
         if (!pad) { pad = SDL_OpenGamepad(e->gdevice.which); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
@@ -396,8 +398,12 @@ static void host_test_frame(uint64_t frame) {
 
 static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A / B skip the opening movie too)
-RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
+RT_ON_RESET(input_reboot_reset) {
+    g_pad_obj = 0; g_inject_plus = 0;
+    sampling = 0; npad_reads = npad_batch_reads = 0;
+}  // (reboot: the controller object was guest memory)
 void input_frame(uint64_t frame) {
+    input_trace_frame();
     if (g_pad_obj && getenv("LARECOMP_DUMP_PAD") && frame % 600 == 0) {
         const uint8_t *m = (const uint8_t *)(uintptr_t)(g_pad_obj - 0x98);
         LOG("[pad] mgr %llx 4e0=%u 4e4=%u 4e8=%u 548=%#x 54c..=%02x %02x %02x 56c=%02x\n", g_pad_obj - 0x98,
@@ -460,6 +466,7 @@ static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -
 static uint32_t npad_id_used(uint32_t *style);  // (below: which controller the player has)
 
 static void fill_state(Cpu *c) {
+    atomic_fetch_add(&npad_reads, 1);
     uint8_t *s = (uint8_t *)(uintptr_t)c->x[0];
     uint32_t id = *(uint32_t *)(uintptr_t)c->x[1];
     memset(s, 0, 0x28);
@@ -506,8 +513,10 @@ static void fill_state(Cpu *c) {
     if (rx > 16000) b |= 1ull << 22;
     if (ry < -16000) b |= 1ull << 23;
     *(uint64_t *)(s + 8) = b;
-    static uint64_t last_b;
-    if (b != last_b && getenv("LARECOMP_INPUT")) LOG("[input] id %#x buttons %#llx (sampling %lld, lr %llx)\n", id, (unsigned long long)b, (long long)sampling, c->x[30]);
+    static __thread uint64_t last_b;
+    if (b != last_b && (ENV("LARECOMP_INPUT") || ENV("LARECOMP_INPUT_TRACE") || ENV("LARECOMP_VK_PROF")))
+        LOG("[input] id %#x buttons %#llx (sampling %lld, lr %llx)\n", id,
+            (unsigned long long)b, (long long)sampling, (unsigned long long)c->x[30]);
     last_b = b;
     *(int32_t *)(s + 16) = lx;
     *(int32_t *)(s + 20) = ly;
@@ -521,6 +530,42 @@ HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", hid_state_dual)
 HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", hid_state_left) { fill_state(c); }
 HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", hid_state_handheld) { fill_state(c); }
 HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", hid_state_right) { fill_state(c); }
+
+// The batched SDK entry points use (states, capacity, id), unlike GetNpadState(states, id). The original
+// SDK implementation reads the HID shared-memory rings, which this host-input backend does not populate.
+// Return one real, newest sample (also for a disconnected id), exactly as our touch/six-axis batch adapters do.
+// A positive capacity never means that the caller must receive that many historical samples.
+static void fill_states(Cpu *c) {
+    atomic_fetch_add(&npad_batch_reads, 1);
+    if ((int32_t)c->x[1] <= 0) { c->x[0] = 0; return; }
+    uint64_t capacity = c->x[1];
+    c->x[1] = c->x[2];
+    static unsigned nlog;
+    if (nlog++ < 4)
+        LOG("[input] GetNpadStates id %#x capacity=%d lr=%llx (host sample)\n",
+            *(const uint32_t *)(uintptr_t)c->x[1], (int32_t)capacity, (unsigned long long)c->x[30]);
+    fill_state(c);
+    c->x[1] = capacity;
+    c->x[0] = 1;
+}
+
+HLE_FUNC("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadFullKeyStateEiRKj", hid_states_fullkey) { fill_states(c); }
+HLE_FUNC("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj", hid_states_handheld) { fill_states(c); }
+HLE_FUNC("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyDualStateEiRKj", hid_states_dual) { fill_states(c); }
+HLE_FUNC("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyLeftStateEiRKj", hid_states_left) { fill_states(c); }
+HLE_FUNC("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", hid_states_right) { fill_states(c); }
+
+static void input_trace_frame(void) {
+    if (!ENV("LARECOMP_INPUT_TRACE") && !ENV("LARECOMP_VK_PROF")) return;
+    static uint64_t next;
+    uint64_t now = SDL_GetTicksNS();
+    if (now < next) return;
+    next = now + 2000000000ull;
+    LOG("[input-state] raw=%#llx delivered=%#llx captured=%d reads=%llu batches=%llu\n",
+        (unsigned long long)(key_buttons | pad_buttons | mouse_buttons),
+        (unsigned long long)input_buttons_now(), menu_input_captured(),
+        (unsigned long long)atomic_load(&npad_reads), (unsigned long long)atomic_load(&npad_batch_reads));
+}
 
 // The one controller the PC gamepad / keyboard appears as. Let's Go accepts no Pro Controller (FullKey): only a
 // single Joy-Con, the Poke Ball Plus and the console in handheld mode - handheld maps every button and both sticks.

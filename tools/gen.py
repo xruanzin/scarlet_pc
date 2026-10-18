@@ -19,9 +19,14 @@ from unicorn import arm64_const as A
 
 from analyze import eh_frame_functions
 from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx, sext
-from nso import Nso, R_AARCH64_RELATIVE
+from nso import Nso, R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE
 
 SCRATCH_MEM = 0x7300000000
+# Verified by Scarlet's protected-call/longjmp boot trace. Addresses are NSO
+# relative and deliberately scoped to this exact main Build ID.
+SCARLET_SETJMP_THUNKS = {
+    'ca44e7dd62e61a2a4e8889b3319ae173375770fd': {0x3017B70},
+}
 
 
 def sext26(w):
@@ -50,6 +55,8 @@ class Module:
         self.cache = {}
         self.stats = Counter()
         self.mu = None
+        self.setjmp_targets = {base + a for a in SCARLET_SETJMP_THUNKS.get(n.build_id, set())} if name == 'main' else set()
+        self.setjmp_sites = {}
 
     def in_text(self, a):
         return self.lo <= a < self.hi and a % 4 == 0
@@ -73,12 +80,57 @@ class Module:
         starts = set()
         for a in eh_frame_functions(n):
             starts.add(b + a)
+
+        # Dynamic symbols are useful function boundaries, but newer Nintendo
+        # SDKs also publish code addresses as STT_NOTYPE/data-like symbols.
+        # If a defined symbol value itself lands in .text, treat it as a valid
+        # callable entry regardless of ELF symbol type.
         for name, info, shndx, value, size in n.syms:
-            if shndx and (info & 0xF) == 2:
+            if shndx and self.in_text(b + value):
                 starts.add(b + value)
-        for off, typ, sym, add in n.relocs:
+
+        # Function pointers, callbacks and vtables are frequently materialized
+        # by relocations rather than direct BL/ADR references. RELATIVE gives
+        # B+A; ABS64/GLOB_DAT/JUMP_SLOT give S+A. Discover every relocation
+        # whose resolved value is inside this module's .text so indirect BLR/BR
+        # can dispatch to it after relocation.
+        reloc_target = {}
+        for off, typ, symidx, add in n.relocs:
+            target = None
             if typ == R_AARCH64_RELATIVE:
-                starts.add(b + add)
+                target = b + add
+            elif typ in (R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT):
+                if 0 <= symidx < len(n.syms):
+                    name, info, shndx, value, size = n.syms[symidx]
+                    if shndx:
+                        target = b + value + add
+            if target is not None:
+                reloc_target[off] = target
+                if self.in_text(target):
+                    starts.add(target)
+
+        # rtld / __nnmusl_init_dso call DT_INIT and constructor-array entries
+        # indirectly. These pointers are not guaranteed to appear as BL/ADR
+        # targets, so explicitly seed them as callable entries.
+        for off in (getattr(n, 'init', 0), getattr(n, 'fini', 0)):
+            if off and self.in_text(b + off):
+                starts.add(b + off)
+
+        for arr, size in ((getattr(n, 'init_array', 0), getattr(n, 'init_array_size', 0)),
+                          (getattr(n, 'fini_array', 0), getattr(n, 'fini_array_size', 0))):
+            if not arr or not size:
+                continue
+            for slot in range(arr, arr + size, 8):
+                target = reloc_target.get(slot)
+                if target is None and slot + 8 <= len(n.image):
+                    raw = n.u64(slot)
+                    if self.in_text(raw):
+                        target = raw
+                    elif self.in_text(b + raw):
+                        target = b + raw
+                if target is not None and self.in_text(target):
+                    starts.add(target)
+
         starts = sorted(a for a in starts if self.in_text(a))
         return starts
 
@@ -321,11 +373,50 @@ class Module:
                     tables[a] = 'all'
                     self.stats['br_all_labels'] += 1
                 else:
+                    # A loaded target can be a local code pointer too. Try the
+                    # local labels before global dispatch, even when the table
+                    # recognizer cannot prove where the pointer came from.
+                    tables[a] = 'all'
                     self.stats['br_dispatch'] += 1
             terminated = ins.kind in ('b', 'br', 'ret', 'trap')
         if not terminated and end < self.hi:
             ext.add(end)
         return labels, ext, tables
+
+    def indirect_resume_entries(self, entries, hle):
+        """Fragments needing entry at an arbitrary PC after an indirect jump.
+
+        ADR/ADRP targets and external branches split unwind functions into
+        smaller emitted fragments. A switch target may be inside a *different*
+        fragment from its BR. Cover the enclosing unwind interval, including
+        fragments that do not themselves contain a BR. These are conservative
+        text intervals between unwind starts, not inferred symbol sizes.
+        """
+        roots = sorted({a + self.base for a in eh_frame_functions(self.nso)
+                        if self.in_text(a + self.base)} | {self.lo, self.hi})
+        if len(roots) == 2:  # stripped/no unwind table: use the known entries
+            roots = sorted(set(self.boundaries()) | {self.lo, self.hi})
+        groups = {bisect.bisect_right(roots, a) - 1
+                  for a, (end, labels, tables) in entries.items() if tables}
+        groups.update(bisect.bisect_right(roots, pc) - 1 for pc in self.setjmp_sites)
+        return {a for a, (end, labels, tables) in entries.items()
+                if a not in hle and end > a + 4
+                and bisect.bisect_right(roots, a) - 1 in groups}
+
+    def prepare_setjmp(self, entries):
+        self.setjmp_sites = {}
+        if not self.setjmp_targets:
+            return
+        order = sorted(entries)
+        for entry, (end, labels, tables) in entries.items():
+            for pc in range(entry, end, 4):
+                ins = self.lift(pc)
+                if ins.kind == 'bl' and ins.target in self.setjmp_targets:
+                    ret = pc + 4
+                    owner = order[bisect.bisect_right(order, ret) - 1]
+                    if not owner <= ret < entries[owner][0]:
+                        raise ValueError(f'setjmp continuation outside text: {ret:x}')
+                    self.setjmp_sites[pc] = (ins.target, owner)
 
     def render_single(self, ins, a, jump, refs):
         """C for one lifted instruction (no batching); used for patch variants."""
@@ -352,15 +443,25 @@ class Module:
             return ['return;']
         raise Unsupported(k)
 
-    def emit_function(self, entry, end, labels, tables, hle):
+    def emit_function(self, entry, end, labels, tables, hle, resumable=False):
         out = [f'void {fname(entry)}(Cpu *c) {{']
         if entry in hle:
             out.append(f'    {sanitize(hle[entry])}(c);')
             out.append('}')
             return out
         out.append(f'    FN_ENTER({hx(entry)});')
+        if resumable:
+            # Normal direct calls always start at entry. Only the runtime's
+            # range lookup calls _resume with an interior c->pc. Keep identical
+            # signatures so fragment transitions remain tail calls.
+            out.insert(0, f'void {fname(entry)}_resume(Cpu *c);')
+            out += [f'    c->pc = {hx(entry)};',
+                    f'    __attribute__((musttail)) return {fname(entry)}_resume(c);',
+                    '}', f'void {fname(entry)}_resume(Cpu *c) {{',
+                    '    goto L_dispatch;']
         batch = []
         refs = set()
+        jump_helpers = []
 
         def flush():
             if batch:
@@ -377,7 +478,7 @@ class Module:
 
         # Functions with jump tables also get the all-instruction fallback: a table whose emulation
         # missed some cases then still reaches the right instruction instead of aborting.
-        all_labels = bool(tables)
+        all_labels = bool(tables) or resumable
         if all_labels:
             labels = set(range(entry, end, 4))
         rando_here = [a for a in range(entry, end, 4) if a - self.base in RANDO_CODE]
@@ -432,6 +533,19 @@ class Module:
                 out.append(f'    if ({ins.cond}) {{ {jump(ins.target)} }}')
             elif k == 'bl':
                 t = ins.target
+                if a in self.setjmp_sites:
+                    target, owner = self.setjmp_sites[a]
+                    helper = fname(a) + '_setjmp'
+                    continuation = fname(owner) if owner == a + 4 else fname(owner) + '_resume'
+                    out.insert(0, f'void {helper}(Cpu *c);')
+                    refs.add(target)
+                    jump_helpers += [f'void {continuation}(Cpu *c);',
+                        'void rt_guest_setjmp(Cpu *, GuestFn, GuestFn, uint64_t);',
+                        f'void {helper}(Cpu *c) {{ rt_guest_setjmp(c, {fname(target)}, '
+                        f'{continuation}, {hx(a + 4)}); }}']
+                    out.append(f'    __attribute__((musttail)) return {helper}(c);')
+                    last = 'b'
+                    continue
                 if self.in_text(t):
                     refs.add(t)
                     out.append(f'    c->x[30] = {hx(a + 4)}; {fname(t)}(c);')
@@ -462,6 +576,7 @@ class Module:
             out.append(f'    switch (c->pc) {{ {cases} default: break; }}')
             out.append('    __attribute__((musttail)) return rt_dispatch(c);')
         out.append('}')
+        out += jump_helpers
         self._refs = refs
         return out
 
@@ -500,6 +615,14 @@ def main():
     ap.add_argument('--chunk-bytes', type=int, default=1500000)  # and about this much C (even compile times)
     ap.add_argument('--big-fn', type=int, default=100000)  # bytes of C from which a function gets its own file
     ap.add_argument('--limit', type=int, default=0)
+    ap.add_argument('--extra-entry', action='append', default=[],
+                    help='additional absolute guest code entry (repeatable; hex accepted)')
+    ap.add_argument('--extra-entry-range', action='append', default=[],
+                    help='additional callable range start:end; every aligned instruction becomes an entry')
+    ap.add_argument('--indirect-resume', action='store_true',
+                    help='emit static interior-PC resume ranges for indirect-branch unwind intervals')
+    ap.add_argument('--setjmp-target', action='append', default=[], type=lambda s: int(s, 0),
+                    help='known setjmp thunk (absolute address); used for synthetic tests/other verified builds')
     ap.add_argument('--trace-stores', action='store_true')  # research build (docs/DEPURACAO.md, LARECOMP_TRACE_STORES)
     ap.add_argument('--simd', choices=('asm', 'c'),
                     default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
@@ -507,6 +630,9 @@ def main():
 
     t0 = time.time()
     m = Module(args.name, args.nso, args.base, args.simd, args.trace_stores)
+    m.setjmp_targets.update(args.setjmp_target)
+    if any(not m.in_text(a) for a in m.setjmp_targets):
+        raise SystemExit('setjmp target outside module text')
     bid = m.nso.build_id[:16]
     if args.name == 'main' and bid != EEVEE_100_BUILD:
         # The instruction patches are written for Let's Go Eevee 1.0.0's main: moved to the same instructions of a
@@ -527,6 +653,20 @@ def main():
     # Partition text into functions; any branch/call target outside its function becomes a new
     # boundary (splitting the containing function) until a fixpoint is reached.
     start_set = set(starts)
+    for raw in args.extra_entry:
+        a = int(raw, 0)
+        if not m.in_text(a):
+            raise SystemExit(f'--extra-entry {raw}: outside {args.name} .text')
+        start_set.add(a)
+    for raw in args.extra_entry_range:
+        try:
+            lo_s, hi_s = raw.split(':', 1)
+            lo, hi = int(lo_s, 0), int(hi_s, 0)
+        except Exception:
+            raise SystemExit(f'--extra-entry-range {raw}: expected start:end')
+        if lo > hi or (lo & 3) or (hi & 3) or not m.in_text(lo) or not m.in_text(hi):
+            raise SystemExit(f'--extra-entry-range {raw}: invalid/outside {args.name} .text')
+        start_set.update(range(lo, hi + 4, 4))
     for i, w in enumerate(m.words):
         if (w & 0xFC000000) == 0x94000000:
             t = m.lo + i * 4 + sext26(w) * 4
@@ -574,6 +714,10 @@ def main():
         end = order[i + 1] if i + 1 < len(order) else m.hi
         labels, ext, tables = scanned[(a, end)]
         entries[a] = (end, labels, tables)
+    m.prepare_setjmp(entries)
+    resume_entries = m.indirect_resume_entries(entries, hle) if args.indirect_resume or m.setjmp_sites else set()
+    m.stats['resume_fragments'] = len(resume_entries)
+    m.stats['setjmp_sites'] = len(m.setjmp_sites)
     print(f'{args.name}: {len(starts)} boundaries, {len(entries)} functions, {rounds} rounds, {dict(m.stats)}, '
           f'{time.time() - t0:.0f}s', file=sys.stderr)
 
@@ -594,7 +738,7 @@ def main():
                 a = order[ci]
                 ci += 1
                 end, labels, tables = entries[a]
-                lines = m.emit_function(a, end, labels, tables, hle)
+                lines = m.emit_function(a, end, labels, tables, hle, a in resume_entries)
                 r = getattr(m, '_refs', set())
                 m._refs = set()
             n = sum(len(l) + 1 for l in lines)
@@ -622,7 +766,7 @@ def main():
             os.remove(os.path.join(args.outdir, fn))
     import io
     with io.StringIO() as f:
-        f.write('#include "cpu.h"\n')
+        f.write('#include "gamelib.h"\n')
         for a in order:
             f.write(f'void {fname(a)}(Cpu *c);\n')
         f.write(f'const uint64_t {args.name}_fn_addrs[] = {{\n')
@@ -632,9 +776,21 @@ def main():
         f.write(',\n'.join(fname(a) for a in order))
         f.write('};\n')
         f.write(f'const uint64_t {args.name}_fn_count = {len(order)};\n')
+        resumes = sorted(set(order) & resume_entries)
+        for a in resumes:
+            f.write(f'void {fname(a)}_resume(Cpu *c);\n')
+        f.write(f'const GameLibResumeRange {args.name}_resume_ranges[] = {{\n')
+        for a in resumes:
+            f.write(f'    {{{hx(a)}, {hx(entries[a][0])}, {fname(a)}_resume}},\n')
+        if not resumes:
+            f.write('    {0, 0, 0},\n')
+        f.write('};\n')
+        f.write(f'const uint64_t {args.name}_resume_count = {len(resumes)};\n')
+        f.write(f'const uint64_t {args.name}_setjmp_site_count = {len(m.setjmp_sites)};\n')
         write_if_changed(os.path.join(args.outdir, f'{args.name}_table.c'), f.getvalue())
     print(f'{args.name}: wrote {nchunks} chunks, {time.time() - t0:.0f}s total', file=sys.stderr)
 
 
 if __name__ == '__main__':
     main()
+

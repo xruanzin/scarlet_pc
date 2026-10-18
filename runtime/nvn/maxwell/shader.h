@@ -10,6 +10,9 @@
 //    `layout(std430, set=S, binding=17) [readonly] buffer GMem { uint w[]; } gmem_;`, 32-bit words relative to
 //    maxwell_gmem_base. `readonly` unless the shader stores (needs vertexPipeline/fragmentStoresAndAtomics then);
 //    byte / short stores are atomicAnd + atomicOr on the containing word.
+//    Without host-memory import, key.storage_buffers selects a range map (UBO 17) and the actual bound NVN
+//    storage buffers (SSBOs 64..79). LDG/STG resolve addresses against those ranges; GPU writes are read back
+//    before later guest/graphics consumers. No synthetic zero heap is used for this path.
 //  - rscale table -> binding 18: `uniform RScale { vec4 rscale[65]; };` (std140, the MSL buffer 18 contents).
 //  - per-draw tint -> binding 19: `uniform Tint { vec4 ltint[2]; };` (fragment, when uses_tint).
 //  - texture slot i (ShaderInfo.tex[i]) -> binding 32 + i, a combined image sampler: sampler1D/2D/3D/Cube/
@@ -26,6 +29,9 @@
 //    support), GL_EXT_texture_shadow_lod (explicit-LOD array / cube shadow lookups).
 //  - not in GLSL: the maxwell_dbg_vs position dump (buffer 29) is MSL only.
 #pragma once
+
+// Compact bindless storage-image window. Two arrays (write + atomic) consume 32 descriptors/stage.
+#define MAXWELL_BINDLESS_IMAGES 16
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -43,6 +49,8 @@ typedef struct {
     bool flip_y;            // lower-left window origin
     uint32_t vs_out_mask;   // fragment: varyings the vertex shader provides
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
+    uint8_t bindless_storage; // Vulkan backend can execute bindless SUST/SURED through storage images
+    uint8_t storage_buffers;  // LDG/STG through the bound NVN storage buffers (no host-memory import required)
 } ShaderKey;
 
 typedef struct {
@@ -64,11 +72,17 @@ typedef struct {
     uint32_t out_mask;      // vertex: output varyings; fragment: render targets written
     bool writes_depth, uses_discard, writes_point_size;
     bool uses_gmem;         // global memory access: bind the guest heap at GMEM_BUFFER_INDEX
+    bool writes_gmem;
+    uint8_t storage_buffers;
     bool uses_tint;         // fragment: reads the per-draw tint (buffer 19, float4[2]) applied to color target 0
     bool uses_rscale;       // reads the resolution-scale table (fragment/compute buffer 18): float4 [0] = render
                             // target scale, [1 + i] = allocation scale of texture i
     uint32_t local_mem;     // bytes of local memory
     uint32_t num_insts;
+    uint32_t dispatch_labels, indirect_tables, indirect_fallbacks; // GLSL control-flow diagnostics
+    uint32_t surface_fallbacks; // surface ops that still had to use a compatibility fallback
+    bool uses_surface_write;   // bindless SUST 2D path
+    bool uses_surface_atomic;  // bindless SURED.ADD.U32 / SUATOM path
     char error[256];        // set when translation fails
 } ShaderInfo;
 
@@ -86,6 +100,10 @@ extern const uint8_t *maxwell_dbg_vs;
 
 // code: shader binary (with the 0x50-byte SPH header for graphics stages)
 ShaderInfo *maxwell_translate(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key);
+// Optional immutable compiler constants bound as CB1 by NVN, belonging to this exact shader program.
+// They are used only to prove indirect branch destinations, never to specialize mutable draw uniforms.
+ShaderInfo *maxwell_translate_with_constants(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key,
+                                            const uint8_t *constants, size_t constants_size);
 void maxwell_free(ShaderInfo *s);
 // Disassemble for debugging (writes text to f).
 void maxwell_disassemble(const uint8_t *code, size_t max_size, int stage, void *file);

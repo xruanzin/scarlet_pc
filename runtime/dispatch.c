@@ -1,16 +1,48 @@
 // Guest address -> recompiled function lookup, and host (HLE) function registry.
 #include <pthread.h>
 #include <signal.h>
+#include <setjmp.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "gamelib.h"
 #include "hle.h"
+#include "kernel.h"
 
-typedef struct { const uint64_t *addrs; const GuestFn *fns; uint64_t count, lo, hi; } FnTable;
+typedef struct {
+    const uint64_t *addrs;
+    const GuestFn *fns;
+    uint64_t count, lo, hi;
+    const GameLibResumeRange *resumes;
+    uint64_t resume_count;
+} FnTable;
 static FnTable tables[GAMELIB_MAX_MODULES];
 static int ntables;
+
+typedef struct GuestJumpScope {
+    jmp_buf native;
+    struct GuestJumpScope *prev;
+    Cpu *cpu;
+    uint64_t sp, pc;
+} GuestJumpScope;
+static __thread GuestJumpScope *guest_jump_scope;
+static __thread unsigned guest_jump_logs;
+
+void rt_guest_setjmp(Cpu *c, GuestFn setup, GuestFn continuation, uint64_t return_pc) {
+    GuestJumpScope scope = {.prev = guest_jump_scope, .cpu = c, .sp = c->sp, .pc = return_pc};
+    guest_jump_scope = &scope;
+    if (!setjmp(scope.native)) {
+        c->x[30] = return_pc;
+        setup(c);
+    }
+    // Call the static continuation directly: dispatching this PC would catch
+    // our own active scope again. Native frames below this scope remain live.
+    c->pc = return_pc;
+    continuation(c);
+    guest_jump_scope = scope.prev;
+}
 
 // HLE stubs live at fake addresses HLE_BASE + 16*i
 #define MAX_HLE 4096
@@ -65,25 +97,85 @@ void hle_override(uint64_t addr, HostFn fn, const char *name) {
     override_count++;
 }
 
-// ---- recent-HLE ring (crash debugging: what the game asked the host just before dying)
+// ---- recent-HLE ring. Shared histories outlive their writer threads (TLS does not).
 #define HHIST 128
-static __thread struct { const char *name; uint64_t x0, x1, x30; } hhist[HHIST];
-static __thread int hhist_n;
+#define MAX_HH_THREADS 128
+typedef struct { const char *name; uint64_t x0, x1, x30; } HhEntry;
+typedef struct { HhEntry e[HHIST]; uint64_t n, tid; _Atomic bool busy; } Hh;
+typedef struct { HhEntry e[HHIST]; uint64_t n, tid; } HhSnapshot;
+static Hh hh_all[MAX_HH_THREADS];
+static _Atomic unsigned hh_nall;
+static __thread Hh hh_fallback;
+static __thread Hh *hh_current;
+
 static void hhist_push(const char *name, Cpu *c) {
-    int i = hhist_n++ & (HHIST - 1);
-    hhist[i].name = name;
-    hhist[i].x0 = c->x[0];
-    hhist[i].x1 = c->x[1];
-    hhist[i].x30 = c->x[30];
+    if (!hh_current) {
+        unsigned k = atomic_fetch_add_explicit(&hh_nall, 1, memory_order_relaxed);
+        hh_current = k < MAX_HH_THREADS ? &hh_all[k] : &hh_fallback;
+        // tid is protected by busy, just like the entries. Never publish a pointer to TLS.
+    }
+    Hh *h = hh_current;
+    bool expected = false;
+    // Never delay a guest call for diagnostics: a concurrent snapshot may drop one record.
+    if (!atomic_compare_exchange_strong_explicit(&h->busy, &expected, true, memory_order_acquire, memory_order_relaxed)) return;
+    if (!h->tid) h->tid = plat_register_thread();
+    unsigned i = h->n & (HHIST - 1);
+    h->e[i] = (HhEntry){name, c->x[0], c->x[1], c->x[30]};
+    h->n++;
+    atomic_store_explicit(&h->busy, false, memory_order_release);
+}
+static bool hhist_snapshot(Hh *h, HhSnapshot *out) {
+    if (!h) return false;
+    bool expected = false;
+    if (!atomic_compare_exchange_strong_explicit(&h->busy, &expected, true, memory_order_acquire, memory_order_relaxed)) return false;
+    memcpy(out->e, h->e, sizeof out->e);
+    out->n = h->n;
+    out->tid = h->tid;
+    atomic_store_explicit(&h->busy, false, memory_order_release);
+    return true;
+}
+static void hhist_print(const HhSnapshot *h, int last) {
+    unsigned n = h->n < HHIST ? (unsigned)h->n : HHIST;
+    if (last > 0 && n > (unsigned)last) n = (unsigned)last;
+    uint64_t start = h->n - n;
+    for (unsigned k = 0; k < n; k++) {
+        unsigned i = (start + k) & (HHIST - 1);
+        uint64_t off = 0;
+        const char *sym = loader_symbol_at(h->e[i].x30, &off);
+        fprintf(stderr, "  %s x0=%llx x1=%llx lr=%llx", h->e[i].name ? h->e[i].name : "?",
+                (unsigned long long)h->e[i].x0, (unsigned long long)h->e[i].x1, (unsigned long long)h->e[i].x30);
+        if (sym) fprintf(stderr, " (%s+%llx)", sym, (unsigned long long)off);
+        fputc('\n', stderr);
+    }
 }
 static void hhist_dump(void) {
-    int n = hhist_n < HHIST ? hhist_n : HHIST, start = hhist_n - n;
-    fprintf(stderr, "last %d host calls:\n", n);
-    for (int k = 0; k < n; k++) {
-        int i = (start + k) & (HHIST - 1);
-        fprintf(stderr, "  %s x0=%llx x1=%llx lr=%llx\n", hhist[i].name ? hhist[i].name : "?",
-                (unsigned long long)hhist[i].x0, (unsigned long long)hhist[i].x1, (unsigned long long)hhist[i].x30);
+    HhSnapshot h;
+    if (!hhist_snapshot(hh_current, &h)) return;
+    fprintf(stderr, "last %u host calls:\n", h.n < HHIST ? (unsigned)h.n : HHIST);
+    hhist_print(&h, 0);
+}
+
+// Runs on a dedicated diagnostic thread, never suspends game threads or blocks the SDL event loop.
+void rt_hang_report(void) {
+    fprintf(stderr, "\n===== hang report: no frame presented, per-thread state =====\n");
+    unsigned count = atomic_load_explicit(&hh_nall, memory_order_relaxed);
+    unsigned n = count < MAX_HH_THREADS ? count : MAX_HH_THREADS;
+    for (unsigned k = 0; k < n; k++) {
+        HhSnapshot h;
+        if (!hhist_snapshot(&hh_all[k], &h)) {
+            fprintf(stderr, "[hang] history #%u busy; snapshot skipped\n", k);
+            continue;
+        }
+        if (!h.n) continue;
+        fprintf(stderr, "[hang] history #%u (os tid %llu): %llu HLE calls, last ones:\n", k,
+                (unsigned long long)h.tid, (unsigned long long)h.n);
+        hhist_print(&h, 6);
     }
+    if (count > MAX_HH_THREADS) fprintf(stderr, "[hang] history capacity reached; later threads omitted\n");
+    kernel_dump_guest_threads();
+    plat_dump_other_threads();
+    fprintf(stderr, "===== end of hang report =====\n");
+    fflush(stderr);
 }
 
 static __thread uint64_t unimpl_pc;
@@ -112,8 +204,46 @@ uint64_t guest_sym(const char *name) {
     return a;
 }
 
+// Shared direct-mapped cache in front of the binary search.
+// Guest address -> lifted function is immutable for a boot, so making this
+// per-thread only duplicated memory and forced every Scarlet worker to warm the
+// same lookup table again. 262144 entries (~4 MiB total) cover almost the
+// complete lifted working set and are shared by loader, jobs, audio and render.
+#define DCACHE 262144
+typedef struct {
+    _Atomic uint64_t addr;
+    _Atomic(uintptr_t) fn;
+} DCacheEnt;
+static DCacheEnt dcache[DCACHE];
+
 static uint64_t hle_next = HLE_HEAP;
 RT_ON_RESET(hle_heap_reset) { hle_next = HLE_HEAP; }  // (guest memory, wiped by the reboot)
+
+// Immutable exact-entry lookup built before guest threads start. Scarlet has
+// ~271k lifted function entries; a 2^20 open-addressing table stays under 30%
+// load, making cold indirect calls O(1) instead of a binary search per module.
+#define EXACT_TAB (1u << 20)
+typedef struct { uint64_t addr; GuestFn fn; } ExactEnt;
+static ExactEnt *exact_tab;
+
+static inline uint32_t exact_hash(uint64_t a) {
+    return (uint32_t)(((a >> 2) * 11400714819323198485ull) >> (64 - 20));
+}
+static void exact_insert(uint64_t addr, GuestFn fn) {
+    uint32_t h = exact_hash(addr);
+    while (exact_tab[h].addr && exact_tab[h].addr != addr) h = (h + 1) & (EXACT_TAB - 1);
+    exact_tab[h] = (ExactEnt){addr, fn};
+}
+static GuestFn exact_lookup(uint64_t addr) {
+    if (!exact_tab) return NULL;
+    uint32_t h = exact_hash(addr);
+    for (;;) {
+        uint64_t a = exact_tab[h].addr;
+        if (a == addr) return exact_tab[h].fn;
+        if (!a) return NULL;
+        h = (h + 1) & (EXACT_TAB - 1);
+    }
+}
 
 void *hle_alloc(uint64_t size) {
     static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
@@ -129,32 +259,48 @@ void *hle_alloc(uint64_t size) {
 
 void dispatch_init(void) {  // (after gamelib_load)
     const GameLibTables *g = gamelib_tables();
+    memset(dcache, 0, sizeof dcache);
+    if (!exact_tab) exact_tab = calloc(EXACT_TAB, sizeof *exact_tab);
+    else memset(exact_tab, 0, EXACT_TAB * sizeof *exact_tab);
+    if (!exact_tab) FATAL("cannot allocate exact guest dispatch table\n");
     ntables = 0;
     for (uint32_t i = 0; i < g->nmods && i < GAMELIB_MAX_MODULES; i++) {
         const GameLibModule *m = &g->mods[i];
         uint64_t n = *m->count;
-        if (n) tables[ntables++] = (FnTable){m->addrs, m->fns, n, m->addrs[0], m->addrs[n - 1]};
+        uint64_t nr = m->resume_count ? *m->resume_count : 0;
+        if (n) {
+            uint64_t lo = m->addrs[0], hi = m->addrs[n - 1];
+            if (nr) {
+                if (m->resumes[0].lo < lo) lo = m->resumes[0].lo;
+                if (m->resumes[nr - 1].hi - 1 > hi) hi = m->resumes[nr - 1].hi - 1;
+                LOG("[dispatch] %s: %llu static resume ranges\n", m->name, (unsigned long long)nr);
+            }
+            tables[ntables++] = (FnTable){m->addrs, m->fns, n, lo, hi, m->resumes, nr};
+            for (uint64_t k = 0; k < n; k++) exact_insert(m->addrs[k], m->fns[k]);
+        }
     }
 }
 
 GuestFn dispatch_lookup(uint64_t addr) {
+    GuestFn exact = exact_lookup(addr);
+    if (exact) return exact;
+
+    // Only computed jumps into the middle of a lifted fragment need the slower
+    // resume-range search. Normal indirect calls never reach this loop now.
+    if (addr & 3) return NULL;
     for (int t = 0; t < ntables; t++) {
         FnTable *ft = &tables[t];
-        if (addr < ft->lo || addr > ft->hi) continue;
-        uint64_t lo = 0, hi = ft->count;
+        if (addr < ft->lo || addr > ft->hi || !ft->resume_count) continue;
+        uint64_t lo = 0, hi = ft->resume_count;
         while (lo < hi) {
             uint64_t mid = (lo + hi) / 2;
-            if (ft->addrs[mid] < addr) lo = mid + 1;
+            if (ft->resumes[mid].lo <= addr) lo = mid + 1;
             else hi = mid;
         }
-        if (lo < ft->count && ft->addrs[lo] == addr) return ft->fns[lo];
+        if (lo && addr < ft->resumes[lo - 1].hi) return ft->resumes[lo - 1].fn;
     }
     return NULL;
 }
-
-// Small direct-mapped cache in front of the binary search
-#define DCACHE 4096
-static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
 
 static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
@@ -176,16 +322,33 @@ static GuestFn dispatch_slow(Cpu *c) {
         const char *s = loader_symbol_at(c->x[30], &off);
         FATAL("no function at %llx (lr=%llx %s+%llx)\n", pc, c->x[30], s ? s : "?", off);
     }
-    unsigned h = (unsigned)(pc >> 2) & (DCACHE - 1);
-    dcache[h].addr = pc;
-    dcache[h].fn = f;
+    unsigned h = (unsigned)(((pc >> 2) * 11400714819323198485ull) >> (64 - 18));
+    atomic_store_explicit(&dcache[h].fn, (uintptr_t)f, memory_order_relaxed);
+    atomic_store_explicit(&dcache[h].addr, pc, memory_order_release);
     return f;
 }
 
 // Always tail-calls, so chains of indirect jumps don't grow the host stack.
 void rt_dispatch(Cpu *c) {
-    unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);
-    GuestFn f = dcache[h].addr == c->pc ? dcache[h].fn : dispatch_slow(c);
+    if (__builtin_expect(guest_jump_scope != NULL, 0) && c->pc == c->x[30]) {
+        for (GuestJumpScope *j = guest_jump_scope; j; j = j->prev) {
+            if (j->cpu == c && j->pc == c->pc && j->sp == c->sp) {
+                // SDK longjmp has restored guest registers/SP already. Discard
+                // the abandoned native frames and any intervening jump scopes.
+                guest_jump_scope = j;
+                if (guest_jump_logs++ < 4)
+                    LOG("[dispatch] guest longjmp -> pc=%llx sp=%llx value=%llu\n",
+                        (unsigned long long)c->pc, (unsigned long long)c->sp,
+                        (unsigned long long)c->x[0]);
+                longjmp(j->native, 1);
+            }
+        }
+    }
+    unsigned h = (unsigned)(((c->pc >> 2) * 11400714819323198485ull) >> (64 - 18));
+    uint64_t cached = atomic_load_explicit(&dcache[h].addr, memory_order_acquire);
+    GuestFn f = cached == c->pc
+        ? (GuestFn)(uintptr_t)atomic_load_explicit(&dcache[h].fn, memory_order_relaxed)
+        : dispatch_slow(c);
     __attribute__((musttail)) return f(c);
 }
 
@@ -208,14 +371,19 @@ const char *rt_host_fn_name(uint64_t pc, uint64_t *offset) {
     static __thread char name[32];
     if (!byhost) {
         uint64_t total = 0, k = 0;
-        for (int t = 0; t < ntables; t++) total += tables[t].count;
+        for (int t = 0; t < ntables; t++) total += tables[t].count + tables[t].resume_count;
         uint64_t (*v)[2] = malloc(total * sizeof *v);
         if (!v) return NULL;
-        for (int t = 0; t < ntables; t++)
+        for (int t = 0; t < ntables; t++) {
             for (uint64_t i = 0; i < tables[t].count; i++) {
                 v[k][0] = (uint64_t)(uintptr_t)tables[t].fns[i];
                 v[k++][1] = tables[t].addrs[i];
             }
+            for (uint64_t i = 0; i < tables[t].resume_count; i++) {
+                v[k][0] = (uint64_t)(uintptr_t)tables[t].resumes[i].fn;
+                v[k++][1] = tables[t].resumes[i].lo;
+            }
+        }
         qsort(v, k, sizeof *v, cmp_host);
         n = k;
         byhost = v;
@@ -243,7 +411,8 @@ void rt_fatal_trace(void) {
     plat_print_backtrace();
     Cpu *c = kernel_current_cpu();
     if (c) {
-        fprintf(stderr, "guest: sp=%llx lr=%llx\n", c->sp, c->x[30]);
+        fprintf(stderr, "guest: sp=%llx lr=%llx tpidr=%llx tpidrro=%llx\n",
+                c->sp, c->x[30], c->tpidr, c->tpidrro);
         for (int i = 0; i < 31; i += 4)
             fprintf(stderr, "  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx\n", i, c->x[i], i + 1,
                     c->x[i + 1], i + 2, c->x[i + 2], i + 3, c->x[i + 3]);
@@ -312,3 +481,4 @@ void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {
 }
 
 void crash_handler_install(void) { plat_crash_handler_install(); }
+

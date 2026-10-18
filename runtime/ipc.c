@@ -134,13 +134,29 @@ int ipc_handle_request(Cpu *c, uint32_t handle) {
         req.nc = ncd;
     }
 
-    if (req.type == 2) {  // close
-        LOG("[ipc] close session %s (handle %x)\n", sess->svc->name, handle);
+    if (req.type == 2 || req.type == 15) {  // CMIF Release / TIPC Close
+        LOG("[ipc] close session %s (handle %x, type %u)\n", sess->svc->name, handle, req.type);
         if (!sess->domain) service_release(sess->svc);  // (a domain's objects stay: closed one by one)
         return 0;
     }
-    uint8_t *payload = (uint8_t *)aligned;
+
+    bool tipc = req.type >= 16;
+    uint8_t *payload = (uint8_t *)(tipc ? raw : aligned);
     bool dom = false;  // response is domain-wrapped
+
+    if (tipc) {
+        // Tiny IPC: the HIPC message type itself is command_id + 16 and the
+        // raw payload starts immediately after the HIPC descriptors. Unlike
+        // CMIF there is no SFCI header, no 16-byte raw-data alignment and no
+        // domain framing.
+        req.cmd = req.type - 16;
+        req.data = payload;
+        req.data_size = raw_words * 4;
+        LOG("[ipc] TIPC %s cmd %u (type %u, in %u bytes)\n",
+            sess->svc->name, req.cmd, req.type, req.data_size);
+        sess->svc->handler(sess->svc, &req, &resp);
+        goto write_response;
+    }
     if (req.type == 4 || req.type == 6) {
         if (sess->domain) {
             dom = true;
@@ -219,12 +235,33 @@ write_response:;
     memset(msg, 0, 0x100);
     uint32_t *w = msg;
     int has_handles = resp.ncopy || resp.nmove;
+    uint32_t *q = w + 2;
+
+    if (tipc) {
+        // TIPC replies retain the request type. After the optional special
+        // header/handles, word 0 of raw data is Result and the service output
+        // follows immediately. libnx's tipcParseResponse consumes exactly
+        // this layout.
+        uint32_t payload_words = 1 + (resp.data_size + 3) / 4;
+        w[0] = req.type;
+        w[1] = payload_words | (has_handles ? 0x80000000u : 0);
+        if (has_handles) {
+            *q++ = (resp.ncopy << 1) | (resp.nmove << 5);
+            for (int i = 0; i < resp.ncopy; i++) *q++ = resp.copy_handles[i];
+            for (int i = 0; i < resp.nmove; i++) *q++ = resp.move_handles[i];
+        }
+        q[0] = resp.result;
+        memcpy(q + 1, resp.data, resp.data_size);
+        LOG("[ipc] TIPC %s cmd %u -> result %x, %d move/%d copy handles, %u bytes\n",
+            sess->svc->name, req.cmd, resp.result, resp.nmove, resp.ncopy, resp.data_size);
+        return 0;
+    }
+
     uint32_t payload_words = 4 + (resp.data_size + 3) / 4;   // SFCO header + data
     if (dom) payload_words += 4 + ndomain_out;
     uint32_t raw_size = payload_words + 4;  // + alignment padding
-    w[0] = 0;  // type 0 response
+    w[0] = 0;  // type 0 CMIF response
     w[1] = raw_size | (has_handles ? 0x80000000u : 0);
-    uint32_t *q = w + 2;
     if (has_handles) {
         *q++ = (resp.ncopy << 1) | (resp.nmove << 5);
         for (int i = 0; i < resp.ncopy; i++) *q++ = resp.copy_handles[i];

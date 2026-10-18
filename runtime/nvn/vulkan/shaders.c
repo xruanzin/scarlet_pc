@@ -11,6 +11,8 @@ void vk_shaders_init(void) {  // (compilers are per thread: check shaderc works 
     shaderc_compiler_t c = shaderc_compiler_initialize();
     if (!c) FATAL("shaderc_compiler_initialize failed\n");
     shaderc_compiler_release(c);
+    const char *opt = getenv("LARECOMP_VK_OPT");
+    LOG("[shader] shaderc optimizer: %s\n", opt && !strcmp(opt, "1") ? "performance (experimental)" : "disabled (default)");
 }
 
 static shaderc_shader_kind kind_of(int stage) {
@@ -19,8 +21,18 @@ static shaderc_shader_kind kind_of(int stage) {
 
 // SPIR-V disk cache: cache/spirv/<hash of stage + source>.spv, so a known shader costs a file read instead of a
 // GLSL compile (the driver's pipeline cache only covers the step after this one).
+static shaderc_optimization_level optimization_level(int stage) {
+    (void)stage;
+    const char *e = getenv("LARECOMP_VK_OPT");
+    // Restore the original port's mode. Promoting every register of a switch/pc dispatcher to SSA can
+    // multiply the module through large Phi nodes. The driver still compiles/optimizes native GPU code.
+    // The Scarlet startup regression appeared after enabling -O for fragment/compute by default.
+    return e && !strcmp(e, "1") ? shaderc_optimization_level_performance : shaderc_optimization_level_zero;
+}
+
 static uint64_t src_hash(const char *src, int stage) {
-    uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage) + 3;  // + version of the post-processing (no_contraction)
+    // Include compiler mode: cached performance modules must not bypass the safe default on update.
+    uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage ^ ((uint64_t)optimization_level(stage) << 32)) + 4;
     for (const char *p = src; *p; p++) { h ^= (uint8_t)*p; h *= 0x100000001B3ull; }
     return h;
 }
@@ -52,6 +64,35 @@ static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) {
     bool ok = fwrite(spv, 4, nwords, f) == nwords;
     fclose(f);
     if (!ok || rename(tmp, path) != 0) remove(tmp);  // (another thread may have stored it first)
+}
+
+// Keep the actual compiler input/output for a pathological build. A boot log alone cannot establish why
+// a particular guest shader is large. Save source before shaderc too, so the build deadline can interrupt it.
+// These are local diagnostics, not substitutes for a shader; normal small shaders cause no extra disk IO.
+static void shader_diagnostic(uint64_t h, int stage, const char *src, const uint32_t *spv, size_t nwords) {
+    size_t bytes = strlen(src);
+    if (bytes < 65536 && nwords < 32768) return;
+    mkdir("build", 0755);
+    mkdir("build/shader-diagnostics", 0755);
+    char base[128], path[144];
+    snprintf(base, sizeof base, "build/shader-diagnostics/%016llx.%s", (unsigned long long)h,
+        stage == STAGE_VERTEX ? "vert" : stage == STAGE_FRAGMENT ? "frag" : "comp");
+    LOG("[shader-diagnostic] input %s.glsl (%zu bytes), SPIR-V=%zu words\n", base, bytes, nwords);
+    const void *data[] = {src, spv};
+    size_t sizes[] = {bytes, nwords * 4};
+    const char *suffix[] = {"glsl", "spv"};
+    for (int i = 0; i < 2; i++) {
+        if (!data[i]) continue;
+        snprintf(path, sizeof path, "%s.%s", base, suffix[i]);
+        FILE *f = fopen(path, "rb");
+        if (f) { fclose(f); continue; }
+        f = fopen(path, "wb");
+        if (!f) { LOG("[shader-diagnostic] could not write %s\n", path); continue; }
+        bool ok = fwrite(data[i], 1, sizes[i], f) == sizes[i];
+        if (fclose(f)) ok = false;
+        if (!ok) { remove(path); LOG("[shader-diagnostic] incomplete write: %s\n", path); }
+        else LOG("[shader-diagnostic] %s (%zu bytes)\n", path, sizes[i]);
+    }
 }
 
 // Vertex shaders: every float add/sub/mul/div/fma gets NoContraction, so no compiler fuses or splits them. Depth
@@ -110,21 +151,20 @@ static uint32_t *no_contraction(uint32_t *spv, size_t *nwords) {
 
 // SPIR-V words of src, or NULL (error logged with the source). *nwords set on success. Thread-safe: one shaderc
 // compiler per thread (a shared one behind a lock serialised all the pipeline workers).
-// No spirv-opt by default: it rewrote the depth pre-pass and colour-pass vertex shaders differently enough that
-// their depths stopped matching (EQUAL test: black holes in foliage), and it was most of the compile time; the
-// driver optimises anyway. LARECOMP_VK_OPT=1 turns it back on (experiments).
+// Optimization stays off by default, preserving the original depth invariance and avoiding shaderc's large
+// SSA expansion on register dispatchers. LARECOMP_VK_OPT=1 remains an explicit experimental override.
 uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t *nwords) {
     uint64_t h = src_hash(src, stage);
     static int nocache = -1;
     if (nocache < 0) nocache = getenv("LARECOMP_VK_NO_SPIRV_CACHE") != NULL;
     uint32_t *out = nocache ? NULL : cache_load(h, nwords);
-    if (out) return out;
+    if (out) { shader_diagnostic(h, stage, src, out, *nwords); return out; }
+    shader_diagnostic(h, stage, src, NULL, 0);
     static __thread shaderc_compiler_t comp;
     if (!comp) comp = shaderc_compiler_initialize();
     shaderc_compile_options_t o = shaderc_compile_options_initialize();
     shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
-    shaderc_compile_options_set_optimization_level(o, getenv("LARECOMP_VK_OPT") ? shaderc_optimization_level_performance
-                                                                                  : shaderc_optimization_level_zero);
+    shaderc_compile_options_set_optimization_level(o, optimization_level(stage));
     shaderc_compilation_result_t r = shaderc_compile_into_spv(comp, src, strlen(src), kind_of(stage), name, "main", o);
     shaderc_compile_options_release(o);
     if (shaderc_result_get_compilation_status(r) != shaderc_compilation_status_success) {
@@ -136,6 +176,7 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
         memcpy(out, shaderc_result_get_bytes(r), n);
         *nwords = n / 4;
         if (stage == STAGE_VERTEX) out = no_contraction(out, nwords);
+        shader_diagnostic(h, stage, src, out, *nwords);
         if (!nocache) cache_store(h, out, *nwords);
     }
     shaderc_result_release(r);
@@ -160,7 +201,7 @@ VkShaderModule vk_compile_glsl(const char *src, int stage, const char *name) {
 // ================================================================== reflection
 // Just enough SPIR-V parsing to list the descriptor bindings a module declares (set, binding, type).
 enum { OP_TYPE_IMAGE = 25, OP_TYPE_SAMPLER = 26, OP_TYPE_SAMPLED_IMAGE = 27, OP_TYPE_ARRAY = 28, OP_TYPE_RUNTIME_ARRAY = 29,
-       OP_TYPE_STRUCT = 30, OP_TYPE_POINTER = 32, OP_VARIABLE = 59, OP_DECORATE = 71 };
+       OP_TYPE_STRUCT = 30, OP_TYPE_POINTER = 32, OP_CONSTANT = 43, OP_VARIABLE = 59, OP_DECORATE = 71 };
 enum { DEC_BLOCK = 2, DEC_BUFFER_BLOCK = 3, DEC_BINDING = 33, DEC_SET = 34 };
 enum { SC_UNIFORM_CONSTANT = 0, SC_UNIFORM = 2, SC_STORAGE_BUFFER = 12 };
 
@@ -169,7 +210,9 @@ int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *out, int max) {
     uint32_t bound = spv[3];
     int32_t *binding = malloc(bound * sizeof *binding), *set = malloc(bound * sizeof *set);
     uint8_t *flags = calloc(bound, 1);    // 1 Block, 2 BufferBlock
+    uint8_t *image_sampled = calloc(bound, 1); // OpTypeImage Sampled: 1 sampled, 2 storage
     uint32_t *op = calloc(bound, sizeof *op), *ref = calloc(bound, sizeof *ref), *sc = calloc(bound, sizeof *sc);
+    uint32_t *arr_len_id = calloc(bound, sizeof *arr_len_id), *constant = calloc(bound, sizeof *constant);
     for (uint32_t i = 0; i < bound; i++) binding[i] = set[i] = -1;
     for (size_t i = 5; i < n;) {
         uint32_t wc = spv[i] >> 16, o = spv[i] & 0xFFFF;
@@ -182,9 +225,13 @@ int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *out, int max) {
             else if (w[2] == DEC_BUFFER_BLOCK) flags[w[1]] |= 2;
         } else if ((o == OP_TYPE_IMAGE || o == OP_TYPE_SAMPLER || o == OP_TYPE_SAMPLED_IMAGE || o == OP_TYPE_STRUCT) && wc >= 2 && w[1] < bound) {
             op[w[1]] = o;
+            if (o == OP_TYPE_IMAGE && wc >= 8) image_sampled[w[1]] = (uint8_t)w[7];
         } else if ((o == OP_TYPE_ARRAY || o == OP_TYPE_RUNTIME_ARRAY) && wc >= 3 && w[1] < bound) {
             op[w[1]] = o;
             ref[w[1]] = w[2];
+            if (o == OP_TYPE_ARRAY && wc >= 4) arr_len_id[w[1]] = w[3];
+        } else if (o == OP_CONSTANT && wc >= 4 && w[2] < bound) {
+            constant[w[2]] = w[3];
         } else if (o == OP_TYPE_POINTER && wc >= 4 && w[1] < bound) {
             op[w[1]] = o;
             sc[w[1]] = w[2];
@@ -200,26 +247,33 @@ int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *out, int max) {
     for (uint32_t id = 0; id < bound && cnt < max; id++) {
         if (op[id] != OP_VARIABLE || binding[id] < 0) continue;
         uint32_t t = ref[ref[id]];  // pointee
-        while (t < bound && (op[t] == OP_TYPE_ARRAY || op[t] == OP_TYPE_RUNTIME_ARRAY)) t = ref[t];
+        uint32_t count = 1;
+        while (t < bound && (op[t] == OP_TYPE_ARRAY || op[t] == OP_TYPE_RUNTIME_ARRAY)) {
+            if (op[t] == OP_TYPE_ARRAY) {
+                uint32_t n = arr_len_id[t] < bound ? constant[arr_len_id[t]] : 0;
+                if (n) count *= n;
+            }
+            t = ref[t];
+        }
         VkDescriptorType dt;
         if (t >= bound) continue;
         if (op[t] == OP_TYPE_SAMPLED_IMAGE) dt = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        else if (op[t] == OP_TYPE_IMAGE) dt = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        else if (op[t] == OP_TYPE_IMAGE) dt = image_sampled[t] == 2 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         else if (op[t] == OP_TYPE_SAMPLER) dt = VK_DESCRIPTOR_TYPE_SAMPLER;
         else if (op[t] == OP_TYPE_STRUCT && (sc[id] == SC_STORAGE_BUFFER || (flags[t] & 2))) dt = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         else if (op[t] == OP_TYPE_STRUCT && sc[id] == SC_UNIFORM) dt = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         else continue;
-        out[cnt++] = (VkBindingInfo){(uint32_t)(set[id] < 0 ? 0 : set[id]), (uint32_t)binding[id], dt};
+        out[cnt++] = (VkBindingInfo){(uint32_t)(set[id] < 0 ? 0 : set[id]), (uint32_t)binding[id], dt, count ? count : 1};
     }
-    free(binding); free(set); free(flags); free(op); free(ref); free(sc);
+    free(binding); free(set); free(flags); free(image_sampled); free(op); free(ref); free(sc); free(arr_len_id); free(constant);
     return cnt;
 }
 
 VkDescriptorSetLayout vk_set_layout(const VkBindingInfo *b, int n, uint32_t set, VkShaderStageFlags stages) {
-    VkDescriptorSetLayoutBinding lb[96];
+    VkDescriptorSetLayoutBinding lb[192];
     uint32_t k = 0;
-    for (int i = 0; i < n && k < 96; i++)
-        if (b[i].set == set) lb[k++] = (VkDescriptorSetLayoutBinding){b[i].binding, b[i].type, 1, stages, NULL};
+    for (int i = 0; i < n && k < 192; i++)
+        if (b[i].set == set) lb[k++] = (VkDescriptorSetLayoutBinding){b[i].binding, b[i].type, b[i].count ? b[i].count : 1, stages, NULL};
     VkDescriptorSetLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = k, .pBindings = lb};
     VkDescriptorSetLayout l;
     VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &ci, NULL, &l));

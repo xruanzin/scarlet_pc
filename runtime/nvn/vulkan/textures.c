@@ -11,6 +11,8 @@
 #include "vk.h"
 #include "../astc.h"
 #include "../renderer.h"
+#include "../../platform.h"
+#include "../../rt.h"
 
 // ================================================================== formats
 // expand_rgb: converted to RGBA8 on upload - 1 RGB8, 2 RGBA4 and 3 RGB5A1 (16-bit, red in the low bits: the
@@ -238,10 +240,21 @@ void vk_collect_dead(void) {
 
 static void create_image(NvnTexture *t, TexBackend *b) {
     VkFmt mf = fmt_of(t->format);
+    bool depthfmt = renderer_format_is_depth(t->format);
+
+    // Keep render-resolution coordinates for every scalable target, but do not
+    // physically shrink depth/stencil images. Scarlet reuses a 1920x1080 depth
+    // target with offscreen colour targets such as 1280x840. Shrinking that
+    // depth image to 1280x720 made Vulkan clamp the whole mixed pass to 720
+    // lines, cutting the scene and corrupting every post-process fed by it.
+    //
+    // Colour targets still use the selected internal resolution. Full-size
+    // depth retains sx/sy so texel-addressed depth reads/copies follow the same
+    // logical resolution as their scaled colour target.
     b->sx = b->scalable ? g_rs_x : 1;
     b->sy = b->scalable ? g_rs_y : 1;
     uint32_t tw = t->width ? t->width : 1, th = t->height ? t->height : 1;
-    if (b->scalable) {
+    if (b->scalable && !depthfmt) {
         tw = (uint32_t)lroundf(tw * b->sx); th = (uint32_t)lroundf(th * b->sy);
         if (tw < 1) tw = 1;
         if (th < 1) th = 1;
@@ -283,10 +296,12 @@ static void create_image(NvnTexture *t, TexBackend *b) {
             vf = VK_FORMAT_R8G8B8A8_UNORM;
         }
     }
-    bool depthfmt = renderer_format_is_depth(t->format);
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (depthfmt) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    else if (format_supports(vf, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    else {
+        if (format_supports(vf, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if (format_supports(vf, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    }
     VkImageCreateFlags flags = 0;
     if (!depthfmt) flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;  // format views (NVN texture views, raw sRGB views)
     if (type == VK_IMAGE_TYPE_2D && layers >= 6 && tw == th && samples == 1) flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
@@ -301,6 +316,7 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         ci.format = vf = VK_FORMAT_R8G8B8A8_UNORM;
         ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if (format_supports(vf, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
         ci.flags &= ~VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
         depthfmt = false;
@@ -422,6 +438,64 @@ void vk_textures_reset(void) {
 // ================================================================== uploads (same change detection as metal.m)
 static uint64_t full_hash_budget, full_hash_budget_frame;
 
+// CPU texture memory change tracking. Dynamic/linear textures (notably the
+// glyph atlas) must notice writes anywhere in the buffer, so a sparse byte
+// sample is not sufficient. Windows' MEM_WRITE_WATCH tells us whether any
+// backing page was touched; per-page generations preserve that information
+// across overlapping texture ranges even though GetWriteWatch resets OS bits.
+#define TEX_WATCH_PAGE 4096ull
+static uint32_t *tex_page_gen;
+static uint32_t tex_write_gen = 1;
+
+static uint64_t texture_cpu_size(const NvnTexture *t) {
+    if ((t->flags & 0x10) && t->stride)
+        return t->stride * (uint64_t)(t->height ? t->height : 1);
+    return tegra_total_size(&t->layout);
+}
+
+static int texture_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) {
+    if (!size || addr < HEAP_BASE || size > HEAP_MAX || addr - HEAP_BASE > HEAP_MAX - size)
+        return -1;
+
+    uint64_t lo = (addr - HEAP_BASE) & ~(TEX_WATCH_PAGE - 1);
+    uint64_t hi = (addr - HEAP_BASE + size + TEX_WATCH_PAGE - 1) & ~(TEX_WATCH_PAGE - 1);
+    if (hi > HEAP_MAX) hi = HEAP_MAX;
+
+    if (!tex_page_gen) {
+        tex_page_gen = calloc((size_t)(HEAP_MAX / TEX_WATCH_PAGE), sizeof *tex_page_gen);
+        if (!tex_page_gen) return -1;
+    }
+
+    static uint64_t pages[4096];
+    uint64_t page_size = TEX_WATCH_PAGE;
+    int n = plat_written_pages(HEAP_BASE + lo, hi - lo, pages, 4096, &page_size);
+    if (n < 0 || page_size != TEX_WATCH_PAGE) return -1;
+
+    uint32_t gen = ++tex_write_gen;
+    if (!gen) {  // practically unreachable, but keep generation comparisons valid after wrap.
+        memset(tex_page_gen, 0, (size_t)(HEAP_MAX / TEX_WATCH_PAGE) * sizeof *tex_page_gen);
+        gen = tex_write_gen = 1;
+        since = 0;
+    }
+
+    if (n >= 4096) {
+        // The result array filled, so conservatively mark every page in range.
+        for (uint64_t p = lo / TEX_WATCH_PAGE; p < hi / TEX_WATCH_PAGE; p++)
+            tex_page_gen[p] = gen;
+    } else {
+        for (int i = 0; i < n; i++) {
+            uint64_t a = pages[i];
+            if (a < HEAP_BASE || a >= HEAP_BASE + HEAP_MAX) continue;
+            tex_page_gen[(a - HEAP_BASE) / TEX_WATCH_PAGE] = gen;
+        }
+    }
+
+    *now = gen;
+    for (uint64_t p = lo / TEX_WATCH_PAGE; p < hi / TEX_WATCH_PAGE; p++)
+        if (tex_page_gen[p] > since) return 1;
+    return 0;
+}
+
 // Four independent lanes (one serial multiply chain ran at ~1.5 bytes/cycle; dynamic textures are hashed every
 // frame). Values are only compared within a run.
 static uint64_t hash_full(const uint8_t *p, uint64_t n) {
@@ -467,7 +541,7 @@ static void upload_pending(TexBackend *b) {
                 vkCmdCopyBufferToImage(cb, s.buf, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
 }
 
-uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn;
+uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn, prof_tex_watch_skips;
 static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (!t->addr || t->target == 10) return;
     uint64_t frame = vk_frame_counter();
@@ -476,16 +550,57 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     const FormatInfo *fi = t->layout.fmt;
     if (!fi || !fi->bpb) return;
     VkFmt mf = fmt_of(t->format);
-    uint64_t total = tegra_total_size(&t->layout);
+    uint64_t total = texture_cpu_size(t);
     b->checked_frame = frame;
     prof_tex_checks++;
+    // Linear textures are CPU-written caches (font glyph atlas, video, etc.).
+    // They remain "dynamic" so a real write is checked in full; page write-watch
+    // below prevents that flag from forcing a multi-megabyte hash every frame.
     if (t->flags & 0x10) b->dynamic = true;
     if (full_hash_budget_frame != frame) { full_hash_budget_frame = frame; full_hash_budget = 4 << 20; }
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
     static int always_full = -1;
-    if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
+    if (always_full < 0) {
+        const char *e = getenv("LARECOMP_TEX_FULLHASH");
+        always_full = e && atoi(e) != 0;  // "=0" really means off.
+    }
+
     bool full = b->dynamic || !b->uploaded || always_full;
-    if (!full && frame - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
+    bool periodic = frame - b->full_frame >= 120 && full_hash_budget >= total;
+    if (!full && periodic) { full = true; full_hash_budget -= total; }
+
+    // Default-on on hosts that support write-watch. LARECOMP_VK_TEX_WATCH=0
+    // disables it for A/B debugging. A periodic full hash remains as a safety net.
+    static int watch = -1, watch_told;
+    if (watch < 0) {
+        const char *e = getenv("LARECOMP_VK_TEX_WATCH");
+        watch = !e || atoi(e) != 0;
+    }
+    if (watch && !always_full) {
+        uint32_t now = 0;
+        int changed = texture_pages_changed(t->addr, total, b->wgen, &now);
+        if (changed >= 0) {
+            if (!watch_told) {
+                watch_told = 1;
+                LOG("[vk] texture page write-watch enabled\n");
+            }
+            b->wgen = now;
+            if (!changed && b->uploaded) {
+                if (!periodic) {
+                    prof_tex_watch_skips++;
+                    return;
+                }
+                // Dynamic textures did not consume the periodic budget above
+                // because 'full' was already true.
+                if (b->dynamic) full_hash_budget -= total;
+            }
+        } else if (!watch_told) {
+            watch_told = 1;
+            LOG("[vk] texture page write-watch unavailable; using hash fallback\n");
+            watch = 0;
+        }
+    }
+
     if (!full) {
         prof_tex_samples++;
         uint64_t sh = fnv_sample(mem, total);
@@ -604,7 +719,7 @@ static void dirty_check(NvnTexture *t, TexBackend *b) {
     uint64_t now = g_dirty_seq;
     if (b->dirty_seq == now) return;
     if (!b->dirty_seq) { b->dirty_seq = now; return; }  // (new texture: uploaded from memory anyway)
-    uint64_t lo = t->addr, hi = t->addr + tegra_total_size(&t->layout);
+    uint64_t lo = t->addr, hi = t->addr + texture_cpu_size(t);
     pthread_mutex_lock(&dirty_lock);
     for (uint64_t s = now; s > b->dirty_seq && s + DIRTY_RING > now; s--) {
         int i = (int)(s % DIRTY_RING);
@@ -769,6 +884,95 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     if (nlog++ < 30) LOG("[tex] type mismatch: want %d have %d (%ux%ux%u target %u fmt %#x layers %u)\n", want, have, t->width,
                          t->height, t->depth, t->target, t->format, b->layers);
     return vk_dummy_view(want_textype);
+}
+
+static bool storage_float_format(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM:
+    case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SNORM:
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SNORM:
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+    case VK_FORMAT_R16_UNORM: case VK_FORMAT_R16_SNORM: case VK_FORMAT_R16_SFLOAT:
+    case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16_SNORM: case VK_FORMAT_R16G16_SFLOAT:
+    case VK_FORMAT_R16G16B16A16_UNORM: case VK_FORMAT_R16G16B16A16_SNORM: case VK_FORMAT_R16G16B16A16_SFLOAT:
+    case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32B32A32_SFLOAT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool storage_2d_view_params(NvnTexture *t, TexBackend *b, const NvnTextureView *v, bool has_view,
+                                   VkFormat *fmt, uint32_t *level, uint32_t *layer) {
+    if (!t || !b || !b->image || b->samples != 1 || b->aspect != VK_IMAGE_ASPECT_COLOR_BIT) return false;
+    if (b->base_type != VK_IMAGE_VIEW_TYPE_2D && b->base_type != VK_IMAGE_VIEW_TYPE_2D_ARRAY &&
+        b->base_type != VK_IMAGE_VIEW_TYPE_CUBE) return false;
+    if (!has_view) v = NULL;
+    *fmt = b->format;
+    if (v && (v->setmask & 4) && vk_format(t->format) == b->format) *fmt = fmt_of(v->format).vf;
+    *level = v && (v->setmask & 1) ? v->base_level : 0;
+    *layer = v && (v->setmask & 2) ? v->min_layer : 0;
+    if (*level >= b->levels) *level = b->levels ? b->levels - 1 : 0;
+    if (*layer >= b->layers) *layer = b->layers ? b->layers - 1 : 0;
+    return true;
+}
+
+VkImageView vk_storage_write_view(NvnTexture *t, const NvnTextureView *v, bool has_view) {
+    if (!t) return VK_NULL_HANDLE;
+    // Probing descriptors must not turn an incompatible texture into GPU-owned storage. In particular, the
+    // bindless-map builder probes both float and uint views, including images this shader never accesses.
+    TexBackend *b = tex_backend(t);
+    VkFormat fmt;
+    uint32_t lv, ly;
+    if (!storage_2d_view_params(t, b, v, has_view, &fmt, &lv, &ly) ||
+        !storage_float_format(fmt) || !format_supports(fmt, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+        return VK_NULL_HANDLE;
+    VkImageView view = vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, fmt, lv, 1, ly, 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (view) vk_tex(t, false);  // initialize CPU-owned contents before a partial shader write
+    return view;
+}
+
+VkImageView vk_storage_atomic_u32_view(NvnTexture *t, const NvnTextureView *v, bool has_view) {
+    if (!t) return VK_NULL_HANDLE;
+    TexBackend *b = tex_backend(t);
+    VkFormat fmt;
+    uint32_t lv, ly;
+    if (!storage_2d_view_params(t, b, v, has_view, &fmt, &lv, &ly) ||
+        fmt != VK_FORMAT_R32_UINT ||
+        !format_supports(fmt, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT))
+        return VK_NULL_HANDLE;
+    VkImageView view = vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, fmt, lv, 1, ly, 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (view) vk_tex(t, false);  // atomic read/modify/write needs the actual initial value
+    return view;
+}
+
+VkImageView vk_dummy_storage_view(bool atomic_u32) {
+    static TexBackend d[2];
+    static VkImageView view[2];
+    int k = atomic_u32 ? 1 : 0;
+    if (view[k]) return view[k];
+    TexBackend *b = &d[k];
+    VkFormat fmt = atomic_u32 ? VK_FORMAT_R32_UINT : VK_FORMAT_R8G8B8A8_UNORM;
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                            .format = fmt, .extent = {1, 1, 1}, .mipLevels = 1, .arrayLayers = 1,
+                            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
+    b->format = fmt; b->width = b->height = b->depth = b->layers = b->levels = b->samples = 1;
+    b->aspect = VK_IMAGE_ASPECT_COLOR_BIT; b->base_type = VK_IMAGE_VIEW_TYPE_2D;
+    VkCommandBuffer cb = vk_upload_cmd();
+    vk_image_init_layout(cb, b->image, b->aspect);
+    VkClearColorValue zero = {{0, 0, 0, 0}};
+    VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
+    view[k] = vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, fmt, 0, 1, 0, 1,
+                            (VkComponentMapping){VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                 VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY},
+                            VK_IMAGE_ASPECT_COLOR_BIT);
+    return view[k];
 }
 
 // 1x1 black textures for unbound slots, per type

@@ -300,9 +300,9 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         t.cc, t.zig ? " cc" : "", o->jobs);
 
     // 1. the generator, every module at once; their finished files are compiled while it goes on (bases: rt.h)
-    enum { NGEN = 4 };
-    Gen gens[NGEN] = {{.name = "main"}, {.name = "sdk"}, {.name = "subsdk0"}, {.name = "subsdk1"}};
-    static const char *const base[NGEN] = {"0x7000000000", "0x7004000000", "0x7006000000", "0x7008000000"};
+    enum { NGEN = 3 };
+    Gen gens[NGEN] = {{.name = "main"}, {.name = "sdk"}, {.name = "subsdk0"}};
+    static const char *const base[NGEN] = {"0x7000000000", "0x7006000000", "0x7008000000"};
     bool ok = true;
     for (int i = 0; i < NGEN && ok; i++) {
         Gen *g = &gens[i];
@@ -318,6 +318,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         add(&a, nso);
         add(&a, base[i]);
         add(&a, g->out);
+        if (i == 0 || i == 1) add(&a, "--indirect-resume");  // main and SDK switch targets
         if (i == 1) { add(&a, "--hle"); add(&a, t.hle); }
         g->p = spawn(a.v, g->log);
         args_free(&a);
@@ -488,3 +489,4 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     if (ok && o->progress) o->progress(1, "Finishing...");
     return ok;
 }
+

@@ -21,6 +21,7 @@
 
 void vk_device_fault_report(void);
 void vk_pipeline_cache_save(void);  // cache/vk_pipelines.bin (any thread)
+bool vk_builds_pending(void);       // exit must not wait for a cache locked by an active driver compile
 #define VK_CHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { if (r_ == VK_ERROR_DEVICE_LOST) vk_device_fault_report(); \
     FATAL("%s failed: %d (%s:%d)\n", #x, r_, __FILE__, __LINE__); } } while (0)
 
@@ -36,6 +37,8 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import;
+    bool bindless_storage;    // dynamic/non-uniform storage-image descriptor indexing
+    uint8_t bindless_storage_slots; // slots per write/atomic array, <= MAXWELL_BINDLESS_IMAGES
     // window
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;
@@ -75,6 +78,7 @@ typedef struct TexBackend {
     VkImageAspectFlags aspect;
     bool gpu_owned, uploaded, dynamic;
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
+    uint32_t wgen;  // guest-page write-watch generation at the last texture upload check
     bool scalable, presented;
     uint64_t touched_frame, frame_cleared;
     uint32_t level_gen;
@@ -95,6 +99,10 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
 VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uint32_t lv0, uint32_t nlv, uint32_t ly0,
                           uint32_t nly, VkComponentMapping sw, VkImageAspectFlags aspect);
 VkImageView vk_dummy_view(int textype);
+// Storage-image views used by Maxwell SUST/SURED. NULL means this texture/format is not safe for that operation.
+VkImageView vk_storage_write_view(NvnTexture *t, const NvnTextureView *v, bool has_view);
+VkImageView vk_storage_atomic_u32_view(NvnTexture *t, const NvnTextureView *v, bool has_view);
+VkImageView vk_dummy_storage_view(bool atomic_u32);
 VkSampler vk_sampler(NvnSamplerDesc *d);
 VkSampler vk_default_sampler(bool linear);
 void vk_image_init_layout(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect);

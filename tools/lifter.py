@@ -397,7 +397,47 @@ class Lifter:
         nbits = 8 << size
         addr = XS(rn)
         if o1:
-            raise Unsupported('exclusive pair / CAS')
+            # Pair-exclusive (LDXP/LDAXP/STXP/STLXP), CASP, or scalar CAS.
+            #
+            # Pair-exclusive uses size=2/3 (W/X elements) and o2=0. CASP uses
+            # size=0/1 (W/X register pairs), o2=0 and Rt2=31. Scalar CAS uses
+            # o2=1, with size selecting byte/half/word/dword.
+            if o2 == 0 and size >= 2:
+                sf = 1 if size == 3 else 0
+                pairbits = 64 if sf else 32
+                if L:
+                    tmp_t = '__uint128_t' if sf else 'uint64_t'
+                    lo = '(uint64_t)p' if sf else '(uint32_t)p'
+                    hi = '(uint64_t)(p >> 64)' if sf else '(uint32_t)(p >> 32)'
+                    return Insn('op',
+                                f'{{ {tmp_t} p = ldxp_pair{pairbits}(c, {addr}); '
+                                f'{set_reg(sf, rt, lo)} {set_reg(sf, bits(w, 10, 5), hi)} }}')
+                rt2 = bits(w, 10, 5)
+                return Insn('op',
+                            f'{{ uint32_t st = stxp_pair{pairbits}(c, {addr}, {R(sf, rt)}, {R(sf, rt2)}); '
+                            f'{set_reg(0, rs, "st")} }}')
+
+            if o2 == 0 and size < 2:  # CASP: register pairs are consecutive.
+                if bits(w, 10, 5) != 31 or rs == 31 or rt == 31:
+                    raise Unsupported('CASP reserved registers')
+                rs2, rt2 = rs + 1, rt + 1
+                sf = 1 if size == 1 else 0
+                pairbits = 64 if sf else 32
+                tmp_t = '__uint128_t' if sf else 'uint64_t'
+                lo = '(uint64_t)p' if sf else '(uint32_t)p'
+                hi = '(uint64_t)(p >> 64)' if sf else '(uint32_t)(p >> 32)'
+                return Insn('op',
+                            f'{{ {tmp_t} p = casp_pair{pairbits}({addr}, {R(sf, rs)}, {R(sf, rs2)}, '
+                            f'{R(sf, rt)}, {R(sf, rt2)}); '
+                            f'{set_reg(sf, rs, lo)} {set_reg(sf, rs2, hi)} }}')
+
+            if o2 == 1:  # CAS/CASA/CASL/CASAL. Stronger SEQ_CST ordering is safe.
+                if bits(w, 10, 5) != 31:
+                    raise Unsupported('CAS Rt2')
+                sf = 1 if size == 3 else 0
+                return Insn('op', set_reg(sf, rs, f'cas{nbits}({addr}, {R(sf, rs)}, {R(sf, rt)})'))
+
+            raise Unsupported('exclusive pair / CAS variant')
         if o2 == 0:
             if L:
                 return Insn('op', set_reg(1, rt, f'ldx{nbits}(c, {addr})'))

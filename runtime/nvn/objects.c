@@ -8,6 +8,7 @@
 void renderer_sync(void);
 
 static uint64_t next_debug_id = 1;
+NvnDescPool *g_texture_pools[64], *g_sampler_pools[64];
 
 // ================================================================== device
 // NVNdeviceInfo -> value
@@ -36,7 +37,14 @@ NVN(nvnDeviceBuilderSetFlags) { G(uint32_t, A(0), 0) = (uint32_t)A(1); }
 NVN(nvnDeviceBuilderGetFlags) { RET(G(uint32_t, A(0), 0)); }
 NVN(nvnDeviceInitialize) {
     static bool once;
-    if (!once) { once = true; backend_init(); }
+    if (!once) {
+        once = true;
+        backend_init();
+        extern uint64_t g_boot_started_ns;
+        uint64_t now = plat_now_ns();
+        LOG("[boot-time] Vulkan/NVN device ready after %.3f s\n",
+            g_boot_started_ns ? (double)(now - g_boot_started_ns) / 1e9 : 0.0);
+    }
     LOG("[nvn] device initialized\n");
     RET(1);
 }
@@ -113,7 +121,22 @@ NVN(nvnQueueResetMemoryUsageCounts) { (void)c; }
 NVN(nvnQueueSubmitCommands) {
     int n = (int)A(1);
     const uint64_t *handles = AP(2);
-    for (int i = 0; i < n; i++) backend_execute(handles[i]);
+    if (n <= 0 || !handles) return;
+
+    // Pin the complete submit batch before executing the first list. Scarlet
+    // records command buffers on worker threads; another worker may hand the
+    // same guest command-memory range back to NVN while this submit is still
+    // walking later handles. On real NVN the submit consumes a stable command
+    // stream. Keep our expanded host records equally stable for the whole batch.
+    uint64_t stack_resolved[256];
+    uint64_t *resolved = n <= 256 ? stack_resolved : malloc((size_t)n * sizeof *resolved);
+    if (!resolved) FATAL("nvn: failed to pin %d submitted command lists\n", n);
+
+    for (int i = 0; i < n; i++) resolved[i] = nvn_cmdstream_pin(handles[i]);
+    for (int i = 0; i < n; i++) backend_execute(resolved[i]);
+    for (int i = n - 1; i >= 0; i--) nvn_cmdstream_unpin(handles[i]);
+
+    if (resolved != stack_resolved) free(resolved);
 }
 NVN(nvnQueueFlush) { (void)c; }
 NVN(nvnQueueFinish) { (void)c; renderer_sync(); }
@@ -364,10 +387,25 @@ NVN(nvnTextureInitialize) {
     SET_HOST(A(0), t);
     RET(1);
 }
+static void forget_texture_descriptors(NvnTexture *texture) {
+    for (int p = 0; p < 64; p++) {
+        NvnDescPool *pool = g_texture_pools[p];
+        if (!pool) continue;
+        NvnTexEntry *entries = pool->entries;
+        bool changed = false;
+        for (int i = 0; i < pool->count; i++) {
+            if (entries[i].tex != texture) continue;
+            memset(&entries[i], 0, sizeof entries[i]);
+            changed = true;
+        }
+        if (changed) pool->generation++;  // rebuild the immutable surface map before it can use a freed texture
+    }
+}
+
 NVN(nvnTextureFinalize) {
     g_nvn_destroyed++;
     NvnTexture *t = HOST(NvnTexture, A(0));
-    if (t) { backend_texture_destroyed(t); free(t); }
+    if (t) { forget_texture_descriptors(t); backend_texture_destroyed(t); free(t); }
     SET_HOST(A(0), 0);
 }
 NVN(nvnTextureSetDebugLabel) {
@@ -389,7 +427,18 @@ NVN(nvnTextureGetStride) { RET(TEX->stride); }
 NVN(nvnTextureGetTextureAddress) { RET(TEX->addr); }
 NVN(nvnTextureGetMemoryPool) { RET(0); }
 NVN(nvnTextureGetMemoryOffset) { RET(TEX->pool_offset); }
-NVN(nvnTextureGetStorageSize) { RET(tegra_total_size(&TEX->layout)); }
+static uint64_t texture_storage_size(const NvnTexture *t) {
+    if (t->target == 10) {
+        const FormatInfo *fi = t->layout.fmt;
+        return fi ? (uint64_t)t->width * fi->bpb : 0;
+    }
+    // Linear NVN textures are pitched surfaces. Mirror TextureBuilderGetStorageSize:
+    // using the block-linear size here breaks mapped/dirty ranges for CPU-updated
+    // atlases whose pitch is larger than the tight row size.
+    if (t->flags & 0x10) return t->stride * t->height;
+    return tegra_total_size(&t->layout);
+}
+NVN(nvnTextureGetStorageSize) { RET(texture_storage_size(TEX)); }
 NVN(nvnTextureGetDebugID) { RET(TEX->debug_id); }
 NVN(nvnTextureGetViewOffset) { RET(0); }
 NVN(nvnTextureGetStorageClass) { RET(0); }
@@ -397,7 +446,12 @@ NVN(nvnTextureGetRawStorageClass) { RET(0); }
 NVN(nvnTextureGetSparseTileLayout) { RET(0); }
 NVN(nvnTextureGetZCullStorageSize) { RET(0); }
 NVN(nvnTextureCompare) { RET(A(0) == A(1)); }
-NVN(nvnTextureFlushTexels) { (void)c; }
+NVN(nvnTextureFlushTexels) {
+    // CPU writes to mapped texture storage become visible to the Vulkan copy
+    // path on the next sample. The guest API has no explicit range here.
+    NvnTexture *t = TEX;
+    if (t && t->addr) backend_pool_written(t->addr, texture_storage_size(t));
+}
 NVN(nvnTextureInvalidateTexels) { (void)c; }
 
 // Texture views (our layout of the 0x28-byte guest struct)
@@ -421,30 +475,116 @@ NVN(nvnTextureViewGetDepthStencilMode) { NvnTextureView *v = AP(0); *(uint32_t *
 NVN(nvnTextureViewGetTarget) { NvnTextureView *v = AP(0); *(uint32_t *)AP(1) = v->target; RET(!!(v->setmask & 32)); }
 NVN(nvnTextureViewCompare) { RET(memcmp(AP(0), AP(1), 0x1C) == 0); }
 
-NVN(nvnTextureWriteTexels) {
-    // (texture, view, region, data) -- linear data into block-linear storage
-    NvnTexture *t = HOST(NvnTexture, A(0));
-    const int32_t *r = AP(2);  // xoffset, yoffset, zoffset, width, height, depth
-    LevelLayout l = tegra_level(&t->layout, 0);
-    if (r && r[0] == 0 && r[1] == 0 && (uint32_t)r[3] == t->width && (uint32_t)r[4] == t->height) {
-        tegra_swizzle(AP(3), (uint8_t *)(uintptr_t)t->addr + l.offset, l.wb, l.hb, r[5] > 0 ? (uint32_t)r[5] : 1,
-                      t->layout.fmt->bpb, l.block_height_log2, l.block_depth_log2);
-        backend_pool_written(t->addr, tegra_total_size(&t->layout));
-    } else {
-        LOG("[nvn] partial WriteTexels not implemented\n");
+// Write CPU-linear texels into a linear NVN texture. This is the path used
+// by dynamic UI/font atlases: destination rows are separated by texture stride,
+// while WriteTexelsStrided can also provide a pitched source.
+static bool texture_write_linear(NvnTexture *t, const NvnTextureView *v, const int32_t *r,
+                                 const uint8_t *src, uint64_t src_row_stride, uint64_t src_image_stride) {
+    if (!t || !r || !src || !(t->flags & 0x10) || !t->addr || !t->layout.fmt) return false;
+
+    uint32_t level = v && (v->setmask & 1) ? v->base_level : 0;
+    // Linear mipmapped layouts need a per-level pitch/base address that NVN
+    // does not expose through this object. Scarlet's dynamic atlases are level 0.
+    if (level != 0) return false;
+
+    const FormatInfo *fi = t->layout.fmt;
+    int32_t x = r[0], y = r[1], z = r[2];
+    int32_t w = r[3], h = r[4], d = r[5] > 0 ? r[5] : 1;
+    if (x < 0 || y < 0 || z < 0 || w <= 0 || h <= 0 || d <= 0) return false;
+    if ((uint64_t)x + (uint32_t)w > t->width || (uint64_t)y + (uint32_t)h > t->height) return false;
+
+    // Work in format blocks. Compressed formats require block-aligned regions,
+    // except that the right/bottom edge may terminate on the texture edge.
+    if ((x % fi->bw) || (y % fi->bh)) return false;
+    uint32_t xb = (uint32_t)x / fi->bw, yb = (uint32_t)y / fi->bh;
+    uint32_t wb = ((uint32_t)w + fi->bw - 1) / fi->bw;
+    uint32_t hb = ((uint32_t)h + fi->bh - 1) / fi->bh;
+    uint64_t row_bytes = (uint64_t)wb * fi->bpb;
+    if (!src_row_stride) src_row_stride = row_bytes;
+    if (!src_image_stride) src_image_stride = src_row_stride * hb;
+
+    uint32_t full_hb = (t->height + fi->bh - 1) / fi->bh;
+    uint64_t dst_image_stride = t->stride * full_hb;
+    uint8_t *dst = (uint8_t *)(uintptr_t)t->addr;
+    uint64_t first = UINT64_MAX, last = 0;
+
+    for (int32_t zz = 0; zz < d; zz++) {
+        for (uint32_t yy = 0; yy < hb; yy++) {
+            uint64_t doff = ((uint64_t)(z + zz) * dst_image_stride) +
+                            ((uint64_t)yb + yy) * t->stride +
+                            (uint64_t)xb * fi->bpb;
+            memcpy(dst + doff, src + (uint64_t)zz * src_image_stride + (uint64_t)yy * src_row_stride,
+                   (size_t)row_bytes);
+            if (doff < first) first = doff;
+            if (doff + row_bytes > last) last = doff + row_bytes;
+        }
     }
+    if (first != UINT64_MAX) backend_pool_written(t->addr + first, last - first);
+    return true;
 }
-NVN(nvnTextureWriteTexelsStrided) { LOG("[nvn] WriteTexelsStrided not implemented\n"); (void)c; }
+
+static void texture_write_texels(Cpu *c, bool strided) {
+    NvnTexture *t = HOST(NvnTexture, A(0));
+    const NvnTextureView *v = A(1) ? (const NvnTextureView *)AP(1) : NULL;
+    const int32_t *r = AP(2);  // xoffset, yoffset, zoffset, width, height, depth
+    const uint8_t *src = AP(3);
+    if (!t || !r || !src || !t->layout.fmt) return;
+
+    uint64_t row_stride = strided ? A(4) : 0;
+    uint64_t image_stride = strided ? A(5) : 0;
+    if (texture_write_linear(t, v, r, src, row_stride, image_stride)) return;
+
+    // Existing block-linear fast path for a complete level-0 image.
+    uint32_t level = v && (v->setmask & 1) ? v->base_level : 0;
+    LevelLayout l = tegra_level(&t->layout, level);
+    if (!(t->flags & 0x10) && level == 0 && r[0] == 0 && r[1] == 0 &&
+        (uint32_t)r[3] == t->width && (uint32_t)r[4] == t->height && !strided) {
+        tegra_swizzle(src, (uint8_t *)(uintptr_t)t->addr + l.offset, l.wb, l.hb,
+                      r[5] > 0 ? (uint32_t)r[5] : 1, t->layout.fmt->bpb,
+                      l.block_height_log2, l.block_depth_log2);
+        backend_pool_written(t->addr, tegra_total_size(&t->layout));
+        return;
+    }
+
+    static int warned;
+    if (warned++ < 8)
+        LOG("[nvn] WriteTexels: unsupported block-linear partial/strided region level=%u %d,%d %dx%d\n",
+            level, r[0], r[1], r[3], r[4]);
+}
+
+NVN(nvnTextureWriteTexels) { texture_write_texels(c, false); }
+NVN(nvnTextureWriteTexelsStrided) { texture_write_texels(c, true); }
 NVN(nvnTextureReadTexels) { LOG("[nvn] ReadTexels not implemented\n"); (void)c; }
 NVN(nvnTextureReadTexelsStrided) { (void)c; }
 
 // ================================================================== samplers
-// SamplerBuilder: device@0 then an NvnSamplerDesc at 8
-#define SD ((NvnSamplerDesc *)(AP(0) + 8))
+// Scarlet places a 0x40-byte builder immediately before saved X29/LR.
+// NvnSamplerDesc is a larger host/backend object: embedding it here overwrites
+// the guest stack. Keep small enum values packed and convert at the boundary.
+typedef struct {
+    uint64_t device;
+    uint8_t min_filter, mag_filter, wrap[3], compare_mode, compare_func, reduction;
+    float lod_min, lod_max, lod_bias, max_aniso;
+    float border[4];
+    uint8_t reserved[16];
+} NvnSamplerBuilder;
+_Static_assert(sizeof(NvnSamplerBuilder) == 0x40, "guest sampler builder size");
+
+static NvnSamplerDesc sampler_desc(const NvnSamplerBuilder *b) {
+    NvnSamplerDesc d = {0};  // backend cache belongs only to the host object
+    d.min_filter = b->min_filter; d.mag_filter = b->mag_filter;
+    for (int i = 0; i < 3; i++) d.wrap[i] = b->wrap[i];
+    d.compare_mode = b->compare_mode; d.compare_func = b->compare_func; d.reduction = b->reduction;
+    d.lod_min = b->lod_min; d.lod_max = b->lod_max; d.lod_bias = b->lod_bias; d.max_aniso = b->max_aniso;
+    memcpy(d.border, b->border, sizeof d.border);
+    return d;
+}
+
+#define SD ((NvnSamplerBuilder *)AP(0))
 NVN(nvnSamplerBuilderSetDevice) { G(uint64_t, A(0), 0) = A(1); }
 NVN(nvnSamplerBuilderSetDefaults) {
-    NvnSamplerDesc *d = SD;
-    memset(d, 0, sizeof *d);
+    NvnSamplerBuilder *d = SD;
+    memset((uint8_t *)d + sizeof d->device, 0, sizeof *d - sizeof d->device);
     d->min_filter = 0; d->mag_filter = 0;
     d->wrap[0] = d->wrap[1] = d->wrap[2] = 1;  // REPEAT
     d->lod_min = 0; d->lod_max = 1000.0f; d->max_aniso = 1.0f;
@@ -476,7 +616,7 @@ NVN(nvnSamplerBuilderGetLodSnap) { RETF(0); }
 
 NVN(nvnSamplerInitialize) {
     NvnSamplerDesc *d = malloc(sizeof *d);
-    *d = *(NvnSamplerDesc *)(AP(1) + 8);
+    *d = sampler_desc((const NvnSamplerBuilder *)AP(1));
     SET_HOST(A(0), d);
     RET(1);
 }
@@ -497,7 +637,6 @@ NVN(nvnSamplerCompare) { RET(memcmp(HOST(NvnSamplerDesc, A(0)), HOST(NvnSamplerD
 NVN(nvnSamplerGetDebugID) { RET(A(0)); }
 
 // ================================================================== descriptor pools
-NvnDescPool *g_texture_pools[64], *g_sampler_pools[64];
 RT_ON_RESET(desc_pools_reset) { memset(g_texture_pools, 0, sizeof g_texture_pools); memset(g_sampler_pools, 0, sizeof g_sampler_pools); }
 
 static NvnDescPool *desc_pool_init(uint64_t guest, uint64_t pool, uint64_t off, int count, size_t entry, NvnDescPool **reg) {
@@ -514,7 +653,9 @@ static NvnDescPool *desc_pool_init(uint64_t guest, uint64_t pool, uint64_t off, 
 }
 
 NVN(nvnTexturePoolInitialize) {
-    desc_pool_init(A(0), A(1), A(2), (int)A(3), sizeof(NvnTexEntry), g_texture_pools);
+    NvnDescPool *d = desc_pool_init(A(0), A(1), A(2), (int)A(3), sizeof(NvnTexEntry), g_texture_pools);
+    static unsigned nlog;
+    if (nlog++ < 8) LOG("[nvn] texture pool: %d descriptors\n", d->count);
     RET(1);
 }
 NVN(nvnTexturePoolFinalize) { (void)c; }
@@ -522,17 +663,19 @@ NVN(nvnTexturePoolSetDebugLabel) { (void)c; }
 NVN(nvnTexturePoolGetMemoryPool) { RET(G(uint64_t, A(0), 8)); }
 NVN(nvnTexturePoolGetMemoryOffset) { RET(G(uint64_t, A(0), 16)); }
 NVN(nvnTexturePoolGetSize) { RET(G(uint32_t, A(0), 24)); }
-static void register_texture(Cpu *c) {
+static void register_texture(Cpu *c, bool image) {
     NvnDescPool *d = HOST(NvnDescPool, A(0));
     int id = (int)A(1);
     if (id < 0 || id >= d->count) return;
     NvnTexEntry *e = &((NvnTexEntry *)d->entries)[id];
     e->tex = HOST(NvnTexture, A(2));
     e->has_view = A(3) != 0;
+    e->is_image = image;
+    e->image_seq = ++d->generation;
     if (e->has_view) memcpy(&e->view, AP(3), sizeof e->view);
 }
-NVN(nvnTexturePoolRegisterTexture) { register_texture(c); }
-NVN(nvnTexturePoolRegisterImage) { register_texture(c); }
+NVN(nvnTexturePoolRegisterTexture) { register_texture(c, false); }
+NVN(nvnTexturePoolRegisterImage) { register_texture(c, true); }
 
 NVN(nvnSamplerPoolInitialize) {
     desc_pool_init(A(0), A(1), A(2), (int)A(3), sizeof(NvnSamplerDesc), g_sampler_pools);
@@ -551,7 +694,7 @@ NVN(nvnSamplerPoolRegisterSampler) {
 NVN(nvnSamplerPoolRegisterSamplerBuilder) {
     NvnDescPool *d = HOST(NvnDescPool, A(0));
     int id = (int)A(1);
-    if (id >= 0 && id < d->count) ((NvnSamplerDesc *)d->entries)[id] = *(NvnSamplerDesc *)(AP(2) + 8);
+    if (id >= 0 && id < d->count) ((NvnSamplerDesc *)d->entries)[id] = sampler_desc((const NvnSamplerBuilder *)AP(2));
 }
 
 NvnDescPool *nvn_find_pool(NvnDescPool **reg, uint64_t guest_pool) {
@@ -678,8 +821,34 @@ static void present_pace(int interval) {
 static int g_last_interval;
 int rt_present_interval(void) { return g_last_interval; }
 NVN(nvnQueuePresentTexture) {
+    static bool first_present;
+    if (!first_present) {
+        first_present = true;
+        extern uint64_t g_boot_started_ns;
+        uint64_t now = plat_now_ns();
+        LOG("[boot-time] first present after %.3f s\n",
+            g_boot_started_ns ? (double)(now - g_boot_started_ns) / 1e9 : 0.0);
+    }
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
+    if (w && i >= 0 && i < w->num) {
+        static struct { NvnWindow *window; NvnTexture *texture; int index; uint32_t width, height, format; } seen[16];
+        static unsigned next_seen;
+        NvnTexture *pt = HOST(NvnTexture, w->textures[i]);
+        bool known = false;
+        for (int n = 0; n < 16; n++)
+            if (seen[n].window == w && seen[n].texture == pt && seen[n].index == i &&
+                seen[n].width == (pt ? pt->width : 0) && seen[n].height == (pt ? pt->height : 0) &&
+                seen[n].format == (pt ? pt->format : 0)) known = true;
+        if (!known || getenv("LARECOMP_TRACE_PRESENT")) {
+            LOG("[present] window texture %d/%d -> %p (%ux%u fmt %#x)\n",
+                i, w->num, (void *)pt,
+                pt ? pt->width : 0, pt ? pt->height : 0, pt ? pt->format : 0);
+            unsigned n = next_seen++ % 16;
+            seen[n].window = w; seen[n].texture = pt; seen[n].index = i;
+            seen[n].width = pt ? pt->width : 0; seen[n].height = pt ? pt->height : 0; seen[n].format = pt ? pt->format : 0;
+        }
+    }
     {   // LARECOMP_POKE32="<guest addr>=<value>[;...]": 32-bit values written to the game's memory before every present
         static const char *poke = (const char *)1;  // (experiments: a constant the game reads, without rebuilding anything)
         if (poke == (const char *)1) poke = getenv("LARECOMP_POKE32");

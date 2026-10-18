@@ -135,29 +135,328 @@ HLE_FUNC("_ZN2nn4lmem21AllocateFromFrameHeapEPNS0_6detail8HeapHeadEmi", heap_all
     if (!c->x[0]) fail_once("frame heap allocation", lr, size);
 }
 
-// nn::mem::StandardAllocator::Initialize(void *addr, size_t size[, bool])
+// nn::mem::StandardAllocator
+//
+// Scarlet initializes its allocator with addr == NULL and a 0x300000000-byte
+// virtual arena. The Nintendo SDK implementation expects console virtual-memory
+// plumbing that this host runtime does not expose yet and aborts during boot.
+// Recompiled code can directly dereference host pointers, so use a host-backed
+// allocator here. This is also the strategy used by other native Switch
+// recompilation projects and gets the boot past the SDK allocator without
+// committing the advertised 12 GiB arena.
+
+typedef struct StdAllocRec {
+    uint64_t addr;
+    uint64_t size;
+    uint64_t align;
+    // all-list is only for reset; hash chain is the hot lookup path.
+    struct StdAllocRec *next, *prev, *hnext;
+} StdAllocRec;
+
+typedef struct StdFreeRec {
+    uint64_t addr;
+    uint64_t size;
+    struct StdFreeRec *next;
+} StdFreeRec;
+
+static StdAllocRec *g_std_recs;
+#define STD_REC_HASH (1u << 17)
+static StdAllocRec *g_std_hash[STD_REC_HASH];
+
+#define STD_FREE_BINS 32
+static StdFreeRec *g_std_free_bins[STD_FREE_BINS];
+static uint64_t g_std_free_bytes;
+static pthread_mutex_t g_std_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static inline uint32_t std_rec_hash(uint64_t addr) {
+    return (uint32_t)(((addr >> 4) * 11400714819323198485ull) >> (64 - 17));
+}
+
+static void std_rec_insert_locked(StdAllocRec *r) {
+    r->prev = NULL;
+    r->next = g_std_recs;
+    if (g_std_recs) g_std_recs->prev = r;
+    g_std_recs = r;
+
+    uint32_t h = std_rec_hash(r->addr);
+    r->hnext = g_std_hash[h];
+    g_std_hash[h] = r;
+}
+
+static StdAllocRec *std_rec_find_locked(uint64_t addr) {
+    for (StdAllocRec *r = g_std_hash[std_rec_hash(addr)]; r; r = r->hnext)
+        if (r->addr == addr) return r;
+    return NULL;
+}
+
+static void std_rec_remove_locked(StdAllocRec *r) {
+    if (r->prev) r->prev->next = r->next;
+    else g_std_recs = r->next;
+    if (r->next) r->next->prev = r->prev;
+
+    uint32_t h = std_rec_hash(r->addr);
+    StdAllocRec **pp = &g_std_hash[h];
+    while (*pp && *pp != r) pp = &(*pp)->hnext;
+    if (*pp) *pp = r->hnext;
+}
+static uint64_t g_std_declared_size = 0x10000000ull;
+static uint64_t g_std_live_bytes;
+
+// Keep StandardAllocator pointers inside Horizon's 39-bit guest address space.
+// Use the runtime's canonical application heap range: it is directly encodable
+// in HIPC descriptors and provides up to 3.25 GiB without host-pointer truncation.
+#define STD_GUEST_BASE HEAP_BASE
+#define STD_GUEST_LIMIT (HEAP_BASE + HEAP_MAX)
+// Commit ahead in 16 MiB slabs. This keeps Windows out of the per-allocation
+// hot path while guaranteeing that every pointer returned to lifted guest code
+// is writable immediately. Freed/reused spans are already below this frontier.
+#define STD_COMMIT_GRANULE 0x01000000ull
+static uint64_t g_std_next = STD_GUEST_BASE;
+static uint64_t g_std_committed_to = STD_GUEST_BASE;
+
+static uint64_t std_align(uint64_t a) {
+    if (a < 16) a = 16;
+    if (a & (a - 1)) {
+        uint64_t p = 16;
+        while (p < a && p < (1ull << 62)) p <<= 1;
+        a = p;
+    }
+    return a;
+}
+
+static uint64_t align_up_u64(uint64_t v, uint64_t a) {
+    return (v + a - 1) & ~(a - 1);
+}
+
+static int std_free_bin(uint64_t size) {
+    if (size <= 16) return 0;
+    uint64_t v = size - 1;
+    int lg = 0;
+    while (v >>= 1) lg++;
+    int b = lg - 3;  // (16,32] -> 1, (32,64] -> 2, ...
+    if (b < 0) b = 0;
+    if (b >= STD_FREE_BINS) b = STD_FREE_BINS - 1;
+    return b;
+}
+
+static void std_free_insert_locked(uint64_t addr, uint64_t size) {
+    if (!size) return;
+    StdFreeRec *n = malloc(sizeof *n);
+    if (!n) return;
+    n->addr = addr;
+    n->size = size;
+    int b = std_free_bin(size);
+    n->next = g_std_free_bins[b];
+    g_std_free_bins[b] = n;
+    g_std_free_bytes += size;
+}
+
+static uint64_t std_guest_alloc(uint64_t size, uint64_t align) {
+    if (!size) size = 1;
+    align = std_align(align);
+
+    pthread_mutex_lock(&g_std_lock);
+
+    uint64_t addr = 0;
+    // Segregated free lists keep the common allocate/free path O(1)-ish even
+    // after the open world has churned through thousands of objects. Search
+    // only bins that can contain the requested size; alignment is checked per span.
+    int first_bin = std_free_bin(size);
+    for (int b = first_bin; b < STD_FREE_BINS && !addr; b++) {
+        StdFreeRec **pp = &g_std_free_bins[b];
+        while (*pp) {
+            StdFreeRec *f = *pp;
+            uint64_t a = align_up_u64(f->addr, align);
+            uint64_t prefix = a - f->addr;
+            if (prefix <= f->size && size <= f->size - prefix) {
+                uint64_t old_size = f->size;
+                uint64_t old_end = f->addr + f->size;
+                *pp = f->next;
+                free(f);
+                if (g_std_free_bytes >= old_size) g_std_free_bytes -= old_size;
+
+                uint64_t suffix_addr = a + size;
+                uint64_t suffix = old_end - suffix_addr;
+                if (prefix) std_free_insert_locked(a - prefix, prefix);
+                if (suffix) std_free_insert_locked(suffix_addr, suffix);
+                addr = a;
+                break;
+            }
+            pp = &(*pp)->next;
+        }
+    }
+
+    if (!addr) {
+        uint64_t a = align_up_u64(g_std_next, align);
+        if (a < STD_GUEST_BASE || a > STD_GUEST_LIMIT || size > STD_GUEST_LIMIT - a) {
+            pthread_mutex_unlock(&g_std_lock);
+            return 0;
+        }
+        addr = a;
+        g_std_next = a + size;
+    }
+
+    StdAllocRec *r = malloc(sizeof *r);
+    if (!r) {
+        std_free_insert_locked(addr, size);
+        pthread_mutex_unlock(&g_std_lock);
+        return 0;
+    }
+    r->addr = addr;
+    r->size = size;
+    r->align = align;
+    std_rec_insert_locked(r);
+    g_std_live_bytes += size;
+
+    // Never return an uncommitted guest pointer. The previous pure lazy-commit
+    // path could miss a lifted-code write before the Windows handler serviced it
+    // (Scarlet crashed constructing an object at returned_ptr + 0x10).
+    //
+    // Do this while holding g_std_lock: another guest thread must not observe an
+    // advanced commit frontier until VirtualAlloc has actually completed.
+    uint64_t end = addr + size;
+    if (end > g_std_committed_to) {
+        uint64_t want = align_up_u64(end, STD_COMMIT_GRANULE);
+        if (want > STD_GUEST_LIMIT) want = STD_GUEST_LIMIT;
+        if (want > g_std_committed_to) {
+            plat_commit(g_std_committed_to, want - g_std_committed_to);
+            g_std_committed_to = want;
+        }
+    }
+    pthread_mutex_unlock(&g_std_lock);
+    return addr;
+}
+
+static void std_guest_free(uint64_t addr) {
+    if (!addr) return;
+    pthread_mutex_lock(&g_std_lock);
+    StdAllocRec *r = std_rec_find_locked(addr);
+    if (!r) {
+        pthread_mutex_unlock(&g_std_lock);
+        LOG("[heaps] StandardAllocator::Free unknown guest pointer %#llx (ignored)\n",
+            (unsigned long long)addr);
+        return;
+    }
+    std_rec_remove_locked(r);
+    if (g_std_live_bytes >= r->size) g_std_live_bytes -= r->size;
+    std_free_insert_locked(r->addr, r->size);
+    pthread_mutex_unlock(&g_std_lock);
+    free(r);
+}
+
+static uint64_t std_guest_realloc(uint64_t addr, uint64_t size) {
+    if (!addr) return std_guest_alloc(size, 16);
+    if (!size) size = 1;
+
+    uint64_t old_size = 0, align = 16;
+    pthread_mutex_lock(&g_std_lock);
+    StdAllocRec *r = std_rec_find_locked(addr);
+    if (r) {
+        old_size = r->size;
+        align = r->align;
+    }
+    pthread_mutex_unlock(&g_std_lock);
+    if (!r) return 0;
+
+    uint64_t n = std_guest_alloc(size, align);
+    if (!n) return 0;
+    memcpy((void *)(uintptr_t)n, (void *)(uintptr_t)addr,
+           (size_t)(old_size < size ? old_size : size));
+    std_guest_free(addr);
+    return n;
+}
+
+static uint64_t std_guest_size(uint64_t addr) {
+    uint64_t size = 0;
+    pthread_mutex_lock(&g_std_lock);
+    StdAllocRec *r = std_rec_find_locked(addr);
+    if (r) size = r->size;
+    pthread_mutex_unlock(&g_std_lock);
+    return size;
+}
+
+RT_ON_RESET(stdalloc_reset) {
+    pthread_mutex_lock(&g_std_lock);
+    StdAllocRec *r = g_std_recs;
+    StdFreeRec *free_bins[STD_FREE_BINS];
+    memcpy(free_bins, g_std_free_bins, sizeof free_bins);
+    g_std_recs = NULL;
+    memset(g_std_hash, 0, sizeof g_std_hash);
+    memset(g_std_free_bins, 0, sizeof g_std_free_bins);
+    g_std_free_bytes = 0;
+    g_std_live_bytes = 0;
+    g_std_declared_size = 0x10000000ull;
+    g_std_next = STD_GUEST_BASE;
+    g_std_committed_to = STD_GUEST_BASE;
+    pthread_mutex_unlock(&g_std_lock);
+    while (r) {
+        StdAllocRec *n = r->next;
+        free(r);
+        r = n;
+    }
+    for (int b = 0; b < STD_FREE_BINS; b++) {
+        StdFreeRec *f = free_bins[b];
+        while (f) {
+            StdFreeRec *n = f->next;
+            free(f);
+            f = n;
+        }
+    }
+}
+
+static void std_init_common(Cpu *c, bool cached) {
+    g_std_declared_size = c->x[2] ? c->x[2] : 0x10000000ull;
+    LOG("[heaps] StandardAllocator guest-backed: requested=%#llx pool=%#llx..%#llx cached=%d\n",
+        (unsigned long long)g_std_declared_size,
+        (unsigned long long)STD_GUEST_BASE,
+        (unsigned long long)STD_GUEST_LIMIT,
+        cached ? 1 : 0);
+}
+
 HLE_FUNC("_ZN2nn3mem17StandardAllocator10InitializeEPvm", heap_std_init) {
-    uint64_t lr = c->x[30], size = c->x[2];
-    CALL("_ZN2nn3mem17StandardAllocator10InitializeEPvm");
-    if (ENV("LARECOMP_LOG_HEAPS"))
-        LOG("[heaps] standard allocator %#llx bytes from lr %llx\n", (unsigned long long)size, (unsigned long long)lr);
+    std_init_common(c, false);
 }
 
 HLE_FUNC("_ZN2nn3mem17StandardAllocator10InitializeEPvmb", heap_std_init_b) {
-    uint64_t lr = c->x[30], size = c->x[2];
-    CALL("_ZN2nn3mem17StandardAllocator10InitializeEPvmb");
-    if (ENV("LARECOMP_LOG_HEAPS"))
-        LOG("[heaps] standard allocator %#llx bytes (b) from lr %llx\n", (unsigned long long)size, (unsigned long long)lr);
+    std_init_common(c, c->x[3] != 0);
 }
 
 HLE_FUNC("_ZN2nn3mem17StandardAllocator8AllocateEm", heap_std_alloc) {
-    uint64_t lr = c->x[30], size = c->x[1];
-    CALL("_ZN2nn3mem17StandardAllocator8AllocateEm");
-    if (!c->x[0] && size) fail_once("standard allocation", lr, size);
+    uint64_t size = c->x[1], lr = c->x[30];
+    c->x[0] = std_guest_alloc(size, 16);
+    if (!c->x[0] && size) fail_once("standard guest allocation", lr, size);
 }
 
 HLE_FUNC("_ZN2nn3mem17StandardAllocator8AllocateEmm", heap_std_alloc_a) {
-    uint64_t lr = c->x[30], size = c->x[1];
-    CALL("_ZN2nn3mem17StandardAllocator8AllocateEmm");
-    if (!c->x[0] && size) fail_once("standard allocation (aligned)", lr, size);
+    uint64_t size = c->x[1], align = c->x[2], lr = c->x[30];
+    c->x[0] = std_guest_alloc(size, align);
+    if (!c->x[0] && size) fail_once("standard guest allocation (aligned)", lr, size);
+}
+
+HLE_FUNC("_ZN2nn3mem17StandardAllocator4FreeEPv", heap_std_free) {
+    std_guest_free(c->x[1]);
+}
+
+HLE_FUNC("_ZN2nn3mem17StandardAllocator10ReallocateEPvm", heap_std_realloc) {
+    uint64_t size = c->x[2], lr = c->x[30];
+    c->x[0] = std_guest_realloc(c->x[1], size);
+    if (!c->x[0] && size) fail_once("standard guest reallocation", lr, size);
+}
+
+HLE_FUNC("_ZNK2nn3mem17StandardAllocator9GetSizeOfEPKv", heap_std_sizeof) {
+    c->x[0] = std_guest_size(c->x[1]);
+}
+
+HLE_FUNC("_ZNK2nn3mem17StandardAllocator16GetTotalFreeSizeEv", heap_std_free_size) {
+    pthread_mutex_lock(&g_std_lock);
+    uint64_t used = g_std_next - STD_GUEST_BASE;
+    uint64_t cap = STD_GUEST_LIMIT - STD_GUEST_BASE;
+    uint64_t free_bytes = g_std_free_bytes;
+    pthread_mutex_unlock(&g_std_lock);
+    uint64_t tail = cap > used ? cap - used : 0;
+    c->x[0] = tail + free_bytes;
+}
+
+HLE_FUNC("_ZN2nn3mem17StandardAllocator8FinalizeEv", heap_std_finalize) {
+    (void)c;
 }

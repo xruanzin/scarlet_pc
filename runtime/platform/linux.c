@@ -43,6 +43,11 @@ bool plat_reset_guest(uint64_t lo, uint64_t hi) {
 
 void plat_commit(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 
+int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page_size) {
+    (void)addr; (void)size; (void)pages; (void)max; (void)page_size;
+    return -1;  // no host write-watch backend on Linux in this port
+}
+
 int plat_protect(uint64_t addr, uint64_t size, int prot) {
     int p = prot == PLAT_PROT_NONE ? PROT_NONE : prot == PLAT_PROT_READ ? PROT_READ : PROT_READ | PROT_WRITE;
     return mprotect((void *)(uintptr_t)addr, size, p);
@@ -172,6 +177,9 @@ void plat_fatal_notice(void) {
 
 const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c
 
+uint64_t plat_register_thread(void) { return (uint64_t)(uintptr_t)pthread_self(); }
+void plat_dump_other_threads(void) { fprintf(stderr, "  (OS wait chains are only available on Windows)\n"); }
+
 void plat_print_backtrace(void) {
     void *bt[64];
     int n = backtrace(bt, 64);
@@ -269,3 +277,4 @@ bool plat_remove_tree(const char *dir) { return nftw(dir, rm_entry, 16, FTW_DEPT
 // End the process at once, skipping the library teardown: as on Windows, the GPU driver's threads crashed in exit()
 // while the game's threads still submitted work.
 void plat_terminate(void) { _exit(0); }
+void plat_emergency_exit(int code) { _exit(code); }

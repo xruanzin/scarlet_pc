@@ -155,7 +155,8 @@ static void create_device(void) {
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
-    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have12};
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT div = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT,
@@ -171,7 +172,10 @@ static void create_device(void) {
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                             .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
                                             .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
-                                            .scalarBlockLayout = VK_TRUE, .pNext = &f13};
+                                            .scalarBlockLayout = VK_TRUE,
+                                            .descriptorIndexing = have12.descriptorIndexing,
+                                            .shaderStorageImageArrayNonUniformIndexing = have12.shaderStorageImageArrayNonUniformIndexing,
+                                            .pNext = &f13};
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
@@ -189,10 +193,27 @@ static void create_device(void) {
     b->largePoints = h->largePoints;
     b->wideLines = h->wideLines;
     b->imageCubeArray = h->imageCubeArray;
+    b->shaderImageGatherExtended = h->shaderImageGatherExtended;  // TLD4S with a register-supplied offset
     b->sampleRateShading = h->sampleRateShading;
     b->fragmentStoresAndAtomics = h->fragmentStoresAndAtomics;
     b->vertexPipelineStoresAndAtomics = h->vertexPipelineStoresAndAtomics;
-    b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
+    b->shaderStorageImageArrayDynamicIndexing = h->shaderStorageImageArrayDynamicIndexing;
+    b->shaderStorageImageWriteWithoutFormat = h->shaderStorageImageWriteWithoutFormat;
+    b->shaderStorageImageReadWithoutFormat = h->shaderStorageImageReadWithoutFormat;
+    b->shaderStorageImageExtendedFormats = h->shaderStorageImageExtendedFormats;
+    b->robustBufferAccess = h->robustBufferAccess;
+    uint32_t storage_limit = g_vk.props.limits.maxPerStageDescriptorStorageImages;
+    uint32_t storage_slots = storage_limit / 2;  // one write array + one atomic array
+    if (storage_slots > MAXWELL_BINDLESS_IMAGES) storage_slots = MAXWELL_BINDLESS_IMAGES;
+    g_vk.bindless_storage = h->fragmentStoresAndAtomics &&
+                            have12.shaderStorageImageArrayNonUniformIndexing &&
+                            h->shaderStorageImageArrayDynamicIndexing &&
+                            h->shaderStorageImageWriteWithoutFormat &&
+                            storage_slots > 0;
+    g_vk.bindless_storage_slots = g_vk.bindless_storage ? (uint8_t)storage_slots : 0;
+    LOG("[vk] bindless storage images: %s (limit %u, %u slots/type)\n",
+        g_vk.bindless_storage ? "enabled" : "fallback",
+        storage_limit, g_vk.bindless_storage_slots);  // guest shaders index cbufs freely: keep OOB reads harmless
     b->shaderClipDistance = h->shaderClipDistance;
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     float prio = 1.0f;
@@ -469,7 +490,8 @@ void renderer_set_scale(float sx, float sy);
 uint64_t renderer_present_count(void);
 void renderer_save_texture_tex(TexBackend *b, const char *path);
 
-static uint64_t frames, total_frames, g_frame_counter;
+static uint64_t frames, g_frame_counter;
+static _Atomic uint64_t total_frames;
 uint64_t renderer_present_count(void) { return total_frames; }
 uint64_t vk_frame_counter(void) { return g_frame_counter; }
 static float g_shot_crop[4] = {0, 0, 1, 1};
@@ -479,12 +501,22 @@ static NvnTexture *g_last_presented;
 const float *vk_shot_crop(void) { return g_shot_crop; }
 
 void backend_present(NvnTexture *t);
+static atomic_bool g_represent_requested;
+static pthread_mutex_t g_present_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// letsgo-recomp re-presents the last image while ShowKeyboard blocks. Scarlet
+// normally presents from guest/render execution, so never call Vulkan directly
+// from the keyboard's guest thread: ask the UI thread to do the re-present.
 void backend_represent(void) {
+    atomic_store(&g_represent_requested, true);
+}
+
+static void backend_represent_now(void) {
     if (g_last_presented) backend_present(g_last_presented);
-    else SDL_Delay(16);
 }
 
 void backend_present(NvnTexture *t) {
+    pthread_mutex_lock(&g_present_lock);
     g_last_presented = t;
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
@@ -667,6 +699,7 @@ void backend_present(NvnTexture *t) {
         frames = 0;
         last_fps_time = now;
     }
+    pthread_mutex_unlock(&g_present_lock);
 }
 
 // ================================================================== UI thread
@@ -676,6 +709,13 @@ void vk_shaders_init(void);
 // exit() from any thread: let the GPU finish, keep the pipeline cache, then end the process without the DLL
 // teardown (driver / validation-layer threads can stall it for minutes while the game's threads still run).
 static void quick_exit_handler(void) {
+    if (vk_builds_pending()) {
+        LOG("[vk] exit: compiler active; terminating without waiting for the pipeline cache\n");
+        fflush(stderr);
+#if defined(_WIN32) || defined(__linux__)
+        plat_terminate();
+#endif
+    }
     static int trace = -1;
     if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
     if (trace) LOG("[vk] exit: waiting for the GPU\n");
@@ -739,6 +779,58 @@ void backend_clear_window(void) {
     if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
 }
 
+// Window-title FPS / hang indicator. It runs on the UI thread, so it keeps updating even when the game thread is stuck:
+// "sem resposta" appears when no frame was presented for 2 s (a freeze, a long shader build or a deadlock).
+void rt_hang_report(void);  // runtime/dispatch.c
+static atomic_bool hang_report_pending;
+static void *hang_report_worker(void *arg) {
+    (void)arg;
+    rt_hang_report();
+    atomic_store(&hang_report_pending, false);
+    return NULL;
+}
+static void request_hang_report(void) {
+    bool expected = false;
+    if (!atomic_compare_exchange_strong(&hang_report_pending, &expected, true)) return;
+    pthread_t thread;
+    int error = pthread_create(&thread, NULL, hang_report_worker, NULL);
+    if (!error) pthread_detach(thread);
+    else {
+        atomic_store(&hang_report_pending, false);
+        LOG("[watchdog] cannot start diagnostic thread: %d\n", error);
+    }
+}
+static void title_fps_update(void) {
+    static uint64_t last_ms, last_frames, last_change_ms;
+    static double fps;
+    uint64_t now = SDL_GetTicks();
+    if (!last_ms) { last_ms = last_change_ms = now; last_frames = total_frames; return; }
+    if (now - last_ms < 500) return;
+    uint64_t f = total_frames;
+    fps = (double)(f - last_frames) * 1000.0 / (double)(now - last_ms);
+    if (f != last_frames) last_change_ms = now;
+    last_frames = f;
+    last_ms = now;
+    char title[160];
+    if (now - last_change_ms >= 2000)
+        snprintf(title, sizeof title, "%s - SEM RESPOSTA ha %.0f s (frame %llu)", RT_APP_NAME,
+                 (double)(now - last_change_ms) / 1000.0, (unsigned long long)f);
+    else
+        snprintf(title, sizeof title, "%s - %.0f fps (%.0f ms) - frame %llu", RT_APP_NAME, fps, fps > 0 ? 1000.0 / fps : 0.0,
+                 (unsigned long long)f);
+    SDL_SetWindowTitle(window, title);
+    // Hang watchdog: after 8 s with no frame, write what every game thread is doing to the log (again after 60 s).
+    static int reports;
+    uint64_t stuck_ms = now - last_change_ms;
+    if ((reports == 0 && stuck_ms >= 8000) || (reports == 1 && stuck_ms >= 60000)) {
+        reports++;
+        LOG("[watchdog] no frame presented for %llu s (last frame %llu)\n", (unsigned long long)(stuck_ms / 1000),
+            (unsigned long long)f);
+        request_hang_report();
+    }
+    if (stuck_ms < 2000) reports = 0;
+}
+
 int ui_run(void) {
     ui_window_init();
     atomic_store(&ui_ready, true);
@@ -755,5 +847,7 @@ int ui_run(void) {
             input_handle_event(&e);
         }
         menu_apply_window_requests(window);
+        if (atomic_exchange(&g_represent_requested, false)) backend_represent_now();
+        title_fps_update();
     }
 }

@@ -16,13 +16,18 @@
 #define GUEST_LO     0x7000000000ull
 #define GUEST_HI     0x7320000000ull
 #define MAIN_BASE    0x7000000000ull
-#define SDK_BASE     0x7004000000ull
-#define SUBSDK0_BASE 0x7006000000ull   // Let's Go: glslc (runtime GLSL -> Maxwell compiler)
-#define SUBSDK1_BASE 0x7008000000ull   // Let's Go: multimedia (movie::)
+#define SDK_BASE     0x7006000000ull
+#define SUBSDK0_BASE 0x7008000000ull   // Scarlet base: auxiliary/multimedia NSO
 #define HLE_BASE     0x7080000000ull   // fake addresses for host-implemented functions
 #define HLE_SIZE     0x0000100000ull
 #define TLS_BASE     0x7090000000ull
 #define TLS_SIZE     0x0000100000ull
+#define TLR_THREAD_POINTER_OFFSET 0x1F0ull  // SDK reloads TPIDR_EL0 from this TLR slot
+// Bootstrap writable TPIDR_EL0 storage, separate from Horizon's TPIDRRO_EL0
+// IPC/TLR slots. Keep the same capacity as the 0x200-byte TLR slot pool.
+#define USER_TLS_STRIDE 0x2000ull
+#define USER_TLS_BASE   (TLS_BASE + TLS_SIZE)
+#define USER_TLS_SIZE   ((TLS_SIZE / 0x200ull) * USER_TLS_STRIDE)
 #define HLE_HEAP     0x7092000000ull   // guest-visible memory owned by host code
 #define HLE_HEAP_SIZE 0x000E000000ull
 #define ALIAS_BASE   0x7100000000ull   // alias region (svcMapMemory targets)
@@ -39,16 +44,20 @@ typedef struct Module {
     uint64_t symtab, strtab, nsyms;
 } Module;
 
-extern Module g_modules[4];
+extern Module g_modules[3];
 extern int g_nmodules;
 void loader_load(const char *exefs_dir);  // (again after a reboot: modules are reloaded into wiped memory)
 uint64_t loader_find_symbol(const char *name);
+void loader_log_symbols_prefix(const char *prefix);
 const char *loader_symbol_at(uint64_t addr, uint64_t *offset);
 
 // ---- dispatch.c
 typedef void (*HostFn)(Cpu *c);
 void dispatch_init(void);
 GuestFn dispatch_lookup(uint64_t addr);
+// A generated setjmp site tail-enters this scope; continuation runs while its
+// native jump buffer is live. Guest SDK code still saves/restores guest state.
+void rt_guest_setjmp(Cpu *c, GuestFn setup, GuestFn continuation, uint64_t return_pc);
 uint64_t hle_register(const char *name, HostFn fn);  // returns fake guest address
 HostFn hle_lookup_impl(const char *name);
 void hle_override(uint64_t guest_addr, HostFn fn, const char *name);
@@ -61,7 +70,7 @@ void kernel_init(void);
 void kernel_stop_threads(void (*idle)(void));  // reboot: unwind every guest thread and join it (idle: called while waiting)
 void kernel_reset(void);                       // reboot: empty handle table, memory map, thread list
 KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio);
-void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3);
+void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4);
 uint32_t kernel_current_thread_handle(void);
 Cpu *kernel_current_cpu(void);
 
@@ -86,3 +95,4 @@ uint64_t guest_sym(const char *name);     // cached loader_find_symbol, fatal if
 extern uint64_t g_program_id;  // the game's program (title) id, from main.npdm
 void *hle_alloc(uint64_t size);           // zeroed guest-visible memory (never freed)
 extern const char *g_romfs_dir;
+

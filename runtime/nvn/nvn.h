@@ -52,12 +52,15 @@ typedef struct {
     NvnTexture *tex;
     NvnTextureView view;
     bool has_view;
+    bool is_image;      // registered through nvnTexturePoolRegisterImage (storage-capable descriptor)
+    uint32_t image_seq; // most-recent registrations first when compacting the bindless image set
 } NvnTexEntry;
 
 typedef struct NvnDescPool {
     uint64_t addr;
     int count;
     void *entries;  // NvnTexEntry[] or NvnSamplerDesc[]
+    uint32_t generation; // bumps when descriptor contents change
 } NvnDescPool;
 
 typedef struct NvnShaderStage {
@@ -87,14 +90,22 @@ typedef struct NvnSync {
 
 // ---- command recording (stored in guest command memory)
 typedef struct {
-    uint64_t mem;    // current command memory chunk (guest address)
-    uint64_t size;   // chunk size
-    uint64_t used;   // bytes used in chunk
-    uint64_t start;  // first record of the list being recorded
+    // Internal records are much larger than real Maxwell/NVN commands. Each
+    // recorded list therefore keeps a tiny handle/jump in the game's command
+    // memory and stores the expanded CmdRec stream in host overflow segments.
+    uint64_t mem;         // current internal write segment (guest or host address)
+    uint64_t size;        // current internal segment size
+    uint64_t chunk_used;  // write cursor within the current internal segment
+    uint64_t used;        // guest command-memory bytes consumed since AddCommandMemory
+    uint64_t guest_mem;   // most recently supplied guest command-memory chunk
+    uint64_t guest_size;
+    uint64_t start;       // opaque command handle: guest address of this list's first CMD_JUMP
     uint64_t callback, callback_data;
     bool recording;
-    uint64_t guest;  // the guest NVNcommandBuffer*
-    uint64_t obj_tag;  // frame interpolation: the game object the list's last CMD_OBJECT named (cmdbuf.c)
+    bool host_segment;    // current internal write segment is host-owned
+    uint64_t guest;       // the guest NVNcommandBuffer*
+    uint64_t obj_tag;     // frame interpolation: the game object the list's last CMD_OBJECT named (cmdbuf.c)
+    uint64_t host_origin_lo, host_origin_hi;  // guest handle slot owning the host segment chain
 } NvnCmdBuf;
 
 // One recorded command: header, the call's integer and float arguments, then copied data.
@@ -104,6 +115,13 @@ typedef struct {
     float f[4];         // s0..s3 of the call
     uint8_t extra[];
 } CmdRec;
+
+// Expanded command streams are host-backed. Queue submission pins the stream
+// so command-memory reuse on another guest thread cannot recycle/overwrite it
+// while the Vulkan executor is still reading it. pin() returns the resolved
+// host start address (or the original handle when no host stream is known).
+uint64_t nvn_cmdstream_pin(uint64_t handle);
+void nvn_cmdstream_unpin(uint64_t handle);
 
 enum {
     CMD_END = 0, CMD_JUMP, CMD_CALL,
@@ -122,6 +140,7 @@ enum {
     CMD_BARRIER, CMD_SIGNAL_EVENT, CMD_WAIT_EVENT, CMD_REPORT_COUNTER, CMD_DISCARD_COLOR,
     CMD_DISCARD_DEPTH_STENCIL, CMD_SET_COPY_STRIDES, CMD_DRAW_TEXTURE, CMD_RESOLVE_DEPTH,
     CMD_OBJECT,  // (ours) x[0]: the game object the following draws belong to, 0 = none (frame interpolation)
+    CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT, CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT,
     CMD_COUNT
 };
 

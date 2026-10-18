@@ -21,6 +21,10 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi);
 // Make sure [addr, addr+size) inside the guest window is backed (before the OS itself writes there, e.g.
 // file reads); a no-op where the whole window is backed from the start.
 void plat_commit(uint64_t addr, uint64_t size);
+// Pages written by the CPU since the previous query of this range. Returns the
+// number of page addresses stored in `pages`, or -1 when the host cannot track
+// writes. The query resets the host write-watch bits for the range.
+int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page_size);
 // In-place reboot: every page of [lo, hi) back to zero (and unbacked), the window still claimed.
 bool plat_reset_guest(uint64_t lo, uint64_t hi);
 enum { PLAT_PROT_NONE = 0, PLAT_PROT_READ = 1, PLAT_PROT_RW = 3 };
@@ -32,12 +36,28 @@ uint64_t plat_now_ns(void);                // monotonic
 void plat_sleep_until_ns(uint64_t t);      // precise wait for plat_now_ns() >= t
 void plat_thread_realtime(uint64_t period_ns);  // periodic timing thread (vsync): don't coalesce its timers
 
+#ifdef _WIN32
+// Map a large read-only host file into the process address space. Used by Scarlet's multi-GB RomFS so streaming
+// becomes page-cache memcpy instead of hundreds of positional ReadFile calls. Returns NULL on failure (caller falls back).
+const void *plat_map_file_ro(int fd, uint64_t *size);
+void plat_unmap_file(const void *ptr);
+// Horizon CpuBoostMode::FastLoad mapped to a temporary Windows scheduling boost.
+void plat_set_cpu_boost(bool enabled);
+// Apply the current guest thread's Horizon priority/core as Windows scheduler hints.
+void plat_guest_thread_config(int priority, int core);
+// Native modal text entry centered over the game window. Returns 1 = OK, 0 = cancel.
+int plat_text_input_dialog(const char *title, const char *subtitle, const char *guide,
+                           const char *initial, int min_chars, int max_chars,
+                           char *out, size_t out_cap);
+#endif
+
 // ---- process
 void plat_init(void);                                // first thing in main()
 bool plat_exe_path(char *buf, size_t size);
 void plat_exec(char *const argv[]);  // replace the process (NULL = same command line); returns only on failure
 #if defined(_WIN32) || defined(__linux__)
 void plat_terminate(void);  // end the process now, skipping DLL teardown (exit status 0)
+void plat_emergency_exit(int code) __attribute__((noreturn));  // unrecoverable host build: skip driver/DLL teardown
 #endif
 
 // Child processes (seed generator, game-file extraction). stdout + stderr go to log_path (NULL = /dev/null).
@@ -58,6 +78,9 @@ bool plat_remove_tree(const char *dir);      // rm -rf
 // Name of the host function containing pc (guest functions are f_<addr>), NULL if unknown.
 const char *plat_symbol(uint64_t pc, uint64_t *offset);
 void plat_print_backtrace(void);
+uint64_t plat_register_thread(void);  // register once per thread; return its host OS identifier
+void plat_dump_other_threads(void);   // Windows: thread CPU times and wait chains, without suspending threads
+void rt_hang_report(void);            // runtime/dispatch.c
 void plat_fatal_notice(void);  // a fatal error is about to end the process: tell the user (Windows release: message box)
 void plat_crash_handler_install(void);  // per thread where the OS needs it (alternate signal stack)
 // Called by the crash handler (runtime/dispatch.c): true = fault handled (watchpoint), resume.

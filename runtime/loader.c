@@ -4,7 +4,7 @@
 
 #include "rt.h"
 
-Module g_modules[4];
+Module g_modules[3];
 int g_nmodules;
 
 enum { DT_NULL = 0, DT_PLTRELSZ = 2, DT_HASH = 4, DT_STRTAB = 5, DT_SYMTAB = 6, DT_RELA = 7, DT_RELASZ = 8,
@@ -109,6 +109,24 @@ uint64_t loader_find_symbol(const char *name) {
     return 0;
 }
 
+void loader_log_symbols_prefix(const char *prefix) {
+    size_t n = strlen(prefix);
+    int found = 0;
+    for (int mi = 0; mi < g_nmodules; mi++) {
+        Module *m = &g_modules[mi];
+        for (uint64_t i = 1; i < m->nsyms; i++) {
+            Elf64Sym *s = sym(m, i);
+            const char *name = symname(m, s);
+            if (s->shndx && !strncmp(name, prefix, n)) {
+                LOG("[loader] symbol candidate %s: %s @ %llx\n",
+                    m->name, name, (unsigned long long)(m->base + s->value));
+                found++;
+            }
+        }
+    }
+    if (!found) LOG("[loader] no defined symbol with prefix %s\n", prefix);
+}
+
 const char *loader_symbol_at(uint64_t addr, uint64_t *offset) {
     const char *best = NULL;
     uint64_t best_addr = 0;
@@ -133,7 +151,11 @@ static uint64_t resolve(Module *m, uint32_t symidx) {
     const char *name = symname(m, s);
     if (s->shndx) return m->base + s->value;
     HostFn impl = hle_lookup_impl(name);
-    if (impl) return hle_register(name, impl);  // host implementation wins over the guest SDK's
+    if (impl) {
+        if (getenv("LARECOMP_LOG_BINDINGS"))
+            LOG("[loader] HLE bind %s <- %s\n", m->name, name);
+        return hle_register(name, impl);  // host implementation wins over the guest SDK's
+    }
     uint64_t a = loader_find_symbol(name);
     if (a) return a;
     if ((s->info >> 4) == 2) return 0;  // weak undefined
@@ -174,10 +196,10 @@ static void relocate(Module *m) {
 
 void loader_load(const char *exefs) {
     char path[1024];
-    // Let's Go: the game, the SDK, glslc (runtime GLSL compiler) and multimedia (movie::). Same order and bases as
-    // the generated code (Makefile `gen`, tools/gamelib_entry.c).
+    // Scarlet base: game main, nnSdk and one auxiliary subsdk. Keep this order/bases identical to
+    // Makefile `gen`, runtime/gamebuild.c and tools/gamelib_entry.c.
     static const struct { const char *name; uint64_t base; } mods[] = {
-        {"main", MAIN_BASE}, {"sdk", SDK_BASE}, {"subsdk0", SUBSDK0_BASE}, {"subsdk1", SUBSDK1_BASE}};
+        {"main", MAIN_BASE}, {"sdk", SDK_BASE}, {"subsdk0", SUBSDK0_BASE}};
     for (unsigned i = 0; i < sizeof mods / sizeof mods[0]; i++) {
         Module *m = &g_modules[g_nmodules++];
         m->name = mods[i].name;

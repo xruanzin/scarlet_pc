@@ -1,0 +1,215 @@
+# Scarlet: SDK boot stops before any game image
+
+The latest boot passes SDK/TLS initialization and reaches NVN. For that later
+failure and the current incremental update, see
+[main switch after NVN initialization](#later-boot-main-switch-after-nvn-initialization).
+
+## Evidence from the supplied logs
+
+The failing boot loads main, sdk and subsdk0, reaches the loader's SDK
+constructor callback, then stops with:
+
+```text
+[boot] sdk DT_INIT status=1 @ 7006cea0d0
+FATAL: no function at 700657c59c (lr=700657c41c vfprintf+6b4)
+```
+
+There is no `nvnBootstrapLoader` graphics milestone before this failure. The
+log establishes a missing dispatch entry during CPU-side SDK initialization;
+it does not establish a Vulkan, shader, resolution or GPU-driver failure.
+The nearest exported symbol is `vfprintf`, but that symbol's reported size
+does not cover the entire internal formatting implementation. The failed
+instruction is not disassembled in the supplied auto-inspection, so the exact
+original indirect-branch sequence still needs the user's extracted SDK.
+
+The two Citron attachments are byte-for-byte identical. They boot version
+1.0.0 and identify these ExeFS Build IDs:
+
+| Module | Build ID |
+| --- | --- |
+| main | `CA44E7DD62E61A2A4E8889B3319AE173375770FD` |
+| sdk | `3644A6760469451CABC99F00C540ACC2A64AEE41` |
+| subsdk0 | `D0F13015E5BADF2243D60A2BC9B978DDDBA80608` |
+
+They match the Scarlet baseline and the SDK ID in the failed boot. Citron
+reaches Vulkan graphics-pipeline creation on AMD Radeon integrated graphics.
+That confirms another execution path gets past initialization on this machine;
+it does not prove the recomp runtime's services or renderer are complete.
+
+## Generator/runtime fix
+
+The generator inherited from LASRecomp/Let's Go can dispatch only to exact
+function entries. Its ADR/ADRP and branch discovery can split an unwind
+function into several emitted C fragments. An indirect switch target can then
+land inside another fragment, where there is neither a callable entry nor a
+usable local label in the source fragment. Unrecognized loaded BR targets can
+also miss local labels. This is a reproduced failure class consistent with
+the missing SDK address above.
+
+The SDK is now generated with `--indirect-resume`:
+
+- Every indirect BR tries the fragment's local labels before global dispatch.
+- Unwind intervals containing BR instructions get static resume functions for
+  their fragments, including destination fragments with no BR of their own.
+- The library publishes a compact, sorted range table. On an exact-entry miss,
+  dispatch accepts only aligned instruction addresses in these declared ranges.
+- A resume function switches directly to that guest instruction in generated C.
+  It preserves SP, LR and guest registers, without replaying the prologue.
+- Ordinary direct calls still start at the regular entry; HLE entry points and
+  overrides keep their existing behavior. Invalid/out-of-range PCs still fail.
+
+No runtime interpreter or JIT is added. No guest code or assets are committed.
+The table uses one record per fragment, rather than one entry per instruction.
+Library ABI 4 prevents mixing this layout with older runtimes. The generator
+hash also changes, so the runtime and game DLL must be rebuilt together.
+
+## Updating an existing Windows build
+
+Close the running game first. From the repository directory in PowerShell:
+
+```powershell
+git pull origin scarlet-bootstrap
+Set-ExecutionPolicy -Scope Process Bypass
+.\tools\scarlet_generate.ps1 -ExeFs "D:\Pokemon Scarlet\Extracted\Base\exefs" -Module sdk -Clean
+if ($LASTEXITCODE -ne 0) { throw "Falha ao gerar SDK" }
+.\tools\scarlet_build_windows.ps1 -Jobs 4
+if ($LASTEXITCODE -ne 0) { throw "Falha no build" }
+.\tools\scarlet_run.ps1 -GameRoot "D:\Pokemon Scarlet\Extracted\Base"
+```
+
+For this original SDK fix, only SDK C sources needed regeneration. Keep generated main/subsdk0 sources and
+their object files: their CPU-state ABI did not change. The build script
+rejects SDK tables without nonzero resume metadata and prints the repair
+command. The current builders enable main resume generation too; see below.
+
+The next boot should report `[dispatch] sdk: ... static resume ranges`. This
+confirms the new metadata was loaded; it is not a claim that the game rendered.
+If initialization completes, look for subsequent constructor messages and
+`[gfx-milestone] nvnBootstrapLoader reached`. If another dispatch entry is
+missing, the runner now inspects its exact PC and LR-4 automatically, before
+the general host-backtrace inspection. The log remains `scarlet_boot.log` in
+the repository directory.
+
+## Verification and limits
+
+```sh
+python tools/test_atomic_lifter.py
+python tools/test_indirect_resume.py
+```
+
+The new tests generate a synthetic NSO with an indirect jump into a different
+fragment of the same unwind function. With resume metadata disabled, the
+native runtime reproduces `no function at ...`. With it enabled, the actual
+generated C, library entry and runtime dispatcher agree with ARM64 execution
+in Unicorn for 128 combinations of branch target and register state. Tests
+also check direct calls with a stale dispatch PC, SP/LR preservation, HLE
+override precedence, invalid PCs and unwind boundaries. Native tests run on
+Linux with Clang or Zig; discovery tests are portable.
+
+These are regression tests for the reproduced generator failure, not a test of
+Pokémon Scarlet reaching its menu. The original SDK/ROMFS and a Windows game
+boot are unavailable in this development environment. Further CPU, service,
+NVN or shader issues may become visible after the reported blocker is removed.
+
+## Later boot: main switch after NVN initialization
+
+`scarlet_boot(20261018-025850).log` confirms the TLR publication fix advanced
+the real game past malloc and SDK constructors. TPIDR_EL0 is subsequently
+`0x7240001140`, consistent with the SDK replacing its bootstrap TLS. The boot
+reads game archives, creates a VI layer, reaches `nvnBootstrapLoader`, initializes
+the NVN device and creates a Vulkan 1280x720 swapchain on AMD Radeon graphics.
+It then stops at:
+
+```text
+FATAL: no function at 7000a7db34 (lr=7000a7da60 munmap+cfdd0)
+```
+
+The auto-inspection and register dump show a compact switch in **main**:
+
+```text
+0x7000a7db14: adr  x10, #0x7000a7db24
+0x7000a7db18: ldrb w11, [x9, x8]
+0x7000a7db1c: add  x10, x10, x11, lsl #2
+0x7000a7db20: br   x10
+0x7000a7db34: ldr  x19, [x3]
+```
+
+At the failure, X11=4 and X10=`0x7000a7db34`: a valid case 16 bytes after the
+ADR base. ADR discovery splits the function at `0x7000a7db24`; the selected
+case is inside another fragment. SDK resume ranges cannot cover main addresses.
+The distant `munmap` name is only the nearest exported symbol, not evidence
+that this is a virtual-memory syscall failure.
+
+The main generator now enables `--indirect-resume`, and the game library
+publishes main's ranges alongside SDK's. PowerShell, `make gen` and the in-app
+builder agree. The Windows wrapper rejects a zero/missing main resume count
+before compilation and gives the regeneration command. No ABI layout or CPU
+header change is needed; the changed library entry updates GAMELIB_ID.
+Existing SDK/subsdk0 sources and objects remain reusable.
+
+Close the game and run:
+
+```powershell
+git pull --ff-only origin scarlet-bootstrap
+Set-ExecutionPolicy -Scope Process Bypass
+.\tools\scarlet_generate.ps1 -ExeFs "D:\Pokemon Scarlet\Extracted\Base\exefs" -Module main
+.\tools\scarlet_build_windows.ps1 -Jobs 4
+.\tools\scarlet_run.ps1 -GameRoot "D:\Pokemon Scarlet\Extracted\Base"
+```
+
+Do not clean the entire generated/build directories. Generation preserves
+unchanged files; compilation rebuilds changed main chunks and relinks the DLL.
+This is more work than the previous runtime-only TLS patch. The new boot must
+report both `[dispatch] main: ... static resume ranges` and the existing SDK
+range count. This confirms the updated DLL loaded, not successful rendering.
+
+The regression suite now generates and links both main and SDK fixtures with
+the production library entry and dispatcher. It compares 256 cross-fragment
+executions against ARM64, plus 24 compact byte-switch cases with the observed
+CMP/MOV/ADRP/ADD/ADR/LDRB/ADD/BR shape. Without main resume metadata, the compact
+case reproduces a missing interior target; with it, SP/LR and registers match.
+These synthetic fixtures contain no game binary. Full Windows game boot and
+image presentation remain to be checked on the user's machine.
+
+## Link recovery after Argument list too long
+
+`scarlet_build(5).log` compiles main and its table, compiles the game-library
+entry with ID `f5dbb454872d1866`, then successfully replaces ScarletRecomp.exe.
+The DLL link passes every object on one command line and fails:
+
+```text
+make: clang: Argument list too long
+make: *** [Makefile:158: build/lasgame.dll] Error 127
+```
+
+The later `scarlet_boot(20261018-032326).log` stops immediately with
+`lasgame.dll was built for another version`. The DLL link never succeeded, so
+the updated runtime is paired with the previous DLL/ID. This boot cannot
+validate main's indirect-branch correction. Do not edit the ID or bypass the
+runtime's compatibility check.
+
+The Makefile now writes quoted object paths to `build/lasgame.dll.rsp` using
+GNU make's file function. Clang receives `@build/lasgame.dll.rsp` instead of
+the full object list. Writing the response file also avoids a long shell
+command. The existing temporary-DLL rename and ID update run only after a
+successful link. The in-app builder already uses a response file.
+
+Close the game and resume the existing build:
+
+```powershell
+git pull --ff-only origin scarlet-bootstrap
+Set-ExecutionPolicy -Scope Process Bypass
+.\tools\scarlet_build_windows.ps1 -Jobs 4
+.\tools\scarlet_run.ps1
+```
+
+No NSO regeneration or cleanup is needed. Keep all generated sources and
+compiled objects: make reuses them and retries the link. Run the game only
+after the build prints `BUILD CONCLUIDO`.
+
+`python tools/test_gamelib_link.py` exercises this exact Makefile rule on
+Linux with 1800 synthetic objects plus a callable probe. Its compiler wrapper
+enforces a 32767-character command-line limit. It verifies a failed link
+preserves the old DLL/ID, retry links a real loadable library via the response
+file, all objects remain untouched, and the next build skips linking. No game
+files are used; final Windows linking and game execution need user validation.

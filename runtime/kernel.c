@@ -184,7 +184,11 @@ void rt_unwind_point(void) {
 static void *thread_main(void *arg) {
     KThread *t = arg;
     t_cur = t;
+    plat_register_thread();
     crash_handler_install();
+#ifdef _WIN32
+    plat_guest_thread_config(t->prio, t->core);
+#endif
     rt_set_fpcr(0);
     if (!setjmp(t->unwind)) guest_call(&t->cpu, t->entry);
     pthread_mutex_lock(&g_klock);
@@ -203,15 +207,37 @@ static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int
     t->entry = entry;
     t->prio = prio;
     t->core = core < 0 ? 0 : core;
-    t->id = next_thread_id++;
     t->cpu.x[0] = arg;
     t->cpu.sp = stack_top & ~15ull;
     t->cpu.excl_addr = ~0ull;
-    t->tlr = tls_next;
-    tls_next += 0x200;
-    t->cpu.tpidrro = t->tlr;
     t->cpu.thread = t;
+
     pthread_mutex_lock(&g_klock);
+    if (tls_next > TLS_BASE + TLS_SIZE - 0x200ull) {
+        pthread_mutex_unlock(&g_klock);
+        pthread_cond_destroy(&t->cond);
+        free(t);
+        FATAL("thread-local storage slots exhausted\n");
+    }
+    t->id = next_thread_id++;
+    t->tlr = tls_next;
+    uint64_t slot = (tls_next - TLS_BASE) / 0x200ull;
+    tls_next += 0x200;
+    // rtld normally prepares the writable thread pointer before constructors.
+    // This runtime replaces rtld, so a bare TPIDR_EL0=0 otherwise reaches
+    // Scarlet's malloc: MRS X10,TPIDR_EL0; LDR X9,[X10,#0x20].
+    // Give each thread private zero-initialized bootstrap storage. Do not alias
+    // it to the IPC buffer, inherit a parent's allocator cache, or touch it
+    // again at thread start: guest MSR writes remain authoritative.
+    memset((void *)(uintptr_t)t->tlr, 0, 0x200);
+    t->cpu.tpidr = USER_TLS_BASE + slot * USER_TLS_STRIDE;
+    memset((void *)(uintptr_t)t->cpu.tpidr, 0, USER_TLS_STRIDE);
+    t->cpu.tpidrro = t->tlr;
+    // Scarlet SDK thread setup reloads TPIDR_EL0 from TLR+0x1F0. Publishing
+    // only Cpu.tpidr is insufficient: the SDK would immediately replace it
+    // with the zero value from the cleared TLR. nnmusl can later replace both
+    // the slot and the register with its own fully initialized TLS block.
+    *(uint64_t *)(uintptr_t)(t->tlr + TLR_THREAD_POINTER_OFFSET) = t->cpu.tpidr;
     t->anext = g_threads;
     g_threads = t;
     pthread_mutex_unlock(&g_klock);
@@ -221,7 +247,14 @@ static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int
 static void thread_start(KThread *t) {
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 256ull << 20);  // guest recursion runs on the host stack
+    // Lifted calls use the host stack, but 256 MiB reserved for every Scarlet
+    // guest thread wastes several GiB of VA and makes thread-heavy loading
+    // unnecessarily expensive on Windows. 32 MiB is still twice the EXE's
+    // own 16 MiB stack; allow an override for pathological recursion.
+    uint64_t stack_mb = 32;
+    const char *se = getenv("LARECOMP_GUEST_STACK_MB");
+    if (se && atoi(se) >= 8) stack_mb = (uint64_t)atoi(se);
+    pthread_attr_setstacksize(&attr, stack_mb << 20);
     t->started = true;
     pthread_create(&t->host, &attr, thread_main, t);
     pthread_attr_destroy(&attr);
@@ -235,8 +268,12 @@ KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio
     return t;
 }
 
-void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3) {
-    t->cpu.x[0] = x0; t->cpu.x[1] = x1; t->cpu.x[2] = x2; t->cpu.x[3] = x3;
+void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4) {
+    t->cpu.x[0] = x0; t->cpu.x[1] = x1; t->cpu.x[2] = x2; t->cpu.x[3] = x3; t->cpu.x[4] = x4;
+    LOG("[kernel] main thread TLS: TPIDR_EL0=%llx TPIDRRO_EL0=%llx tlr[0x1f0]=%llx bootstrap=%#llx bytes\n",
+        (unsigned long long)t->cpu.tpidr, (unsigned long long)t->cpu.tpidrro,
+        (unsigned long long)*(uint64_t *)(uintptr_t)(t->tlr + TLR_THREAD_POINTER_OFFSET),
+        (unsigned long long)USER_TLS_STRIDE);
     thread_start(t);  // the host main thread goes on to run the window event loop
 }
 
@@ -623,6 +660,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     switch (imm) {
     case 0x01: {  // SetHeapSize
         uint64_t size = x[1];
+        LOG("[kernel] SetHeapSize(%#llx)\n", (unsigned long long)size);
         if (size > HEAP_MAX) { x[0] = R_OUT_OF_RESOURCE; break; }
         heap_size = size;
         region_remove(HEAP_BASE);
@@ -682,7 +720,13 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     }
     case 0x0D: {  // SetThreadPriority
         KObject *o = handle_get((uint32_t)x[0]);
-        if (o) ((KThread *)o)->prio = (int)x[1];
+        if (o && o->type == KOBJ_THREAD) {
+            KThread *t = (KThread *)o;
+            t->prio = (int)x[1];
+#ifdef _WIN32
+            if (t == t_cur) plat_guest_thread_config(t->prio, t->core);
+#endif
+        }
         x[0] = o ? R_OK : R_INVALID_HANDLE;
         break;
     }
@@ -693,7 +737,37 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[2] = 0xF;
         break;
     }
-    case 0x0F: x[0] = R_OK; break;  // SetThreadCoreMask
+    case 0x0F: {  // SetThreadCoreMask(handle, ideal core, affinity mask)
+        KObject *o = handle_get((uint32_t)x[0]);
+        if (!o || o->type != KOBJ_THREAD) { x[0] = R_INVALID_HANDLE; break; }
+        KThread *t = (KThread *)o;
+        int32_t ideal = (int32_t)x[1];
+        uint64_t mask = x[2];
+
+        // Horizon special values: -3 keeps the current ideal core; -2 uses
+        // the process default. Scarlet's job system has per-core queues and
+        // selects them via GetCurrentProcessorNumber, so this logical core
+        // assignment must not be ignored even though host OS affinity is separate.
+        if (ideal != -3) {
+            if (ideal == -2) ideal = 0;
+            if (ideal < 0 || ideal >= 4 || !(mask & (1ull << ideal))) {
+                ideal = -1;
+                for (int k = 0; k < 4; k++)
+                    if (mask & (1ull << k)) { ideal = k; break; }
+            }
+            if (ideal >= 0) t->core = ideal;
+        }
+#ifdef _WIN32
+        if (t == t_cur) plat_guest_thread_config(t->prio, t->core);
+#endif
+        static unsigned nlog;
+        if (nlog++ < 32)
+            LOG("[kernel] SetThreadCoreMask h=%llx ideal=%lld mask=%#llx -> core %d\n",
+                (unsigned long long)x[0], (long long)(int32_t)x[1],
+                (unsigned long long)mask, t->core);
+        x[0] = R_OK;
+        break;
+    }
     case 0x10: x[0] = t_cur->core; break;  // GetCurrentProcessorNumber
     case 0x11: case 0x12: case 0x17: {  // SignalEvent / ClearEvent / ResetSignal
         pthread_mutex_lock(&g_klock);
@@ -847,6 +921,29 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     }
 }
 
+void kernel_dump_guest_threads(void) {
+    if (pthread_mutex_trylock(&g_klock) != 0) {
+        LOG("[guest-thread] kernel lock busy; guest snapshot skipped\n");
+        return;
+    }
+    LOG("[guest-thread] current guest execution state:\n");
+    for (KThread *t = g_threads; t; t = t->anext) {
+        if (!t->started || t->finished) continue;
+        LOG("[guest-thread] id=%llu h=%x entry=%llx pc=%llx lr=%llx sp=%llx prio=%d core=%d wait=%d addr=%llx mutex=%llx tag=%x sync=%d svc=%d svcpc=%llx\n",
+            (unsigned long long)t->id, t->handle,
+            (unsigned long long)t->entry,
+            (unsigned long long)t->cpu.pc,
+            (unsigned long long)t->cpu.x[30],
+            (unsigned long long)t->cpu.sp,
+            t->prio, t->core, (int)t->wait_kind,
+            (unsigned long long)t->wait_addr,
+            (unsigned long long)t->wait_mutex,
+            t->wait_tag, t->in_sync_wait, t->cur_svc,
+            (unsigned long long)t->cur_svc_pc);
+    }
+    pthread_mutex_unlock(&g_klock);
+}
+
 // Reboot, step 1: stop every guest thread (see rt_unwind_point) and join it. `idle` keeps the window responsive.
 void kernel_stop_threads(void (*idle)(void)) {
     g_rt_unwind = 1;
@@ -911,6 +1008,7 @@ void kernel_init(void) {
     }
     // Reserve the heap, alias, stack, and TLS regions.
     region_add(TLS_BASE, TLS_SIZE, 0xC, 3);
+    region_add(USER_TLS_BASE, USER_TLS_SIZE, 0xC, 3);
     for (int i = 0; i < g_nmodules; i++) {
         Module *m = &g_modules[i];
         region_add(m->base + m->text_off, m->ro_off - m->text_off, 3, 5);
@@ -936,3 +1034,4 @@ KSharedMem *kernel_create_shared_memory(uint64_t size, void (*on_map)(KSharedMem
     *handle = kernel_new_handle(&s->obj);
     return s;
 }
+

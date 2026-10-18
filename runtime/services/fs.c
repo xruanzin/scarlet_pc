@@ -2,6 +2,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -10,6 +11,7 @@
 #include "../hle.h"
 #include "../mods.h"
 #include "../ipc.h"
+#include "../romfs_build.h"
 
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
 #define FS_PATH_EXISTS MAKE_RESULT(2, 2)
@@ -18,6 +20,32 @@
 
 const char *g_save_dir = "save";
 static int romfs_fd = -1;
+static int system_ngword2_fd = -1;
+#ifdef _WIN32
+static const uint8_t *romfs_map;
+static uint64_t romfs_map_size;
+#endif
+
+static bool romfs_legacy_layout(int fd) {
+    uint64_t h[10] = {0};
+    if (pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h) return false;
+    // Old scarlet_pc builder put file data at 0x200 and all metadata after it.
+    // Canonical Horizon RomFS keeps metadata before data, so dir-hash offset
+    // must be below data_offset.
+    return h[0] == 0x50 && h[1] > h[9];
+}
+
+static void romfs_build_progress(uint64_t done, uint64_t total) {
+    static int last = -5;
+    int pct = total ? (int)((done * 100) / total) : 100;
+    if (pct >= last + 5 || pct == 100) {
+        last = pct;
+        LOG("[fs] building romfs.bin: %d%% (%llu / %llu MiB)\n",
+            pct,
+            (unsigned long long)(done >> 20),
+            (unsigned long long)(total >> 20));
+    }
+}
 
 // ------------------------------------------------------------------ RomFS file index (offset -> path)
 typedef struct { uint64_t start, size; char *path; int fd; const uint8_t *mem; } Overlay;
@@ -48,8 +76,15 @@ RT_ON_RESET(fs_reset) {
     ov_meta = NULL, ov_meta_off = ov_meta_size = ov_end = 0;
     npatches = 0;
     rom_files = NULL, rom_nfiles = 0, rom_data_off = 0;
+#ifdef _WIN32
+    if (romfs_map) plat_unmap_file(romfs_map);
+    romfs_map = NULL;
+    romfs_map_size = 0;
+#endif
     if (romfs_fd >= 0) close(romfs_fd);
     romfs_fd = -1;
+    if (system_ngword2_fd >= 0) close(system_ngword2_fd);
+    system_ngword2_fd = -1;
     g_save_dir = "save";
 }
 
@@ -219,6 +254,53 @@ static void add_new_files(int fd, const uint64_t *h, const uint8_t *dmeta, uint6
     LOG("[fs] mod: %d new romfs files\n", added);
 }
 
+static bool romfs_validate_and_log(int fd) {
+    uint64_t h[10] = {0};
+    struct stat sb;
+    if (fstat(fd, &sb) != 0 || pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h) {
+        LOG("[fs-probe] cannot read RomFS header\n");
+        return false;
+    }
+
+    uint64_t file_size = (uint64_t)sb.st_size;
+    LOG("[fs-probe] header size=%#llx dh=%#llx+%#llx dm=%#llx+%#llx fh=%#llx+%#llx fm=%#llx+%#llx data=%#llx file=%#llx\n",
+        (unsigned long long)h[0],
+        (unsigned long long)h[1], (unsigned long long)h[2],
+        (unsigned long long)h[3], (unsigned long long)h[4],
+        (unsigned long long)h[5], (unsigned long long)h[6],
+        (unsigned long long)h[7], (unsigned long long)h[8],
+        (unsigned long long)h[9], (unsigned long long)file_size);
+
+    bool ok = h[0] == 0x50;
+    for (int i = 1; i <= 7; i += 2) {
+        uint64_t off = h[i], sz = h[i + 1];
+        if (off > file_size || sz > file_size - off) ok = false;
+    }
+    if (h[9] > file_size) ok = false;
+
+    uint8_t root[0x18] = {0};
+    if (h[4] < sizeof root || pread(fd, root, sizeof root, (off_t)h[3]) != (ssize_t)sizeof root) {
+        LOG("[fs-probe] cannot read root directory entry\n");
+        return false;
+    }
+    uint32_t parent, sibling, child, file, hash, name_size;
+    memcpy(&parent, root + 0x00, 4);
+    memcpy(&sibling, root + 0x04, 4);
+    memcpy(&child, root + 0x08, 4);
+    memcpy(&file, root + 0x0c, 4);
+    memcpy(&hash, root + 0x10, 4);
+    memcpy(&name_size, root + 0x14, 4);
+    LOG("[fs-probe] root parent=%#x sibling=%#x child=%#x file=%#x hash=%#x name=%u\n",
+        parent, sibling, child, file, hash, name_size);
+
+    if (name_size != 0) ok = false;
+    if (child != 0xffffffffu && child >= h[4]) ok = false;
+    if (file != 0xffffffffu && file >= h[8]) ok = false;
+
+    LOG("[fs-probe] structural validation: %s\n", ok ? "OK" : "FAILED");
+    return ok;
+}
+
 static void rom_index(int fd) {
     uint64_t h[10];
     if (pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h) return;
@@ -285,9 +367,19 @@ static void rom_index(int fd) {
     LOG("[fs] romfs index: %d files\n", rom_nfiles);
 }
 
+static ssize_t romfs_base_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
+#ifdef _WIN32
+    if (romfs_map && off <= romfs_map_size && size <= romfs_map_size - off) {
+        memcpy(dst, romfs_map + off, (size_t)size);
+        return (ssize_t)size;
+    }
+#endif
+    return pread(fd, dst, size, (off_t)off);
+}
+
 // Virtual RomFS image read: original bytes, with the patched file table and appended replacement files.
 static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
-    if (!ov_n) return pread(fd, dst, size, (off_t)off);
+    if (!ov_n) return romfs_base_read(fd, dst, size, off);
     uint64_t done = 0;
     while (done < size) {
         uint64_t o = off + done, n = size - done;
@@ -309,7 +401,7 @@ static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);
         } else {
             if (o + n > ov[0].start) n = ov[0].start - o;
-            ssize_t r = pread(fd, dst + done, n, (off_t)o);
+            ssize_t r = romfs_base_read(fd, dst + done, n, o);
             if (r < 0) r = 0;
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);
             // overlay the patched tables (file meta, and with added files: header, dir meta, file hash)
@@ -338,7 +430,7 @@ const char *romfs_file_at(uint64_t off) {
 
 
 // ------------------------------------------------------------------ IStorage (raw RomFS image)
-typedef struct { int fd; uint64_t size; } Storage;
+typedef struct { int fd; uint64_t size; bool game_romfs; } Storage;
 
 static void storage(Service *s, IpcReq *req, IpcResp *resp) {
     Storage *st = s->state;
@@ -348,23 +440,71 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         IpcBuf *b = out_buf(req, 0);
         if (!b) { resp->result = MAKE_RESULT(2, 6001); break; }
         if (size > b->size) size = b->size;
-        ssize_t n = romfs_read(st->fd, (uint8_t *)(uintptr_t)b->addr, size, off);
-        if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
-        {
+
+        // Windows ReadFile writes into this buffer outside the process' normal
+        // fault path. Guest buffers in our reserved address window can still be
+        // MEM_RESERVE-only here, so the OS returns an I/O failure instead of
+        // triggering lazy_commit(). Commit the destination explicitly first.
+        if (size && b->addr >= GUEST_LO && b->addr < GUEST_HI) plat_commit(b->addr, size);
+
+        uint64_t image_size = st->game_romfs && ov_n ? ov_end : st->size;
+        if (off > image_size || size > image_size - off) {
+            LOG("[fs] romfs read out of range: off=%llx size=%llx image=%llx\n",
+                (unsigned long long)off, (unsigned long long)size,
+                (unsigned long long)image_size);
+            resp->result = MAKE_RESULT(2, 6001);
+            break;
+        }
+
+        ssize_t n = st->game_romfs
+            ? romfs_read(st->fd, (uint8_t *)(uintptr_t)b->addr, size, off)
+            : pread(st->fd, (uint8_t *)(uintptr_t)b->addr, size, (off_t)off);
+
+        static unsigned early_reads;
+        if (getenv("LARECOMP_FS_PROBE") && early_reads < 16) {
+            unsigned idx = ++early_reads;
+            LOG("[fs-probe] read#%u off=%#llx size=%#llx dst=%#llx got=%lld\n",
+                idx, (unsigned long long)off, (unsigned long long)size,
+                (unsigned long long)b->addr, (long long)n);
+            if (n > 0) {
+                uint64_t dump = (uint64_t)n < 64 ? (uint64_t)n : 64;
+                LOG("[fs-probe] data:");
+                for (uint64_t j = 0; j < dump; j++)
+                    LOG(" %02x", ((uint8_t *)(uintptr_t)b->addr)[j]);
+                LOG("\n");
+            }
+        }
+
+        if (n < 0) {
+            LOG("[fs] storage read failed at %llx size %llx dst %llx: %s\n",
+                (unsigned long long)off, (unsigned long long)size,
+                (unsigned long long)b->addr, strerror(errno));
+            resp->result = MAKE_RESULT(2, 6001);
+            break;
+        }
+        if ((uint64_t)n != size) {
+            LOG("[fs] short romfs read at %llx: got %lld of %llu bytes\n",
+                (unsigned long long)off, (long long)n, (unsigned long long)size);
+            memset((uint8_t *)(uintptr_t)b->addr + n, 0, size - (uint64_t)n);
+            resp->result = MAKE_RESULT(2, 6001);
+            break;
+        }
+        if (st->game_romfs) {
             const char *path = romfs_file_at(off);
             static const char *last;
             if (path && path != last) {
                 last = path;
                 if (getenv("LARECOMP_LOG_FILES")) LOG("[fs] read %s\n", path);
             }
+            static uint64_t reads, bytes;
+            reads++;
+            bytes += size;
+            if ((reads & (reads - 1)) == 0)
+                LOG("[fs] romfs reads: %llu (%llu KB)\n", reads, bytes >> 10);
         }
-        static uint64_t reads, bytes;
-        reads++;
-        bytes += size;
-        if ((reads & (reads - 1)) == 0) LOG("[fs] romfs reads: %llu (%llu KB)\n", reads, bytes >> 10);
         break;
     }
-    case 4: OUT(uint64_t, 0) = ov_n ? ov_end : st->size; resp_size(resp, 8); break;  // GetSize
+    case 4: OUT(uint64_t, 0) = st->game_romfs && ov_n ? ov_end : st->size; resp_size(resp, 8); break;  // GetSize
     default: LOG("[fs] IStorage cmd %u (ok)\n", req->cmd);
     }
 }
@@ -372,13 +512,49 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
 static Service *open_romfs_storage(void) {
     if (romfs_fd < 0) {
         char path[1024];
-        snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // extracted/romfs.bin
+        snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // sibling of extracted romfs/ directory
         romfs_fd = open(path, O_RDONLY);
-        if (romfs_fd < 0) FATAL("cannot open %s (set up the game files on the start screen)\n", path);
+        bool rebuild = false;
+        if (romfs_fd >= 0 && romfs_legacy_layout(romfs_fd)) {
+            LOG("[fs] legacy data-first romfs.bin detected; rebuilding canonical image\n");
+            close(romfs_fd);
+            romfs_fd = -1;
+            remove(path);
+            rebuild = true;
+        }
+        if (romfs_fd < 0) {
+            struct stat sb;
+            if (stat(g_romfs_dir, &sb) != 0 || !S_ISDIR(sb.st_mode))
+                FATAL("cannot open %s and extracted RomFS directory is missing: %s\n", path, g_romfs_dir);
+
+            LOG("[fs] %s%s; building it automatically from %s\n",
+                path, rebuild ? " needs rebuild" : " not found", g_romfs_dir);
+            LOG("[fs] this is a one-time step; later boots reuse the image\n");
+            char why[512] = {0};
+            if (!romfs_build(g_romfs_dir, path, romfs_build_progress, why, sizeof why))
+                FATAL("failed to build %s from %s: %s\n", path, g_romfs_dir, why[0] ? why : "unknown error");
+
+            romfs_fd = open(path, O_RDONLY);
+            if (romfs_fd < 0) FATAL("built %s but cannot reopen it: %s\n", path, strerror(errno));
+            LOG("[fs] romfs.bin ready: %s\n", path);
+        }
+        if (!romfs_validate_and_log(romfs_fd))
+            FATAL("RomFS structural validation failed: %s\n", path);
+#ifdef _WIN32
+        if (!romfs_map) {
+            romfs_map = plat_map_file_ro(romfs_fd, &romfs_map_size);
+            if (romfs_map)
+                LOG("[fs] romfs.bin memory-mapped: %llu MiB virtual, demand-paged\n",
+                    (unsigned long long)(romfs_map_size >> 20));
+            else
+                LOG("[fs] romfs.bin memory map unavailable; using positional reads\n");
+        }
+#endif
         rom_index(romfs_fd);
     }
     Storage *st = calloc(1, sizeof *st);
     st->fd = romfs_fd;
+    st->game_romfs = true;
     struct stat sb;
     fstat(romfs_fd, &sb);
     st->size = sb.st_size;
@@ -393,6 +569,9 @@ bool romfs_image_file(const char *path, int *fd, uint64_t *off, uint64_t *size) 
         char img[1024];
         snprintf(img, sizeof img, "%s.bin", g_romfs_dir);
         if ((romfs_fd = open(img, O_RDONLY)) < 0) return false;
+#ifdef _WIN32
+        if (!romfs_map) romfs_map = plat_map_file_ro(romfs_fd, &romfs_map_size);
+#endif
         rom_index(romfs_fd);
     }
     for (int i = 0; i < rom_nfiles; i++)
@@ -432,6 +611,7 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
         int64_t off = IN(int64_t, 8), size = IN(int64_t, 16);
         IpcBuf *b = out_buf(req, 0);
         if ((uint64_t)size > b->size) size = (int64_t)b->size;
+        if (size > 0 && b->addr >= GUEST_LO && b->addr < GUEST_HI) plat_commit(b->addr, (uint64_t)size);
         ssize_t n = pread(f->fd, (void *)(uintptr_t)b->addr, (size_t)size, off);
         if (strstr(f->path, "savedata")) {
             LOG("[save] read %s off %lld size %lld -> guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)b->addr);
@@ -595,6 +775,93 @@ static Service *open_host_fs(const char *sub) {
     return service_new("IFileSystem", filesystem, fs);
 }
 
+// ------------------------------------------------------------------ synthesized system archives
+// Scarlet's nn::swkbd TextCheck enters NintendoSDK's profanity checker. On a
+// real Switch it opens system data archive 0100000000000823 (NgWord2). A
+// recompilation does not have the console firmware installed, so synthesize a
+// tiny valid replacement with empty dictionaries and expose it as raw RomFS.
+//
+// This storage is deliberately separate from the game's RomFS. The latter has
+// a memory map and mod overlays; applying those to this small system archive
+// would corrupt its reads.
+static const uint8_t ngword2_empty_dictionary[0x2c] = {
+    0x1f, 0x8b, 0x08, 0x08, 0xd5, 0x2c, 0x09, 0x5c, 0x04, 0x00, 0x61, 0x63,
+    0x72, 0x61, 0x77, 0x00, 0xed, 0xc1, 0x01, 0x0d, 0x00, 0x00, 0x00, 0xc2,
+    0x20, 0xfb, 0xa7, 0xb6, 0xc7, 0x07, 0x0c, 0x00, 0x00, 0x00, 0xc8, 0x3b,
+    0x11, 0x00, 0x1c, 0xc7, 0x00, 0x10, 0x00, 0x00,
+};
+static const uint8_t ngword2_version[4] = {0x00, 0x00, 0x00, 0x1a};
+
+static bool write_system_file(const char *path, const void *data, size_t size) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = fwrite(data, 1, size, f) == size;
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static bool build_ngword2_archive(const char *image_path) {
+    const char *src = "cache/system/ngword2-v1";
+    mkdir("cache", 0755);
+    mkdir("cache/system", 0755);
+    mkdir(src, 0755);
+
+    static const char *const kind[] = {"b1", "b2", "not_b"};
+    char path[256];
+    for (unsigned i = 0; i < 16; i++) {
+        for (unsigned k = 0; k < 3; k++) {
+            snprintf(path, sizeof path, "%s/ac_%u_%s_nx", src, i, kind[k]);
+            if (!write_system_file(path, ngword2_empty_dictionary, sizeof ngword2_empty_dictionary))
+                return false;
+        }
+    }
+    for (unsigned k = 0; k < 3; k++) {
+        snprintf(path, sizeof path, "%s/ac_common_%s_nx", src, kind[k]);
+        if (!write_system_file(path, ngword2_empty_dictionary, sizeof ngword2_empty_dictionary))
+            return false;
+    }
+    snprintf(path, sizeof path, "%s/version.dat", src);
+    if (!write_system_file(path, ngword2_version, sizeof ngword2_version)) return false;
+
+    char why[512] = {0};
+    if (!romfs_build(src, image_path, NULL, why, sizeof why)) {
+        LOG("[fs] failed to synthesize NgWord2 RomFS: %s\n", why[0] ? why : "unknown error");
+        return false;
+    }
+    LOG("[fs] synthesized system archive NgWord2 -> %s\n", image_path);
+    return true;
+}
+
+static Service *open_ngword2_storage(void) {
+    const char *image_path = "cache/system/ngword2-v1.romfs";
+
+    if (system_ngword2_fd < 0) {
+        system_ngword2_fd = open(image_path, O_RDONLY);
+        if (system_ngword2_fd >= 0 && !romfs_validate_and_log(system_ngword2_fd)) {
+            close(system_ngword2_fd);
+            system_ngword2_fd = -1;
+            remove(image_path);
+        }
+        if (system_ngword2_fd < 0) {
+            if (!build_ngword2_archive(image_path)) return NULL;
+            system_ngword2_fd = open(image_path, O_RDONLY);
+            if (system_ngword2_fd < 0) {
+                LOG("[fs] synthesized NgWord2 exists but cannot be opened: %s\n", strerror(errno));
+                return NULL;
+            }
+        }
+    }
+
+    struct stat sb;
+    if (fstat(system_ngword2_fd, &sb) != 0 || sb.st_size < 0x50) return NULL;
+
+    Storage *st = calloc(1, sizeof *st);
+    st->fd = system_ngword2_fd;
+    st->size = (uint64_t)sb.st_size;
+    st->game_romfs = false;
+    return service_new("IStorage(NgWord2)", storage, st);
+}
+
 // ------------------------------------------------------------------ fsp-srv
 SERVICE("fsp-srv", fsp_srv) {
     (void)s;
@@ -610,10 +877,25 @@ SERVICE("fsp-srv", fsp_srv) {
         break;
     }
     case 200: ipc_return_object(resp, open_romfs_storage()); break;  // OpenDataStorageByCurrentProcess
-    case 202:  // OpenDataStorageByDataId (system data archives)
-        LOG("[fs] OpenDataStorageByDataId %llx (not available)\n", IN(uint64_t, 8));
-        resp->result = MAKE_RESULT(2, 1001);
+    case 202: {  // OpenDataStorageByDataId (system data archives)
+        uint64_t data_id = IN(uint64_t, 8);
+        if (data_id == 0x0100000000000823ull) {  // NgWord2, used by nn::swkbd TextCheck
+            Service *st = open_ngword2_storage();
+            if (st) {
+                LOG("[fs] OpenDataStorageByDataId %llx -> synthesized NgWord2\n",
+                    (unsigned long long)data_id);
+                ipc_return_object(resp, st);
+            } else {
+                LOG("[fs] OpenDataStorageByDataId %llx: NgWord2 synthesis failed\n",
+                    (unsigned long long)data_id);
+                resp->result = MAKE_RESULT(2, 1001);
+            }
+        } else {
+            LOG("[fs] OpenDataStorageByDataId %llx (not available)\n", (unsigned long long)data_id);
+            resp->result = MAKE_RESULT(2, 1001);
+        }
         break;
+    }
     case 1005: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;  // GetGlobalAccessLogMode
     case 1003: case 1004: case 1006: break;
     case 1011: memset(resp->data, 0, 0x10); resp_size(resp, 0x10); break;

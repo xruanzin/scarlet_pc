@@ -24,15 +24,24 @@
 #ifndef GAMELIB_ID
 #define GAMELIB_ID "dev"
 #endif
-#define GAMELIB_ABI 3  // (3: FN_ENTER calls the function hooks, runtime/fnhook.c)
+#define GAMELIB_ABI 4  // (4: static resume entries for indirect branches inside a function)
 #define GAMELIB_MAX_MODULES 4
 
-// One table per recompiled module, in load order (main, sdk, subsdk0, subsdk1: runtime/loader.c).
+// A generated resume function enters at c->pc without repeating the guest prologue.
+// Ranges are sorted, non-overlapping, half-open, and only accept aligned instructions.
+typedef struct {
+    uint64_t lo, hi;
+    GuestFn fn;
+} GameLibResumeRange;
+
+// One table per recompiled module, in load order (Scarlet base: main, sdk, subsdk0; runtime/loader.c).
 typedef struct {
     const char *name;
     const uint64_t *addrs;  // sorted guest addresses
     const GuestFn *fns;     // the functions at them
     const uint64_t *count;
+    const GameLibResumeRange *resumes;
+    const uint64_t *resume_count;
 } GameLibModule;
 
 typedef struct {
@@ -61,3 +70,4 @@ bool gamelib_present(const char *game_dir);
 #ifdef __cplusplus
 }
 #endif
+

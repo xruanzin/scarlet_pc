@@ -1,12 +1,154 @@
 // NVN command buffers: commands are recorded into the guest-provided command memory as CmdRec
 // records, so the game's own memory management and out-of-memory callbacks work as designed.
 // A command handle is the guest address of a list's first record.
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "nvn.h"
 
 #define JUMP_RESERVE (sizeof(CmdRec) + 8)
+
+// Expanded host records must not consume the game's real NVN command-memory
+// budget. Every recording gets a tiny opaque handle in guest memory and the
+// actual CmdRec stream lives in host segments chained from that handle.
+#define HOSTSEG_SIZE (128u << 10)
+#define HOSTSEG_CAP  (256u << 20)
+typedef struct {
+    uint8_t *mem;
+    bool busy;
+    bool pending_release;
+    uint32_t refs;
+    uint64_t origin_lo, origin_hi;  // guest handle slot that owns this segment chain
+} HostSeg;
+static HostSeg *g_hostseg;
+static int g_nhostseg, g_caphostseg;
+static pthread_mutex_t g_hostseg_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void hostseg_release_range(uint64_t lo, uint64_t hi) {
+    if (!lo || hi <= lo) return;
+    pthread_mutex_lock(&g_hostseg_lock);
+    for (int i = 0; i < g_nhostseg; i++) {
+        HostSeg *s = &g_hostseg[i];
+        if (!s->busy || s->origin_hi <= lo || s->origin_lo >= hi) continue;
+        if (s->refs) s->pending_release = true;
+        else {
+            s->busy = false;
+            s->pending_release = false;
+            s->origin_lo = s->origin_hi = 0;
+        }
+    }
+    pthread_mutex_unlock(&g_hostseg_lock);
+}
+
+static uint64_t hostseg_take(NvnCmdBuf *cb) {
+    static uint64_t total;
+    uint8_t *mem = NULL;
+    pthread_mutex_lock(&g_hostseg_lock);
+    for (int i = 0; i < g_nhostseg; i++) {
+        if (!g_hostseg[i].busy && !g_hostseg[i].refs) {
+            g_hostseg[i].busy = true;
+            g_hostseg[i].pending_release = false;
+            g_hostseg[i].origin_lo = cb->host_origin_lo;
+            g_hostseg[i].origin_hi = cb->host_origin_hi;
+            mem = g_hostseg[i].mem;
+            break;
+        }
+    }
+    if (!mem && (uint64_t)(g_nhostseg + 1) * HOSTSEG_SIZE <= HOSTSEG_CAP) {
+        if (g_nhostseg == g_caphostseg) {
+            int nc = g_caphostseg ? g_caphostseg * 2 : 64;
+            HostSeg *p = realloc(g_hostseg, (size_t)nc * sizeof *p);
+            if (p) { g_hostseg = p; g_caphostseg = nc; }
+        }
+        if (g_nhostseg < g_caphostseg) {
+            mem = malloc(HOSTSEG_SIZE);
+            if (mem) {
+                g_hostseg[g_nhostseg++] = (HostSeg){
+                    .mem = mem, .busy = true, .pending_release = false, .refs = 0,
+                    .origin_lo = cb->host_origin_lo, .origin_hi = cb->host_origin_hi
+                };
+            }
+        }
+    }
+    uint64_t n = ++total;
+    int pool = g_nhostseg;
+    pthread_mutex_unlock(&g_hostseg_lock);
+    if (!mem) FATAL("nvn: host command segment pool exhausted (%u MB)\n", HOSTSEG_CAP >> 20);
+    if (n == 1 || !(n & 1023))
+        LOG("[nvn] expanded command records -> host segments (take %llu, pool %d x %u KB)\n",
+            (unsigned long long)n, pool, HOSTSEG_SIZE >> 10);
+    return (uint64_t)(uintptr_t)mem;
+}
+
+uint64_t nvn_cmdstream_pin(uint64_t handle) {
+    if (!handle) return 0;
+    uint64_t resolved = handle;
+    pthread_mutex_lock(&g_hostseg_lock);
+
+    bool matched = false;
+    // Normal NVN handle: a tiny guest CMD_JUMP whose whole host chain shares
+    // the same origin range. Pin every segment in that chain.
+    for (int i = 0; i < g_nhostseg; i++) {
+        HostSeg *s = &g_hostseg[i];
+        if (!s->busy || !s->origin_lo || handle < s->origin_lo || handle >= s->origin_hi) continue;
+        s->refs++;
+        matched = true;
+    }
+    if (matched) {
+        const CmdRec *r = (const CmdRec *)(uintptr_t)handle;
+        if (r->op == CMD_JUMP && r->x[0]) resolved = r->x[0];
+    } else {
+        // Host-only fallback / already-resolved handle: pin the segment which
+        // contains the address. Chains with a guest origin are already protected
+        // by the queue-level pin; this extra ref protects the active segment too.
+        for (int i = 0; i < g_nhostseg; i++) {
+            HostSeg *s = &g_hostseg[i];
+            uint64_t lo = (uint64_t)(uintptr_t)s->mem, hi = lo + HOSTSEG_SIZE;
+            if (s->busy && handle >= lo && handle < hi) {
+                s->refs++;
+                break;
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&g_hostseg_lock);
+    return resolved;
+}
+
+void nvn_cmdstream_unpin(uint64_t handle) {
+    if (!handle) return;
+    pthread_mutex_lock(&g_hostseg_lock);
+
+    bool matched = false;
+    for (int i = 0; i < g_nhostseg; i++) {
+        HostSeg *s = &g_hostseg[i];
+        if (!s->origin_lo || handle < s->origin_lo || handle >= s->origin_hi) continue;
+        if (s->refs) s->refs--;
+        matched = true;
+        if (!s->refs && s->pending_release) {
+            s->busy = false;
+            s->pending_release = false;
+            s->origin_lo = s->origin_hi = 0;
+        }
+    }
+    if (!matched) {
+        for (int i = 0; i < g_nhostseg; i++) {
+            HostSeg *s = &g_hostseg[i];
+            uint64_t lo = (uint64_t)(uintptr_t)s->mem, hi = lo + HOSTSEG_SIZE;
+            if (handle < lo || handle >= hi) continue;
+            if (s->refs) s->refs--;
+            if (!s->refs && s->pending_release) {
+                s->busy = false;
+                s->pending_release = false;
+                s->origin_lo = s->origin_hi = 0;
+            }
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&g_hostseg_lock);
+}
 
 static NvnCmdBuf *cb_of(uint64_t guest) { return HOST(NvnCmdBuf, guest); }
 
@@ -29,22 +171,37 @@ static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
 
 NVN(nvnCommandBufferAddCommandMemory) {
     NvnCmdBuf *cb = cb_of(A(0));
-    uint64_t mem = HOST(NvnPool, A(1))->storage + A(2), size = A(3);
-    if (cb->recording && cb->mem) {
-        // chain the list being recorded into the new chunk
-        CmdRec *j = raw_rec(cb->mem + cb->used, CMD_JUMP, sizeof(CmdRec));
-        j->x[0] = mem;
+    uint64_t size = A(3), mem = 0;
+    if (A(1) && size) mem = HOST(NvnPool, A(1))->storage + A(2);
+
+    if (mem && size) {
+        // Reusing guest command memory makes every host segment hanging from
+        // that range dead as well. Do not reclaim while a recording is still
+        // being built; that recording may itself be backed by one of them.
+        if (!cb->recording) hostseg_release_range(mem, mem + size);
+        cb->guest_mem = mem;
+        cb->guest_size = size;
+        cb->used = 0;
+        if (!cb->recording) {
+            cb->mem = mem;
+            cb->size = size;
+            cb->chunk_used = 0;
+            cb->host_segment = false;
+        }
+    } else {
+        // Some SDK callbacks can report an empty grant. Internal recording does
+        // not depend on it; BeginRecording will use a host-only opaque handle
+        // until the game supplies command memory again.
+        static int once;
+        if (!once++) LOG("[nvn] empty command-memory grant; using host recording fallback\n");
     }
-    cb->mem = mem;
-    cb->size = size;
-    cb->used = 0;
 }
 NVN(nvnCommandBufferAddControlMemory) { (void)c; }
-NVN(nvnCommandBufferGetCommandMemorySize) { RET(cb_of(A(0))->size); }
+NVN(nvnCommandBufferGetCommandMemorySize) { RET(cb_of(A(0))->guest_size); }
 NVN(nvnCommandBufferGetCommandMemoryUsed) { RET(cb_of(A(0))->used); }
 NVN(nvnCommandBufferGetCommandMemoryFree) {
     NvnCmdBuf *cb = cb_of(A(0));
-    RET(cb->size > cb->used + JUMP_RESERVE ? cb->size - cb->used - JUMP_RESERVE : 0);
+    RET(cb->guest_size > cb->used ? cb->guest_size - cb->used : 0);
 }
 NVN(nvnCommandBufferGetControlMemorySize) { RET(0x10000); }
 NVN(nvnCommandBufferGetControlMemoryUsed) { RET(0); }
@@ -55,23 +212,29 @@ NVN(nvnCommandBufferSetMemoryCallbackData) { cb_of(A(0))->callback_data = A(1); 
 NVN(nvnCommandBufferGetMemoryCallbackData) { RET(cb_of(A(0))->callback_data); }
 NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; }
 
-// Reserve a record. May call back into the guest for more memory, so callers snapshot their
-// arguments first.
+// Reserve one expanded host record. Real NVN commands are much smaller than
+// CmdRec, so exhausting a host segment must never call the game's command-memory
+// callback: that callback budgets for Maxwell command bytes, not our structures.
 static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
+    (void)c;
     uint32_t size = (uint32_t)((sizeof(CmdRec) + extra + 7) & ~7u);
-    for (int tries = 0; !cb->mem || cb->used + size + JUMP_RESERVE > cb->size; tries++) {
-        if (!cb->callback || tries == 2) FATAL("nvn: out of command memory (need %u)\n", size);
-        uint64_t saved[8];
-        memcpy(saved, c->x, sizeof saved);
-        c->x[0] = cb->guest;
-        c->x[1] = 0;  // NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY
-        c->x[2] = size + JUMP_RESERVE;
-        c->x[3] = cb->callback_data;
-        guest_call(c, cb->callback);
-        memcpy(c->x, saved, sizeof saved);
+    if (size + JUMP_RESERVE > HOSTSEG_SIZE)
+        FATAL("nvn: single expanded command record too large (%u bytes)\n", size);
+
+    if (!cb->mem || !cb->host_segment || cb->chunk_used + size + JUMP_RESERVE > cb->size) {
+        uint64_t next = hostseg_take(cb);
+        if (cb->mem && cb->host_segment) {
+            CmdRec *j = raw_rec(cb->mem + cb->chunk_used, CMD_JUMP, sizeof(CmdRec));
+            j->x[0] = next;
+        }
+        cb->mem = next;
+        cb->size = HOSTSEG_SIZE;
+        cb->chunk_used = 0;
+        cb->host_segment = true;
     }
-    CmdRec *r = raw_rec(cb->mem + cb->used, op, size);
-    cb->used += size;
+
+    CmdRec *r = raw_rec(cb->mem + cb->chunk_used, op, size);
+    cb->chunk_used += size;
     return r;
 }
 
@@ -105,6 +268,30 @@ static void obj_mark(Cpu *c, NvnCmdBuf *cb) {
 static void draw_chain(Cpu *c, const char *kind, uint64_t count);
 static uint64_t g_trace_cb[16], g_trace_list[64];  // (LARECOMP_TRACE_COUNT, below)
 static int g_ntrace_cb, g_ntrace_list;
+
+// The expanded command stream lives in host segments, but every returned NVN
+// command handle still needs one tiny stable guest slot. When that handle ring
+// is full, ask the game's normal NVN memory callback for a fresh guest chunk.
+// This is the part the letsgo-recomp path relies on: the game's allocator owns
+// command-ring lifetime, so reusing a range lets hostseg_release_range recycle
+// all expanded segments associated with the old handles.
+static bool command_handle_slot(Cpu *c, NvnCmdBuf *cb) {
+    for (int tries = 0; tries < 2; tries++) {
+        if (cb->guest_mem && cb->used + sizeof(CmdRec) <= cb->guest_size) return true;
+        if (!cb->callback) break;
+
+        uint64_t saved[8];
+        memcpy(saved, c->x, sizeof saved);
+        c->x[0] = cb->guest;
+        c->x[1] = 0;  // NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY
+        c->x[2] = sizeof(CmdRec) + JUMP_RESERVE;
+        c->x[3] = cb->callback_data;
+        guest_call(c, cb->callback);
+        memcpy(c->x, saved, sizeof saved);
+    }
+    return cb->guest_mem && cb->used + sizeof(CmdRec) <= cb->guest_size;
+}
+
 NVN(nvnCommandBufferBeginRecording) {
     draw_chain(c, "begin", 0);
     static bool hooked;  // (hooks cost every game function a lookup: only with interpolation on)
@@ -117,9 +304,49 @@ NVN(nvnCommandBufferBeginRecording) {
     }
     NvnCmdBuf *cb = cb_of(A(0));
     cb->obj_tag = 0;
+    cb->host_origin_lo = cb->host_origin_hi = 0;
+
+    // Request the next ring chunk before marking the buffer recording. That
+    // lets nvnCommandBufferAddCommandMemory safely recycle an old guest range
+    // and its host segment chain.
+    bool have_slot = command_handle_slot(c, cb);
     cb->recording = true;
-    rec(c, cb, CMD_BARRIER, 0);  // makes sure memory exists; the list starts here
-    cb->start = cb->mem + cb->used - sizeof(CmdRec);
+
+    // Keep only one opaque jump record in guest command memory. The expanded
+    // stream begins in host memory, so the game's ring usage reflects a stable
+    // per-list handle instead of our much larger CmdRec representation.
+    if (have_slot) {
+        uint64_t slot = cb->guest_mem + cb->used;
+        hostseg_release_range(slot, slot + sizeof(CmdRec));
+        cb->host_origin_lo = slot;
+        cb->host_origin_hi = slot + sizeof(CmdRec);
+        uint64_t host = hostseg_take(cb);
+        CmdRec *j = raw_rec(slot, CMD_JUMP, sizeof(CmdRec));
+        j->x[0] = host;
+        cb->used += sizeof(CmdRec);
+        cb->start = slot;
+        cb->mem = host;
+        cb->size = HOSTSEG_SIZE;
+        cb->chunk_used = 0;
+        cb->host_segment = true;
+    } else {
+        // Last-resort fallback only (missing/broken game callback). Normal
+        // Scarlet recording should never stay here frame after frame: doing so
+        // is what previously exhausted the 256 MB host-segment pool.
+        if (cb->guest_mem) cb->used = cb->guest_size;
+        uint64_t host = hostseg_take(cb);
+        cb->start = host;
+        cb->mem = host;
+        cb->size = HOSTSEG_SIZE;
+        cb->chunk_used = 0;
+        cb->host_segment = true;
+        static uint64_t fallbacks;
+        if (++fallbacks == 1 || !(fallbacks & 255))
+            LOG("[nvn] command handle host fallback %llu (guest free %llu bytes)\n",
+                (unsigned long long)fallbacks,
+                (unsigned long long)(cb->guest_size > cb->used ? cb->guest_size - cb->used : 0));
+    }
+    rec(c, cb, CMD_BARRIER, 0);
 }
 NVN(nvnCommandBufferEndRecording) {
     NvnCmdBuf *cb = cb_of(A(0));
@@ -132,7 +359,15 @@ NVN(nvnCommandBufferEndRecording) {
         }
     rec(c, cb, CMD_END, 0);
     cb->recording = false;
-    RET(cb->start);
+    uint64_t handle = cb->start;
+    // The next recording should consume the next tiny slot in the game's
+    // command-memory ring, not continue inside the host segment.
+    cb->mem = cb->guest_mem;
+    cb->size = cb->guest_size;
+    cb->chunk_used = cb->used;
+    cb->host_segment = false;
+    cb->host_origin_lo = cb->host_origin_hi = 0;
+    RET(handle);
 }
 NVN(nvnCommandBufferIsRecording) { RET(cb_of(A(0))->recording); }
 
@@ -465,8 +700,8 @@ NVN(nvnCommandBufferDrawElementsBaseVertex) {
 NVN(nvnCommandBufferDrawElementsInstanced) { trace_draw(c, c->x[3]); draw_chain(c, "elements_inst", c->x[3]); Snap s = snap(c); obj_mark(c, cb_of(s.x[0])); record(c, CMD_DRAW_ELEMENTS, 0, &s); }
 PLAIN(nvnCommandBufferDrawArraysIndirect, CMD_DRAW_ARRAYS_INDIRECT)
 PLAIN(nvnCommandBufferDrawElementsIndirect, CMD_DRAW_ELEMENTS_INDIRECT)
-NVN(nvnCommandBufferMultiDrawArraysIndirectCount) { (void)c; }
-NVN(nvnCommandBufferMultiDrawElementsIndirectCount) { (void)c; }
+PLAIN(nvnCommandBufferMultiDrawArraysIndirectCount, CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT)
+PLAIN(nvnCommandBufferMultiDrawElementsIndirectCount, CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT)
 NVN(nvnCommandBufferDrawTransformFeedback) { (void)c; }
 NVN(nvnCommandBufferDrawTexture) { (void)c; }
 PLAIN(nvnCommandBufferDispatchCompute, CMD_DISPATCH)
@@ -552,8 +787,14 @@ NVN(nvnCommandBufferCallCommands) {
                 trace_chain(c);
             }
     }
-    draw_chain(c, "call", A(1)); obj_mark(c, cb_of(A(0))); record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
-NVN(nvnCommandBufferCopyCommands) { obj_mark(c, cb_of(A(0))); record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
+    draw_chain(c, "call", A(1));
+    obj_mark(c, cb_of(A(0)));
+    record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8);
+}
+NVN(nvnCommandBufferCopyCommands) {
+    obj_mark(c, cb_of(A(0)));
+    record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8);
+}
 NVN(nvnCommandBufferInsertDebugMarker) { (void)c; }
 NVN(nvnCommandBufferInsertDebugMarkerDynamic) { (void)c; }
 NVN(nvnCommandBufferInsertDebugMarkerStatic) { (void)c; }

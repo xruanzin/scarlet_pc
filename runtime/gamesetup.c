@@ -1,5 +1,5 @@
 // Game file setup (runtime/gamesetup.h). The picked folder is searched a few levels deep (dump tools nest the files):
-// exefs/ is the folder with main and main.npdm, the RomFS either a romfs.bin image or the folder with bin/message.
+// exefs/ is the folder with main and main.npdm; the RomFS is either romfs.bin or an extracted Scarlet RomFS tree.
 // exefs/ is copied into <data root>/extracted (hard links where the file system allows), the RomFS image is copied
 // or built (runtime/romfs_build.c), then the game code is recompiled from exefs/ (runtime/gamebuild.c).
 #include "gamesetup.h"
@@ -22,12 +22,8 @@
 #include "romfs_build.h"
 
 #define ROOT "extracted"  // (in the data root, the working directory)
-// The two games (program ids, main.npdm's ACI0), any version. The 60 fps and wild battles options and the generator's
-// instruction patches are addresses in the main: only the builds with address tables get them (game_build).
-#define TITLE_EEVEE 0x0100187003A36000ull
-#define TITLE_PIKACHU 0x010003F003A34000ull
-static const uint8_t EEVEE_100[8] = {0x0a, 0x3f, 0x0d, 0x21, 0xe6, 0x7d, 0xad, 0x80};    // Let's Go, Eevee! v1.0.0 main
-static const uint8_t PIKACHU_100[8] = {0x1c, 0x37, 0x56, 0x92, 0xde, 0x4f, 0x4b, 0x87};  // Let's Go, Pikachu! v1.0.0
+// Pokémon Scarlet base program id and the known base-game main Build ID.
+#define TITLE_SCARLET 0x0100A3D008C5C000ull
 
 static _Atomic int g_state;
 static _Atomic float g_progress;
@@ -64,7 +60,7 @@ static uint64_t program_id(const char *exefs) {
 
 static bool game_ok(const char *exefs) {
     uint64_t id = program_id(exefs);
-    return id == TITLE_EEVEE || id == TITLE_PIKACHU;
+    return id == TITLE_SCARLET;
 }
 
 int game_build(const char *exefs) {
@@ -76,17 +72,14 @@ int game_build(const char *exefs) {
     fseek(f, 0x40, SEEK_SET);  // (NSO header: the module id)
     size_t n = fread(id, 1, 8, f);
     fclose(f);
-    uint64_t pid = program_id(exefs);
-    if (n == 8 && !memcmp(id, EEVEE_100, 8) && pid == TITLE_EEVEE) return GAME_BUILD_EEVEE_100;
-    if (n == 8 && !memcmp(id, PIKACHU_100, 8) && pid == TITLE_PIKACHU) return GAME_BUILD_PIKACHU_100;
+    (void)n;
+    // Scarlet-specific address hooks are not enabled yet. Keep inherited Let's Go hooks disabled.
     return GAME_BUILD_OTHER;
 }
 
 const char *game_version(const char *exefs) {
     static const struct { uint8_t id[8]; const char *v; } k[] = {
-        {{0x0a, 0x3f, 0x0d, 0x21, 0xe6, 0x7d, 0xad, 0x80}, "1.0.0"},  // Eevee
-        {{0x1c, 0x37, 0x56, 0x92, 0xde, 0x4f, 0x4b, 0x87}, "1.0.0"},  // Pikachu
-        {{0xc2, 0x08, 0xdb, 0x6a, 0x4e, 0xf4, 0x36, 0x1f}, "1.0.2"},  // Pikachu (issue #1's log)
+        {{0xca, 0x44, 0xe7, 0xdd, 0x62, 0xe6, 0x1a, 0x2a}, "1.0.0"},  // Scarlet base
     };
     char p[1100];
     snprintf(p, sizeof p, "%s/main", exefs);
@@ -99,12 +92,12 @@ const char *game_version(const char *exefs) {
     }
     for (size_t i = 0; i < sizeof k / sizeof *k; i++)
         if (!memcmp(id, k[i].id, 8)) return k[i].v;
-    return "1.0.0";  // (a build not listed here)
+    return "1.0.0";  // temporary fallback until update Build IDs are mapped
 }
 
 const char *game_name(const char *exefs) {
     uint64_t id = program_id(exefs);
-    return id == TITLE_EEVEE ? "Eevee" : id == TITLE_PIKACHU ? "Pikachu" : NULL;
+    return id == TITLE_SCARLET ? "Scarlet" : NULL;
 }
 
 bool setup_ready(void) {
@@ -121,7 +114,9 @@ static void find_game(const char *dir, int depth, Found *f) {
         snprintf(p, sizeof p, "%s/main", dir);
         if (is_file(p)) snprintf(f->exefs, sizeof f->exefs, "%s", dir);
     }
-    snprintf(p, sizeof p, "%s/bin/message", dir);
+    snprintf(p, sizeof p, "%s/arc/data.trpfs", dir);
+    if (!f->romfs[0] && is_file(p)) snprintf(f->romfs, sizeof f->romfs, "%s", dir);
+    snprintf(p, sizeof p, "%s/bin/message", dir);  // legacy layout accepted too
     if (!f->romfs[0] && is_dir(p)) snprintf(f->romfs, sizeof f->romfs, "%s", dir);
     snprintf(p, sizeof p, "%s/romfs.bin", dir);
     if (!f->romfs_bin[0] && is_file(p)) snprintf(f->romfs_bin, sizeof f->romfs_bin, "%s", p);
@@ -206,7 +201,7 @@ static void *setup_thread(void *arg) {
     g_phase0 = 0, g_phase1 = 0.01f;
     bool ok = true;
     if (!strcmp(f.exefs, f.romfs)) {  // (a flat dump, main next to bin/: only the six code files, not the whole RomFS)
-        static const char *const code[] = {"main", "main.npdm", "rtld", "sdk", "subsdk0", "subsdk1"};
+        static const char *const code[] = {"main", "main.npdm", "rtld", "sdk", "subsdk0"};
         mkdir(ROOT "/exefs", 0755);
         for (size_t i = 0; ok && i < sizeof code / sizeof *code; i++) {
             char src[1100], dst[1100];

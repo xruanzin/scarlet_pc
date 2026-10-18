@@ -6,7 +6,7 @@
 // branches become a `switch (pc)` state machine with explicit SSY/PBK/PCNT stacks.
 //
 // GLSL: the instruction body is generated in the MSL spelling and converted by glsl_rewrite() (a token-aware
-// pass: as_type<T>() -> as_u/as_f overloads, float4 -> vec4, ulong -> uint64_t, char()/short() casts -> sx8/sx16,
+// pass: as_type<T>() -> as_u/as_f bitcasts, float4 -> vec4, ulong -> uint64_t, char()/short() casts -> sx8/sx16,
 // in.x / out.x stage I/O -> GLSL globals and built-ins), helpers with MSL names (saturate, fmin, clz, mulhi, ...)
 // are defined in the GLSL prelude, and the structurally different constructs (texture lookups, global memory,
 // half-float packing, subgroup shuffles, barriers, discard, declarations and entry point) are emitted per dialect.
@@ -229,7 +229,7 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
             c->in_attr_mask |= 1u << a;
             c->vs_in_comp[a] |= 1u << comp;
             int kind = c->key ? c->key->attr_kind[a] : 0;
-            if (kind == 0) sprintf(e, "as_type<uint>(in.a%d[%d])", a, comp);
+            if (c->glsl && (kind == 1 || kind == 2)) sprintf(e, "uint(in.a%d[%d])", a, comp);
             else sprintf(e, "as_type<uint>(in.a%d[%d])", a, comp);
         } else if (addr == 0x2F8) { c->uses_iid = true; strcpy(e, "iid"); }
         else if (addr == 0x2FC) { c->uses_vid = true; strcpy(e, "vid"); }
@@ -740,6 +740,43 @@ static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
     write_tex_result(c, slot, call, mask, d0, d1, true, !bits(w, 59, 1));  // 0xd0/0xd2: .F16 results
 }
 
+// TLD4S: gather one component from four neighboring texels. Unlike TEXS, precision is bit 55 and
+// all four results are written (two per destination pair, or packed half pairs for .F16).
+// Encoding reference: Citron frontend/maxwell/translate/impl/texture_gather_swizzled.cpp.
+static void emit_tld4s(Ctx *c, uint64_t w) {
+    if (!c->glsl) { fail(c, "TLD4S requires the Vulkan GLSL backend"); return; }
+    int d0 = (int)bits(w, 0, 8), d1 = (int)bits(w, 28, 8);
+    int a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
+    bool dc = bits(w, 50, 1), offset = bits(w, 51, 1), f16 = bits(w, 55, 1);
+    int component = (int)bits(w, 52, 2);
+    if (((offset || dc) && (a & 1)) || (offset && dc && (b & 1)) ||
+        (!f16 && ((d0 != RZ && (d0 & 1)) || (d1 != RZ && (d1 & 1))))) {
+        fail(c, "unaligned TLD4S register pair"); return;
+    }
+    int slot = tex_slot(c, (uint32_t)bits(w, 36, 13), TEXTYPE_2D, dc, false);
+    char ra[16], ry[16], rb[16], rd[16], coords[160], args[320], call[640];
+    const char *A = reg(c, a, ra);
+    const char *Y = reg(c, offset || dc ? a + 1 : b, ry);
+    snprintf(coords, sizeof coords, "vec2(as_type<float>(%s), as_type<float>(%s))", A, Y);
+    args[0] = 0;
+    if (dc) {
+        const char *D = reg(c, offset ? b + 1 : b, rd);
+        snprintf(args, sizeof args, ", as_type<float>(%s)", D);
+    }
+    if (offset) {
+        const char *Bv = reg(c, b, rb);
+        // Maxwell packs signed six-bit offsets in bits 0..5 and 8..13 of Rb.
+        size_t used = strlen(args);
+        snprintf(args + used, sizeof args - used, ", ivec2(int(%s << 26) >> 26, int(%s << 18) >> 26)", Bv, Bv);
+    }
+    if (!dc) {
+        size_t used = strlen(args);
+        snprintf(args + used, sizeof args - used, ", %d", component);
+    }
+    snprintf(call, sizeof call, "%s(t%d, %s%s)", offset ? "textureGatherOffset" : "textureGather", slot, coords, args);
+    write_tex_result(c, slot, call, 15, d0, d1, true, f16);
+}
+
 // TEX (full form): coordinates from consecutive registers at gpr8, extra parameters at gpr20.
 static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
     int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
@@ -813,6 +850,11 @@ static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
 
 // ------------------------------------------------------------------ instruction translation
 static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
+    // Maxwell binaries can contain an all-zero instruction word. Real Switch
+    // decoders treat this as a NOP; failing the whole shader here broke a
+    // Scarlet compute program immediately after the player-name sequence.
+    if (w == 0) return;
+
     char t[2048], u[2048];
     int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8);
     int pr = (int)bits(w, 16, 3);
@@ -908,6 +950,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         emit_texs(c, w, false);
     } else if (OPM(0xd200000000000000ull, 0xf600000000000000ull)) {  // TLDS
         emit_texs(c, w, true);
+    } else if (OPM(0xdf00000000000000ull, 0xff40000000000000ull)) {  // TLD4S
+        emit_tld4s(c, w);
     } else if (OPM(0xc038000000000000ull, 0xfc38000000000000ull)) {  // TEX
         emit_tex(c, w, false);
     } else if (OPM(0xdeb8000000000000ull, 0xfff8000000000000ull)) {  // TEX.B (bindless)
@@ -1413,6 +1457,93 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (right) sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) >> (%s & 31u)))", hi, R(a), sh);
         else sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) << (%s & 31u)) >> 32)", hi, R(a), sh);
         set_reg(c, d, t);
+    } else if (OPM(0xea00000000000000ull, 0xff80000000000000ull)) {  // SUATOM: surface atomic, returns old value
+        // Citron decodes this family as storage-image atomics. Until the Vulkan
+        // path exposes bindless storage images, preserve control/data flow by
+        // returning a deterministic zero old-value instead of rejecting the
+        // complete shader.
+        int dst = (int)bits(w, 0, 8);
+        if (dst != RZ) set_reg(c, dst, "0u");
+        c->info->surface_fallbacks++;
+        sp(&c->body, "    /* SUATOM storage-image atomic fallback */\n");
+    } else if (OPM(0xea80000000000000ull, 0xff80000000000000ull)) {  // SUATOM.CAS
+        // CAS has two source operands and returns the previous image value.
+        // Same compatibility rule as SUATOM while native storage-image CAS is pending.
+        int dst = (int)bits(w, 0, 8);
+        if (dst != RZ) set_reg(c, dst, "0u");
+        c->info->surface_fallbacks++;
+        sp(&c->body, "    /* SUATOM.CAS storage-image fallback */\n");
+    } else if (OPM(0xeb00000000000000ull, 0xffe0000000000000ull)) {  // SULD: surface/image load
+        // Scarlet uses Maxwell surface operations in material/compute shaders. The
+        // Vulkan backend does not yet expose bindless storage images to translated
+        // GLSL. Do not discard the entire shader: return zero for the load so the
+        // rest of the material can execute. This is intentionally conservative and
+        // is replaced by real storage-image descriptors as that path is completed.
+        bool typed = bits(w, 52, 1);
+        int size = (int)bits(w, 20, 3);
+        int dst = (int)bits(w, 0, 8);
+        if (typed) {
+            int nr = size == 5 ? 2 : size >= 6 ? 4 : 1;
+            for (int k = 0; k < nr && dst + k < RZ; k++) set_reg(c, dst + k, "0u");
+        } else {
+            uint32_t swz = (uint32_t)bits(w, 20, 4);
+            // Maxwell's packed surface mask maps the common full-mask encoding
+            // (0xf) to four destination components. For partial forms, preserving
+            // four zero registers is harmless and avoids stale register data.
+            int nr = swz ? 4 : 1;
+            for (int k = 0; k < nr && dst + k < RZ; k++) set_reg(c, dst + k, "0u");
+        }
+        c->info->surface_fallbacks++;
+    } else if (OPM(0xeb20000000000000ull, 0xffe0000000000000ull)) {  // SUST: surface/image store
+        // Citron's Maxwell decoder: bit51 bound, bit52 typed, type@33, data@0,
+        // coords@8, bindless handle register@39. Scarlet's observed
+        // eb20010600f70004 is bindless, typeless, 2D, full XYZW.
+        bool bound = bits(w, 51, 1);
+        bool typed = bits(w, 52, 1);
+        int type = (int)bits(w, 33, 3);
+        uint32_t swz = (uint32_t)bits(w, 20, 4);
+        int data = (int)bits(w, 0, 8);
+        int coord = (int)bits(w, 8, 8);
+        int hreg = (int)bits(w, 39, 8);
+        if (c->glsl && c->key && c->key->bindless_storage && !bound && !typed && type == 3 && swz == 0xF &&
+            data + 3 < RZ && coord + 1 < RZ && hreg != RZ) {
+            c->info->uses_surface_write = true;
+            c->reg_used[hreg] = c->reg_used[coord] = c->reg_used[coord + 1] = 1;
+            for (int k = 0; k < 4; k++) c->reg_used[data + k] = 1;
+            sp(&c->body,
+               "    { uint _tic = r%d & 0xFFFFFu; if (_tic < uint(surfmap_.slot.length())) { uint _si = surfmap_.slot[_tic].x; "
+               "if (_si < %du) imageStore(surf_write[nonuniformEXT(_si)], ivec2(int(r%d), int(r%d)), "
+               "vec4(as_type<float>(r%d), as_type<float>(r%d), as_type<float>(r%d), as_type<float>(r%d))); "
+               "else { _si = surfmap_.slot[_tic].y; if (_si < %du) "
+               "imageStore(surf_atomic[nonuniformEXT(_si)], ivec2(int(r%d), int(r%d)), uvec4(r%d, r%d, r%d, r%d)); } } }\n",
+               hreg, (unsigned)c->key->bindless_storage, coord, coord + 1, data, data + 1, data + 2, data + 3,
+               (unsigned)c->key->bindless_storage, coord, coord + 1, data, data + 1, data + 2, data + 3);
+        } else {
+            c->info->surface_fallbacks++;
+            sp(&c->body, "    /* SUST storage-image compatibility fallback */\n");
+        }
+    } else if (OPM(0xeb40000000000000ull, 0xffe0000000000000ull)) {  // SURED: surface atomic/reduction
+        // Scarlet's observed eb50008602070a00 is bindless 2D U32 ADD:
+        // operand R0, coords R10/R11, image handle R1.
+        bool bound = bits(w, 51, 1);
+        int op = (int)bits(w, 21, 3);
+        int type = (int)bits(w, 33, 3);
+        int size = (int)bits(w, 20, 3);
+        int operand = (int)bits(w, 0, 8);
+        int coord = (int)bits(w, 8, 8);
+        int hreg = (int)bits(w, 39, 8);
+        if (c->glsl && c->key && c->key->bindless_storage && !bound && op == 0 && type == 3 && size == 0 &&
+            operand != RZ && coord + 1 < RZ && hreg != RZ) {
+            c->info->uses_surface_atomic = true;
+            c->reg_used[operand] = c->reg_used[coord] = c->reg_used[coord + 1] = c->reg_used[hreg] = 1;
+            sp(&c->body,
+               "    { uint _tic = r%d & 0xFFFFFu; if (_tic < uint(surfmap_.slot.length())) { uint _si = surfmap_.slot[_tic].y; "
+               "if (_si < %du) imageAtomicAdd(surf_atomic[nonuniformEXT(_si)], ivec2(int(r%d), int(r%d)), r%d); } }\n",
+               hreg, (unsigned)c->key->bindless_storage, coord, coord + 1, operand);
+        } else {
+            c->info->surface_fallbacks++;
+            sp(&c->body, "    /* SURED storage-image atomic compatibility fallback */\n");
+        }
     } else if (OPM(0xeed0000000000000ull, 0xfff8000000000000ull) || OPM(0xeed8000000000000ull, 0xfff8000000000000ull)) {  // LDG / STG
         bool store = bits(w, 51, 1);
         bool wide = bits(w, 45, 1);
@@ -1429,6 +1560,27 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                                                "uint(*(device ushort *)(gmem + ga))", "uint(int(*(device short *)(gmem + ga)))"};
         int nw = size == 5 ? 2 : size >= 6 ? 4 : 1;
         if (c->glsl) {  // gmem_.w[]: 32-bit words; sub-word accesses within the containing word
+            if (c->key && c->key->storage_buffers) {
+                // NVN storage descriptors contain real GPU addresses. Resolve those against the buffers
+                // actually bound to this stage, as Citron's global-memory-to-storage-buffer pass does.
+                if (store) {
+                    c->uses_gmem_store = true;
+                    if (size < 4)
+                        sp(&c->body, "      gmem_subword(ga, %du, %s);\n", size < 2 ? 8 : 16, R(d));
+                    else for (int k = 0; k < nw; k++)
+                        sp(&c->body, "      gmem_store(ga + %dul, %s);\n", k * 4, R(d == RZ ? RZ : d + k));
+                } else if (size < 4) {
+                    char value[256];
+                    snprintf(value, sizeof value, "(gmem_load(ga & ~3ul) >> (uint(ga & %s) * 8u))", size < 2 ? "3ul" : "2ul");
+                    if (size == 0) snprintf(t, sizeof t, "%s & 255u", value);
+                    else if (size == 1) snprintf(t, sizeof t, "uint(sx8(%s))", value);
+                    else if (size == 2) snprintf(t, sizeof t, "%s & 65535u", value);
+                    else snprintf(t, sizeof t, "uint(sx16(%s))", value);
+                    set_reg(c, d, t);
+                } else for (int k = 0; k < nw && d != RZ && d + k < RZ; k++) {
+                    snprintf(t, sizeof t, "gmem_load(ga + %dul)", k * 4); set_reg(c, d + k, t);
+                }
+            } else {
             static const char *const gl_small[] = {
                 "(gmem_.w[uint(ga >> 2)] >> (uint(ga & 3ul) * 8u)) & 0xFFu",
                 "uint(sx8(gmem_.w[uint(ga >> 2)] >> (uint(ga & 3ul) * 8u)))",
@@ -1453,6 +1605,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                 else
                     for (int k = 0; k < nw; k++)
                         sp(&c->body, "      if (ok) gmem_.w[uint(ga >> 2) + %du] = %s;\n", k, R(d == RZ ? RZ : d + k));
+            }
             }
         } else if (!store) {
             if (size < 4) {
@@ -1714,12 +1867,10 @@ static const char glsl_prelude[] =
     "#extension GL_KHR_shader_subgroup_shuffle_relative : require\n"
     "#extension GL_EXT_texture_shadow_lod : require\n"
     "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
-    "uint as_u(float x) { return floatBitsToUint(x); }\n"
-    "uint as_u(uint x) { return x; }\n"
-    "uint as_u(int x) { return uint(x); }\n"
-    "float as_f(uint x) { return uintBitsToFloat(x); }\n"
-    "float as_f(int x) { return intBitsToFloat(x); }\n"
-    "float as_f(float x) { return x; }\n"
+    // Typed bitcasts are intrinsics, not thousands of function calls/argument temporaries in -O0 SPIR-V.
+    // Integer vertex attributes are explicitly converted to uint in attr_load; all as_u inputs are float.
+    "#define as_u(x) floatBitsToUint(x)\n"
+    "#define as_f(x) uintBitsToFloat(x)\n"
     "int as_i(uint x) { return int(x); }\n"
     "int as_i(float x) { return floatBitsToInt(x); }\n"
     "int sx8(uint v) { return bitfieldExtract(int(v), 0, 8); }\n"
@@ -1775,7 +1926,19 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->fail) { free(body.buf); free(c->body.buf); free(c); return info; }
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};
-    sp(&s, "%s", glsl_prelude);
+    if (info->uses_surface_write || info->uses_surface_atomic) {
+        const char *rest = strchr(glsl_prelude, '\n');
+        if (rest) {
+            size_t first = (size_t)(rest - glsl_prelude + 1);
+            sp(&s, "%.*s#extension GL_EXT_nonuniform_qualifier : require\n%s",
+               (int)first, glsl_prelude, rest + 1);
+        } else {
+            sp(&s, "%s\n#extension GL_EXT_nonuniform_qualifier : require\n", glsl_prelude);
+        }
+    } else {
+        sp(&s, "%s", glsl_prelude);
+    }
+    if (any_branch) sp(&s, "#extension GL_EXT_control_flow_attributes : require\n");
     for (int i = 0; i < 18; i++) {
         if (!(info->cbuf_mask & (1u << i))) continue;
         uint32_t n = info->cbuf_size[i] / 16;
@@ -1784,9 +1947,46 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (!n) n = 1;
         sp(&s, "layout(std140, set = %d, binding = %d) uniform CB%d { uvec4 cb%d[%u]; };\n", set, i, i, i, n);
     }
-    if (info->uses_gmem)
+    info->writes_gmem = c->uses_gmem_store;
+    info->storage_buffers = info->uses_gmem && key ? key->storage_buffers : 0;
+    if (info->storage_buffers > 16) info->storage_buffers = 16;
+    if (info->storage_buffers) {
+        sp(&s, "layout(std140, set = %d, binding = 17) uniform GMemMap { uvec4 range[%u]; } gmmap_;\n", set, info->storage_buffers);
+        for (int i = 0; i < info->storage_buffers; i++)
+            sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem%d { uint w[]; } gm%d_;\n",
+               set, 64 + i, c->uses_gmem_store ? "" : "readonly ", i, i);
+        sp(&s, "uint gmem_load(uint64_t ga) { uint64_t a = ga + 0x%llxul;\n", (unsigned long long)maxwell_gmem_base);
+        for (int i = 0; i < info->storage_buffers; i++)
+            sp(&s, "{ uvec4 r = gmmap_.range[%d]; uint64_t b = uint64_t(r.x) | (uint64_t(r.y) << 32); "
+               "if (a >= b && a - b + 4ul <= uint64_t(r.z)) return gm%d_.w[uint((a - b + r.w) >> 2)]; }\n", i, i);
+        sp(&s, "return 0u; }\n");
+        if (c->uses_gmem_store) {
+            sp(&s, "void gmem_store(uint64_t ga, uint v) { uint64_t a = ga + 0x%llxul;\n", (unsigned long long)maxwell_gmem_base);
+            for (int i = 0; i < info->storage_buffers; i++)
+                sp(&s, "{ uvec4 r = gmmap_.range[%d]; uint64_t b = uint64_t(r.x) | (uint64_t(r.y) << 32); "
+                   "if (a >= b && a - b + 4ul <= uint64_t(r.z)) { gm%d_.w[uint((a - b + r.w) >> 2)] = v; return; } }\n", i, i);
+            sp(&s, "}\nvoid gmem_subword(uint64_t ga, uint bits, uint v) { uint64_t a = (ga & ~3ul) + 0x%llxul; "
+               "uint sh = uint(ga & (bits == 8u ? 3ul : 2ul)) * 8u; uint m = ((1u << bits) - 1u) << sh;\n", (unsigned long long)maxwell_gmem_base);
+            for (int i = 0; i < info->storage_buffers; i++)
+                sp(&s, "{ uvec4 r = gmmap_.range[%d]; uint64_t b = uint64_t(r.x) | (uint64_t(r.y) << 32); "
+                   "if (a >= b && a - b + 4ul <= uint64_t(r.z)) { uint k = uint((a - b + r.w) >> 2); "
+                   "atomicAnd(gm%d_.w[k], ~m); atomicOr(gm%d_.w[k], (v << sh) & m); return; } }\n", i, i, i);
+            sp(&s, "}\n");
+        }
+    } else if (info->uses_gmem)
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");
+    if (info->uses_surface_write || info->uses_surface_atomic) {
+        sp(&s, "layout(std430, set = %d, binding = 120) readonly buffer SurfaceMap { uvec2 slot[]; } surfmap_;\n", set);
+        if (info->uses_surface_write)
+            sp(&s, "layout(set = %d, binding = 121) writeonly uniform image2D surf_write[%u];\n", set,
+               key && key->bindless_storage ? key->bindless_storage : 1);
+        // Typeless SUST uses the descriptor's component type. R32_UINT stores share the existing integer
+        // image array with SURED; reinterpreting the register as float would corrupt (or drop) the store.
+        if (info->uses_surface_atomic || info->uses_surface_write)
+            sp(&s, "layout(r32ui, set = %d, binding = 122) uniform uimage2D surf_atomic[%u];\n", set,
+               key && key->bindless_storage ? key->bindless_storage : 1);
+    }
     if (c->uses_rscale && stage != STAGE_VERTEX) {
         sp(&s, "layout(std140, set = %d, binding = 18) uniform RScale { vec4 rscale[65]; };\n", set);
         info->uses_rscale = true;
@@ -1852,7 +2052,9 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (any_branch) {
         sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0u; uint pbk[16]; uint pbk_n = 0u; uint pcnt[16]; uint pcnt_n = 0u;\n");
         sp(&s, "  bool exit_now = false;\n");
-        sp(&s, "  for (uint guard = 0u; guard < 100000u; guard++) {\n  switch (pc) {\n");
+        // This is a bounded shader control-flow dispatcher. Request a rolled loop so an optimizer does not
+        // expand its large execution guard into copies of the body.
+        sp(&s, "  [[dont_unroll]] for (uint guard = 0u; guard < 100000u; guard++) {\n  switch (pc) {\n");
         sp(&s, "%s", body.buf ? body.buf : "");
         sp(&s, "    exit_now = true; break;\n  default: exit_now = true; break;\n  }\n  if (exit_now) break;\n  }\n");
     } else {
@@ -1900,7 +2102,58 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     return info;
 }
 
+static bool previous_instruction(size_t *index) {
+    if (*index <= 1) return false;
+    --*index;
+    if (!(*index % 4)) --*index;
+    return *index != 0;
+}
+
+static bool unpredicated(uint64_t w) { return bits(w, 16, 4) == PT; }
+
+// Recognize the compiler's bounded jump-table sequence:
+//   IMNMX.U32 idx, selector, last, PT; SHL addr, idx, 2; LDC.U32 dest, c1[addr+offset]; BRX dest+relative
+// Require adjacent, unconditional definitions and no entry into the middle of that proof. Unknown patterns
+// keep the full dispatcher. CB1 is the program's immutable constant section, not an arbitrary bound buffer.
+static bool indirect_table(const uint64_t *code, size_t end, size_t brx, const uint8_t *constants,
+                           size_t constants_size, uint8_t *label, uint8_t *proof_interior) {
+    if (!constants || !constants_size) return false;
+    size_t ldc = brx, shl, clamp;
+    if (!previous_instruction(&ldc)) return false;
+    shl = ldc; if (!previous_instruction(&shl)) return false;
+    clamp = shl; if (!previous_instruction(&clamp)) return false;
+    uint64_t b = code[brx], l = code[ldc], s = code[shl], m = code[clamp];
+    if ((l & 0xfff8000000000000ull) != 0xef90000000000000ull || bits(l, 48, 3) != 4 ||
+        bits(l, 44, 2) || bits(l, 36, 5) != 1 || bits(l, 0, 8) != bits(b, 8, 8) ||
+        bits(l, 8, 8) == RZ || bits(l, 0, 8) == RZ || !unpredicated(l)) return false;
+    if ((s & 0xfef8000000000000ull) != 0x3848000000000000ull || bits(s, 20, 19) != 2 || bits(s, 56, 1) ||
+        bits(s, 0, 8) != bits(l, 8, 8) || bits(s, 8, 8) == RZ || !unpredicated(s)) return false;
+    if ((m & 0xfef8000000000000ull) != 0x3820000000000000ull || bits(m, 56, 1) || bits(m, 48, 1) ||
+        bits(m, 43, 2) || bits(m, 47, 1) || bits(m, 39, 4) != PT ||
+        bits(m, 0, 8) != bits(s, 8, 8) || !unpredicated(m)) return false;
+    uint32_t count = (uint32_t)bits(m, 20, 19) + 1, offset = (uint32_t)bits(l, 20, 16);
+    if (count > 256 || (offset & 3) || (uint64_t)offset + (uint64_t)count * 4 > constants_size ||
+        (uint64_t)offset + (uint64_t)count * 4 > 65536) return false;
+    uint32_t targets[256];
+    for (uint32_t j = 0; j < count; j++) {
+        uint32_t entry; memcpy(&entry, constants + offset + j * 4, 4);
+        uint32_t t = (uint32_t)(brx * 8 + 8) + entry + (uint32_t)sbits(b, 20, 24);
+        if (t & 7) return false;
+        if (!((t >> 3) & 3)) t += 8; // scheduling word, same normalization as the GPU dispatcher
+        if ((size_t)(t / 8) >= end) return false;
+        targets[j] = t / 8;
+    }
+    for (uint32_t j = 0; j < count; j++) label[targets[j]] = 1;
+    proof_interior[brx] = proof_interior[ldc] = proof_interior[shl] = 1;
+    return true;
+}
+
 ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
+    return maxwell_translate_with_constants(blob, max_size, stage, key, NULL, 0);
+}
+
+ShaderInfo *maxwell_translate_with_constants(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key,
+                                            const uint8_t *constants, size_t constants_size) {
     ShaderInfo *info = calloc(1, sizeof *info);
     info->stage = stage;
     Ctx *c = calloc(1, sizeof *c);
@@ -1945,15 +2198,28 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
             if (t >= 0 && (size_t)(t / 8) < end) label[t / 8] = 1;
             any_branch = true;
         }
-        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: any instruction may be a target
+        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: prove table targets below, otherwise retain every instruction
             any_branch = true;
-            memset(label, 1, end);
         }
         if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || (w & 0xfff0000000000000ull) == 0xe340000000000000ull ||
             (w & 0xfff0000000000000ull) == 0xe350000000000000ull)
             any_branch = true;
         (void)is_branch_target_op;
     }
+    uint8_t *proof_interior = calloc(end + 4, 1);
+    bool all_labels = false;
+    for (size_t i = 1; i < end; i++) {
+        if (!(i % 4) || ((((const uint64_t *)code)[i] & 0xfff0000000000000ull) != 0xe250000000000000ull)) continue;
+        if (c->glsl && indirect_table((const uint64_t *)code, end, i, constants, constants_size, label, proof_interior))
+            info->indirect_tables++;
+        else { info->indirect_fallbacks++; all_labels = true; }
+    }
+    for (size_t i = 1; i < end; i++) if (label[i] && proof_interior[i]) {
+        all_labels = true; info->indirect_fallbacks++; break;
+    }
+    if (all_labels) memset(label, 1, end);
+    free(proof_interior);
+    if (any_branch) for (size_t i = 1; i < end; i++) if (i % 4 && label[i]) info->dispatch_labels++;
     // translate
     bool dbg = maxwell_dbg_code && blob == maxwell_dbg_code && stage == STAGE_FRAGMENT;
     static int annotate = -1;

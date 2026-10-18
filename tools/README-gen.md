@@ -6,4 +6,5 @@ Copiado do LASRecomp (`tools/`, licença MIT, © 2026 Peiikai): `gen.py`, `lifte
 Uso (a partir desta pasta, com o venv do projeto):
 
     ../../.venv/Scripts/python gen.py main    ../../extracted/exefs/main    0x7000000000 ../../generated/main --simd c
-    ../../.venv/Scripts/python gen.py sdk     ../../extracted/exefs/sdk     0x7004000000 ../../generated/sdk  --simd c
+    ../../.venv/Scripts/python gen.py sdk     ../../extracted/exefs/sdk     0x7006000000 ../../generated/sdk  --simd c
+    ../../.venv/Scripts/python gen.py subsdk0 ../../extracted/exefs/subsdk0 0x7008000000 ../../generated/subsdk0 --simd c
