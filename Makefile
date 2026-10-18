@@ -115,6 +115,7 @@ all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))
 
 $(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h
 	@mkdir -p $(dir $@)
+	@echo "[game-cc] $<"
 	@$(CC) $(GENFLAGS) -c $< -o $@
 
 $(B)/obj/tools/gamelib_entry.o: tools/gamelib_entry.c $(GAMELIB_SRCS)
