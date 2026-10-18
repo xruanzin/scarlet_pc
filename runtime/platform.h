@@ -39,6 +39,8 @@ const void *plat_map_file_ro(int fd, uint64_t *size);
 void plat_unmap_file(const void *ptr);
 // Horizon CpuBoostMode::FastLoad mapped to a temporary Windows scheduling boost.
 void plat_set_cpu_boost(bool enabled);
+// Apply the current guest thread's Horizon priority/core as Windows scheduler hints.
+void plat_guest_thread_config(int priority, int core);
 // Native modal text entry centered over the game window. Returns 1 = OK, 0 = cancel.
 int plat_text_input_dialog(const char *title, const char *subtitle, const char *guide,
                            const char *initial, int min_chars, int max_chars,
