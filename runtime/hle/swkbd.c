@@ -23,9 +23,12 @@
 #include "../hle.h"
 #include "../platform.h"
 
-#ifndef _WIN32
-int menu_keyboard_run(const char *initial, int max_len, char *out, int cap);
-#endif
+// Switch-style in-window software keyboard (runtime/ui/menu.mm). The game
+// thread waits here while SDL/main + render threads keep presenting the applet.
+int menu_keyboard_run(const char *initial, int min_len, int max_len,
+                      const char *title, const char *sub, const char *guide,
+                      const char *error, int prompt_mode,
+                      char *out, int cap);
 
 #define SWKBD_RESULT_CANCELED 0x29Fu
 enum {
@@ -147,14 +150,55 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
     if (work && init_len)
         u16_to_utf8((const uint16_t *)(uintptr_t)(work + init_off), init_len, initial, sizeof initial);
 
-#ifdef _WIN32
-    int ok = plat_text_input_dialog(title, sub, guide, initial, min_len, max_len, text, sizeof text);
-#else
-    int ok = menu_keyboard_run(initial, max_len, text, sizeof text);
-#endif
+    char error[0x800] = "";
+    char current[sizeof initial];
+    snprintf(current, sizeof current, "%s", initial);
+    int ok = 0;
 
-    LOG("[swkbd] text input max=%d min=%d utf8=%u textCheck=%u callback=%llx initial=\"%s\" -> %s%s%s\n",
-        max_len, min_len, use_utf8, use_text_check, (unsigned long long)text_check_cb, initial,
+    for (;;) {
+        ok = menu_keyboard_run(current, min_len, max_len, title, sub, guide,
+                               error, 0, text, sizeof text);
+        if (!ok) break;
+
+        LOG("[swkbd] candidate max=%d min=%d utf8=%u textCheck=%u callback=%llx -> \"%s\"\n",
+            max_len, min_len, use_utf8, use_text_check,
+            (unsigned long long)text_check_cb, text);
+
+        if (!use_text_check || !text_check_cb) break;
+
+        // nn::swkbd TextCheck callback ABI (same contract as libnx):
+        //   SwkbdTextCheckResult cb(char *tmp_string, size_t tmp_string_size)
+        // tmp_string enters as UTF-8. On failure the callback may replace it
+        // with the message the applet must show.
+        enum { TEXTCHECK_BUF = 0x800 };
+        char *tmp = hle_alloc(TEXTCHECK_BUF);
+        snprintf(tmp, TEXTCHECK_BUF, "%s", text);
+        c->x[0] = (uint64_t)(uintptr_t)tmp;
+        c->x[1] = TEXTCHECK_BUF;
+        guest_call(c, text_check_cb);
+        uint32_t check = (uint32_t)c->x[0];
+
+        LOG("[swkbd] text-check result=%u message=\"%s\"\n", check, tmp);
+        if (check == 0) break;  // OK
+
+        // 1 Bad: show callback message and return to keyboard.
+        // 2 Prompt: show message and offer "Use anyway" in the applet.
+        // >=3 Silent: simply return to keyboard without a message.
+        snprintf(current, sizeof current, "%s", text);
+        if (check == 2) {
+            int prompt = menu_keyboard_run(current, min_len, max_len, title, sub, guide,
+                                           tmp[0] ? tmp : "Use this text anyway?", 1,
+                                           text, sizeof text);
+            if (prompt == 2) break; // explicit "Use anyway"
+            if (!prompt) { ok = 0; break; }
+            snprintf(current, sizeof current, "%s", text);
+            error[0] = 0;
+        } else {
+            snprintf(error, sizeof error, "%s", check == 1 ? tmp : "");
+        }
+    }
+
+    LOG("[swkbd] final -> %s%s%s\n",
         ok ? "entered \"" : "cancelled", ok ? text : "", ok ? "\"" : "");
 
     if (!ok) {
@@ -165,9 +209,8 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
     if (ptr && size) {
         memset((void *)(uintptr_t)ptr, 0, (size_t)size);
         if (use_utf8) {
-            // isUseUtf8 is part of ShowKeyboardArg. Scarlet uses this path for
-            // the player name; returning UTF-16 here leaves game-side validation
-            // looking at "r\0u\0...", which was the post-name hang.
+            // ShowKeyboardArg requests the final String encoding independently
+            // of TextCheck (whose callback always receives temporary UTF-8).
             snprintf((char *)(uintptr_t)ptr, (size_t)size, "%s", text);
         } else {
             uint16_t *dst = (uint16_t *)(uintptr_t)ptr;
