@@ -151,7 +151,11 @@ static uint64_t resolve(Module *m, uint32_t symidx) {
     const char *name = symname(m, s);
     if (s->shndx) return m->base + s->value;
     HostFn impl = hle_lookup_impl(name);
-    if (impl) return hle_register(name, impl);  // host implementation wins over the guest SDK's
+    if (impl) {
+        if (ENV("LARECOMP_LOG_BINDINGS"))
+            LOG("[loader] HLE bind %s <- %s\n", m->name, name);
+        return hle_register(name, impl);  // host implementation wins over the guest SDK's
+    }
     uint64_t a = loader_find_symbol(name);
     if (a) return a;
     if ((s->info >> 4) == 2) return 0;  // weak undefined
