@@ -580,7 +580,10 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
         uint32_t now = 0;
         int changed = texture_pages_changed(t->addr, total, b->wgen, &now);
         if (changed >= 0) {
-            if (!watch_told++) LOG("[vk] texture page write-watch enabled\n");
+            if (!watch_told) {
+                watch_told = 1;
+                LOG("[vk] texture page write-watch enabled\n");
+            }
             b->wgen = now;
             if (!changed && b->uploaded) {
                 if (!periodic) {
