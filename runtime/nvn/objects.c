@@ -720,13 +720,13 @@ NVN(nvnQueuePresentTexture) {
     }
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
-    if (w && i >= 0 && i < w->ntextures) {
+    if (w && i >= 0 && i < w->num) {
         static NvnTexture *last_tex;
         static int last_i = -1;
-        NvnTexture *pt = w->textures[i];
+        NvnTexture *pt = HOST(NvnTexture, w->textures[i]);
         if (pt != last_tex || i != last_i) {
             LOG("[present] window texture %d/%d -> %p (%ux%u fmt %#x)\n",
-                i, w->ntextures, (void *)pt,
+                i, w->num, (void *)pt,
                 pt ? pt->width : 0, pt ? pt->height : 0, pt ? pt->format : 0);
             last_tex = pt; last_i = i;
         }
