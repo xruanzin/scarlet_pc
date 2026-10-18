@@ -304,7 +304,11 @@ static uint64_t std_guest_alloc(uint64_t size, uint64_t align) {
     g_std_live_bytes += size;
     pthread_mutex_unlock(&g_std_lock);
 
-    plat_commit(addr, size);
+    // The whole guest window is already reserved on Windows and its vectored
+    // handler commits 64 KiB chunks on first touch. Committing every malloc here
+    // turned object-heavy loading into thousands of VirtualAlloc syscalls.
+    // Host APIs that cannot trigger a user-mode page fault (notably ReadFile)
+    // explicitly commit their destination buffers before use.
     return addr;
 }
 
