@@ -52,12 +52,15 @@ typedef struct {
     NvnTexture *tex;
     NvnTextureView view;
     bool has_view;
+    bool is_image;      // registered through nvnTexturePoolRegisterImage (storage-capable descriptor)
+    uint32_t image_seq; // most-recent registrations first when compacting the bindless image set
 } NvnTexEntry;
 
 typedef struct NvnDescPool {
     uint64_t addr;
     int count;
     void *entries;  // NvnTexEntry[] or NvnSamplerDesc[]
+    uint32_t generation; // bumps when descriptor contents change
 } NvnDescPool;
 
 typedef struct NvnShaderStage {
