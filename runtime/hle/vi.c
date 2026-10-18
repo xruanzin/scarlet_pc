@@ -33,7 +33,11 @@ static void *vsync_thread(void *arg) {
     return NULL;
 }
 
-HLE_FUNC("_ZN2nn2vi10InitializeEv", vi_initialize) { (void)c; }
+HLE_FUNC("_ZN2nn2vi10InitializeEv", vi_initialize) {
+    static int once;
+    if (!once++) LOG("[gfx-milestone] VI initialize reached\n");
+    (void)c;
+}
 HLE_FUNC("_ZN2nn2vi8FinalizeEv", vi_finalize) { (void)c; }
 
 HLE_FUNC("_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", vi_open_default_display) {
@@ -44,7 +48,9 @@ HLE_FUNC("_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", vi_open_default_displa
 HLE_FUNC("_ZN2nn2vi12CloseDisplayEPNS0_7DisplayE", vi_close_display) { (void)c; }
 
 HLE_FUNC("_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE", vi_create_layer) {
+    static unsigned nlayer;
     *(uint64_t *)(uintptr_t)c->x[0] = (uint64_t)hle_alloc(0x100);
+    LOG("[gfx-milestone] VI layer #%u created\n", ++nlayer);
     c->x[0] = 0;
 }
 
@@ -57,7 +63,10 @@ HLE_FUNC("_ZN2nn2vi19SetLayerScalingModeEPNS0_5LayerENS0_11ScalingModeE", vi_set
 }
 
 HLE_FUNC("_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE", vi_get_native_window) {
-    if (!g_native_window) g_native_window = (uint64_t)hle_alloc(0x100);
+    if (!g_native_window) {
+        g_native_window = (uint64_t)hle_alloc(0x100);
+        LOG("[gfx-milestone] native window created @ %llx\n", (unsigned long long)g_native_window);
+    }
     *(uint64_t *)(uintptr_t)c->x[0] = g_native_window;
     c->x[0] = 0;
 }
@@ -85,7 +94,11 @@ HLE_FUNC("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7Display
     c->x[0] = 0;
 }
 
-HLE_FUNC("_ZN2nv18InitializeGraphicsEPvm", nv_initialize_graphics) { (void)c; }
+HLE_FUNC("_ZN2nv18InitializeGraphicsEPvm", nv_initialize_graphics) {
+    static int once;
+    if (!once++) LOG("[gfx-milestone] nv::InitializeGraphics reached\n");
+    (void)c;
+}
 HLE_FUNC("_ZN2nv16FinalizeGraphicsEv", nv_finalize_graphics) { (void)c; }
 HLE_FUNC("_ZN2nv20SetGraphicsAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_", nv_set_allocator) { (void)c; }
 HLE_FUNC("_ZN2nv28SetGraphicsDevtoolsAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_", nv_set_dt_allocator) { (void)c; }
