@@ -36,7 +36,7 @@ static uint64_t module_init_status_addr(Module *m) {
             uint64_t immhi = (w >> 5) & 0x7FFFFu;
             int64_t imm = (int64_t)((immhi << 2) | immlo);
             if (imm & (1ll << 20)) imm -= 1ll << 21;
-            page[rd] = (pc & ~0xFFFull) + (uint64_t)(imm << 12);
+            page[rd] = (pc & ~0xFFFull) + (uint64_t)(imm * 0x1000ll);
         } else if ((w & 0xFFC0001Fu) == 0xB9400008u) {  // LDR W8,[Xn,#imm]
             uint32_t rn = (w >> 5) & 31u;
             if (page[rn])
