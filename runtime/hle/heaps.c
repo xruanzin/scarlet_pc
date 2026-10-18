@@ -353,7 +353,7 @@ static uint64_t std_guest_realloc(uint64_t addr, uint64_t size) {
 static uint64_t std_guest_size(uint64_t addr) {
     uint64_t size = 0;
     pthread_mutex_lock(&g_std_lock);
-    StdAllocRec *r = std_find_locked(addr, NULL);
+    StdAllocRec *r = std_rec_find_locked(addr);
     if (r) size = r->size;
     pthread_mutex_unlock(&g_std_lock);
     return size;
