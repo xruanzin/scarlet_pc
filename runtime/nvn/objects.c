@@ -36,7 +36,14 @@ NVN(nvnDeviceBuilderSetFlags) { G(uint32_t, A(0), 0) = (uint32_t)A(1); }
 NVN(nvnDeviceBuilderGetFlags) { RET(G(uint32_t, A(0), 0)); }
 NVN(nvnDeviceInitialize) {
     static bool once;
-    if (!once) { once = true; backend_init(); }
+    if (!once) {
+        once = true;
+        backend_init();
+        extern uint64_t g_boot_started_ns;
+        uint64_t now = plat_now_ns();
+        LOG("[boot-time] Vulkan/NVN device ready after %.3f s\n",
+            g_boot_started_ns ? (double)(now - g_boot_started_ns) / 1e9 : 0.0);
+    }
     LOG("[nvn] device initialized\n");
     RET(1);
 }
