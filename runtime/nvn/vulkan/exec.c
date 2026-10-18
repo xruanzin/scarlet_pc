@@ -602,7 +602,8 @@ static struct {
     int nattrib;
     uint32_t stream[16][2];
     int nstream;
-    Range vbuf[16], ubuf[6][18], sbuf[6][16];
+    Range vbuf[16], ubuf[6][18], sbuf[6][16], tfbuf[4];
+    bool tf_active;
     uint64_t tex[6][32], img[6][8];
     NvnDescPool *tpool, *spool;
     float viewport[16][4];
@@ -1891,6 +1892,8 @@ static bool gmem_import(uint64_t size) {
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = size,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                      (g_vk.transform_feedback ? (VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT |
+                                                                   VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT) : 0) |
                                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT};  // (uniforms read in place: cbuf_info)
     VkBuffer buf;
     if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) { vkFreeMemory(g_vk.dev, mem, NULL); return false; }
@@ -2472,6 +2475,7 @@ static void draw_(CmdRec *r, bool indexed) {
     vkey.storage_buffers = fkey.storage_buffers = storage_buffer_count();
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
+    vkey.xfb = st.tf_active && g_vk.transform_feedback;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
@@ -2533,6 +2537,21 @@ static void draw_(CmdRec *r, bool indexed) {
         if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
     begin_pass();
     VkCommandBuffer cb = vk_cmd();
+
+    if (st.tf_active && g_vk.transform_feedback) {
+        VkBuffer bufs[4];
+        VkDeviceSize offs[4], sizes[4];
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < 4; i++) {
+            if (!st.tfbuf[i].addr || !st.tfbuf[i].size) continue;
+            VkBuffer b; VkDeviceSize o;
+            if (!guest_direct(st.tfbuf[i].addr, st.tfbuf[i].size, &b, &o)) continue;
+            // Scarlet binds streams densely from zero in all captured TF passes.
+            if (i != n) break;
+            bufs[n] = b; offs[n] = o; sizes[n] = st.tfbuf[i].size; n++;
+        }
+        if (n) vkCmdBindTransformFeedbackBuffersEXT(cb, 0, n, bufs, offs, sizes);
+    }
 
     uint32_t mode = (uint32_t)r->x[0];
     VkPrimitiveTopology topo;
@@ -3540,6 +3559,38 @@ static void exec_list(uint64_t handle, int depth) {
             for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 18 && r->x[0] < 6; i++)
                 memcpy(&st.ubuf[r->x[0]][r->x[1] + i], (uint8_t *)x + i * 16, 16);
             break;
+        case CMD_BIND_TRANSFORM_FEEDBACK_BUFFERS:
+            for (uint64_t i = 0; i < r->x[1] && r->x[0] + i < 4; i++)
+                memcpy(&st.tfbuf[r->x[0] + i], (uint8_t *)x + i * 16, 16);
+            break;
+        case CMD_BEGIN_TRANSFORM_FEEDBACK:
+        case CMD_RESUME_TRANSFORM_FEEDBACK: {
+            if (!g_vk.transform_feedback) break;
+            vk_end_pass();
+            VkCommandBuffer cb = vk_cmd();
+            VkBuffer counter = VK_NULL_HANDLE;
+            VkDeviceSize coff = 0;
+            uint32_t ncounter = 0;
+            if (r->op == CMD_RESUME_TRANSFORM_FEEDBACK && r->x[0] &&
+                guest_direct(r->x[0], 4, &counter, &coff)) ncounter = 1;
+            vkCmdBeginTransformFeedbackEXT(cb, 0, ncounter, ncounter ? &counter : NULL, ncounter ? &coff : NULL);
+            st.tf_active = true;
+            break;
+        }
+        case CMD_END_TRANSFORM_FEEDBACK:
+        case CMD_PAUSE_TRANSFORM_FEEDBACK: {
+            if (!g_vk.transform_feedback || !st.tf_active) break;
+            vk_end_pass();
+            VkCommandBuffer cb = vk_cmd();
+            VkBuffer counter = VK_NULL_HANDLE;
+            VkDeviceSize coff = 0;
+            uint32_t ncounter = 0;
+            if (r->x[0] && guest_direct(r->x[0], 4, &counter, &coff)) ncounter = 1;
+            vkCmdEndTransformFeedbackEXT(cb, 0, ncounter, ncounter ? &counter : NULL, ncounter ? &coff : NULL);
+            vk_full_barrier(cb);
+            st.tf_active = false;
+            break;
+        }
         case CMD_BIND_STORAGE_BUFFERS:
             for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 16 && r->x[0] < 6; i++)
                 memcpy(&st.sbuf[r->x[0]][r->x[1] + i], (uint8_t *)x + i * 16, 16);
