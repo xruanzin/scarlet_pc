@@ -12,6 +12,7 @@
 #include "kernel.h"
 
 const char *g_romfs_dir;
+uint64_t g_boot_started_ns;
 
 // rtld normally passes these to nn::init::Start: run every module's init/fini arrays.
 static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
@@ -176,6 +177,8 @@ static void teardown(void) {
 }
 
 static void boot(const char *root) {
+    g_boot_started_ns = plat_now_ns();
+    LOG("[boot-time] boot start\n");
     char exefs[1024], romfs[1024], npdm_path[1024];
     snprintf(exefs, sizeof exefs, "%s/exefs", root);
     snprintf(romfs, sizeof romfs, "%s/romfs", root);
