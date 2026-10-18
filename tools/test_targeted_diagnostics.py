@@ -50,7 +50,7 @@ DUMPS = r'''
 #include "nvn/diagnostics.c"
 int main(int argc, char **argv) {
     assert(argc == 2);
-    _Alignas(8) uint8_t control[0x704], header[0x80];
+    _Alignas(8) uint8_t control[0x880], header[0x80];
     memset(control, 0xa5, sizeof control); memset(header, 0x7c, sizeof header);
     NvnShaderStage s = {.stage = 0, .code_addr = (uintptr_t)header, .control = control,
         .const_offset = 0x400, .const_size = 0x20};
@@ -75,12 +75,18 @@ int main(int argc, char **argv) {
     NvnProgram p = {0}; NvnCmdBuf cb = {.guest = 0x123};
     for (int i = 128; i < 257; i++) {
         memset(control, 0x5e, sizeof control);
+        *(uint32_t *)(control + 0x00) = 0x98761234;
+        *(uint32_t *)(control + 0x6f0) = 0x880;
+        *(uint32_t *)(control + 0x6f8) = 0x50;
+        *(uint32_t *)(control + 0x704) = 0x80;
+        *(uint32_t *)(control + 0x708) = 0x30;
+        *(uint32_t *)(control + 0x714) = 0;
         p.stages[0] = (NvnShaderStage){.stage = 0, .code_addr = (uintptr_t)header + i,
             .control = control};
         nvn_diag_shader(&p.stages[0]);
-        assert(p.stages[0].diag_snapshot);
-        // Caller storage may be changed/released between SetShaders and binding.
-        memset(control, 0, sizeof control);
+        // Once the ordinary quota is full, late programs consume no retained
+        // snapshot memory. TF captures the currently bound program on use.
+        assert(!p.stages[0].diag_snapshot);
         nvn_diag_bind_program(&cb, &p, 1);
         if (i == 128) {
             assert(diag_tf_nseen == 0); // bound before Begin
@@ -89,7 +95,6 @@ int main(int argc, char **argv) {
         }
         nvn_diag_bind_program(&cb, &p, 1); // repeated TF bindings must deduplicate
         nvn_diag_bind_program(&cb, NULL, 1); // stage unbinding
-        nvn_diag_shader_release(&p.stages[0]);
     }
     assert(diag_tf_nseen == 128 && !diag_snapshot_bytes);
     nvn_diag_tf_state(&cb, "nvnCommandBufferPauseTransformFeedback");
@@ -100,6 +105,10 @@ int main(int argc, char **argv) {
     assert(!cb.diag_tf_active);
     // Binding before Begin must also be selected when Begin arrives.
     memset(control, 0x5e, sizeof control);
+    *(uint32_t *)(control + 0x00) = 0x98761234;
+    *(uint32_t *)(control + 0x6f0) = 0x880;
+    *(uint32_t *)(control + 0x704) = 0x80;
+    *(uint32_t *)(control + 0x708) = 0x30;
     p.stages[0] = (NvnShaderStage){.stage = 0, .code_addr = (uintptr_t)header + 128, .control = control};
     nvn_diag_shader(&p.stages[0]);
     nvn_diag_bind_program(&cb, &p, 1);
@@ -169,11 +178,17 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             controls = list(out.glob('*.control.bin'))
             self.assertEqual(len(controls), 256)
-            self.assertEqual(sum(p.read_bytes() == b'\xa5' * 0x704 for p in controls), 128)
-            self.assertEqual(sum(p.read_bytes() == b'\x5e' * 0x704 for p in controls), 128)
+            self.assertEqual(sum(p.stat().st_size == 0x704 for p in controls), 128)
+            tf_controls = [p for p in controls if p.stat().st_size == 0x880]
+            self.assertEqual(len(tf_controls), 128)
+            self.assertTrue(all(int.from_bytes(p.read_bytes()[:4], 'little') == 0x98761234
+                                for p in tf_controls))
             headers = list(out.glob('*.header.bin'))
             self.assertEqual(len(headers), 256)
             self.assertTrue(all(p.stat().st_size == 0x80 for p in headers))
+            code = list(out.glob('*.code.bin'))
+            self.assertEqual(len(code), 128)
+            self.assertTrue(all(p.stat().st_size == 0x80 for p in code))
             self.assertEqual(len((out / 'tf_calls.txt').read_text().splitlines()), 128)
 
     def test_program_replacement_and_finalize_release_snapshots(self):
