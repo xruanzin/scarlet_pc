@@ -98,7 +98,8 @@ $Jobs = @(
         Base = "0x7006000000"
         Extra = @(
             "--hle", (Join-Path $RepoRoot "runtime\hle\hle_symbols.txt"),
-            "--extra-entry", "0x7006323db4"
+            "--extra-entry", "0x7006323db4",
+            "--extra-entry", "0x700640d25c"
         )
     },
     @{
