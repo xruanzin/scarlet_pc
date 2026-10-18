@@ -140,7 +140,7 @@ static void create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[8];
+    const char *ext[9];
     uint32_t n_ext = 0;
     ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     g_vk.custom_border = has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
@@ -168,8 +168,10 @@ static void create_device(void) {
         vkGetPhysicalDeviceFeatures2(g_vk.phys, &tf_f2);
         vkGetPhysicalDeviceProperties2(g_vk.phys, &tf_p2);
     }
+    bool tf = tf_ext && tf_feat.transformFeedback && tf_prop.maxTransformFeedbackBuffers >= 3;
+    if (tf) ext[n_ext++] = VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME;
     LOG("[vk] transform feedback: %s (feature=%u, buffers=%u, draw=%u)\n",
-        tf_ext ? "extension present" : "extension absent",
+        tf ? "enabled" : tf_ext ? "extension present but unusable" : "extension absent",
         tf_feat.transformFeedback, tf_prop.maxTransformFeedbackBuffers, tf_prop.transformFeedbackDraw);
     free(ep);
 
@@ -183,11 +185,15 @@ static void create_device(void) {
     VkPhysicalDeviceCustomBorderColorFeaturesEXT cbc = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT, .customBorderColors = VK_TRUE,
         .customBorderColorWithoutFormat = VK_TRUE, .pNext = g_vk.divisor ? &div : NULL};
+    tf_feat.transformFeedback = tf ? VK_TRUE : VK_FALSE;
+    tf_feat.geometryStreams = VK_FALSE;
+    tf_feat.pNext = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL;
     VkPhysicalDeviceVulkan13Features f13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                                             .dynamicRendering = VK_TRUE, .synchronization2 = VK_TRUE,
                                             .shaderDemoteToHelperInvocation = VK_TRUE, .shaderTerminateInvocation = VK_TRUE,
                                             .maintenance4 = VK_TRUE,
-                                            .pNext = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL};
+                                            .pNext = tf ? (void *)&tf_feat :
+                                                     g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL};
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                             .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
                                             .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
