@@ -501,12 +501,17 @@ NVN(nvnCommandBufferBindVertexAttribState) { record_copy(c, CMD_BIND_VERTEX_ATTR
 NVN(nvnCommandBufferBindVertexStreamState) { record_copy(c, CMD_BIND_VERTEX_STREAM, 2, (uint32_t)A(1) * 8); }
 
 // (cmd, first, count, const NVNbufferRange*) and the single-binding forms
-NVN(nvnCommandBufferBindVertexBuffers) { record_copy(c, CMD_BIND_VERTEX_BUFFERS, 3, (uint32_t)A(2) * 16); }
+NVN(nvnCommandBufferBindVertexBuffers) {
+    nvn_diag_vertex_buffers(A(0), (uint32_t)A(1), (uint32_t)A(2), (const uint64_t *)AP(3));
+    record_copy(c, CMD_BIND_VERTEX_BUFFERS, 3, (uint32_t)A(2) * 16);
+}
 NVN(nvnCommandBufferBindVertexBuffer) {
     Snap s = snap(c);
+    uint64_t range[2] = {s.x[2], s.x[3]};
+    nvn_diag_vertex_buffers(s.x[0], (uint32_t)s.x[1], 1, range);
     CmdRec *r = record(c, CMD_BIND_VERTEX_BUFFERS, 16, &s);
     r->x[0] = s.x[1]; r->x[1] = 1;
-    memcpy(r->extra, &s.x[2], 16);
+    memcpy(r->extra, range, 16);
 }
 // (cmd, stage, first, count, const NVNbufferRange*)
 NVN(nvnCommandBufferBindUniformBuffers) { record_copy(c, CMD_BIND_UNIFORM_BUFFERS, 4, (uint32_t)A(3) * 16); }
