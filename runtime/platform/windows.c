@@ -7,6 +7,7 @@
 #include <shellapi.h>
 #include <timeapi.h>
 #include <io.h>
+#include <wchar.h>
 
 #include "../platform.h"
 #include "../paths.h"
