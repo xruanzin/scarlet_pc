@@ -37,7 +37,7 @@ EXE_NAME  ?= lasrecomp
 CC       := clang $(CROSS)
 CXX      := clang++ $(CROSS)
 IMGUI    := third_party/imgui
-GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+GENFLAGS := -O2 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
 
 # The game code (made by `make gen` from your own game files) is its own library next to the app (runtime/gamelib.h);
 # the app itself holds none of it
@@ -107,13 +107,23 @@ GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools
                 runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
+# Generated game objects are expensive, but compiler flags materially affect runtime speed.
+# Keep a flag/id stamp as a prerequisite so switching O1 -> O2 (or future CPU flags)
+# cannot silently reuse stale objects from an older build.
+GENFLAGS_STAMP := $(B)/obj/.genflags-$(GAMELIB_ID)
+
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
 RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(DEPINC)
 
 all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))
 
-$(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h
+$(GENFLAGS_STAMP):
+	@mkdir -p $(B)/obj
+	@rm -f $(B)/obj/.genflags-*
+	@touch $@
+
+$(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h $(GENFLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	@echo "[game-cc] $<"
 	@$(CC) $(GENFLAGS) -c $< -o $@
