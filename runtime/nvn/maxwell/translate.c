@@ -1904,6 +1904,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};
     sp(&s, "%s", glsl_prelude);
+    if (info->uses_surface_write || info->uses_surface_atomic)
+        sp(&s, "#extension GL_EXT_nonuniform_qualifier : require\n");
     for (int i = 0; i < 18; i++) {
         if (!(info->cbuf_mask & (1u << i))) continue;
         uint32_t n = info->cbuf_size[i] / 16;
@@ -1916,7 +1918,6 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");
     if (info->uses_surface_write || info->uses_surface_atomic) {
-        sp(&s, "#extension GL_EXT_nonuniform_qualifier : require\n");
         sp(&s, "layout(std430, set = %d, binding = 120) readonly buffer SurfaceMap { uvec2 slot[]; } surfmap_;\n", set);
         if (info->uses_surface_write)
             sp(&s, "layout(set = %d, binding = 121) writeonly uniform image2D surf_write[%d];\n", set, MAXWELL_BINDLESS_IMAGES);
