@@ -921,6 +921,29 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     }
 }
 
+void kernel_dump_guest_threads(void) {
+    if (pthread_mutex_trylock(&g_klock) != 0) {
+        LOG("[guest-thread] kernel lock busy; guest snapshot skipped\n");
+        return;
+    }
+    LOG("[guest-thread] current guest execution state:\n");
+    for (KThread *t = g_threads; t; t = t->anext) {
+        if (!t->started || t->finished) continue;
+        LOG("[guest-thread] id=%llu h=%x entry=%llx pc=%llx lr=%llx sp=%llx prio=%d core=%d wait=%d addr=%llx mutex=%llx tag=%x sync=%d svc=%d svcpc=%llx\n",
+            (unsigned long long)t->id, t->handle,
+            (unsigned long long)t->entry,
+            (unsigned long long)t->cpu.pc,
+            (unsigned long long)t->cpu.x[30],
+            (unsigned long long)t->cpu.sp,
+            t->prio, t->core, (int)t->wait_kind,
+            (unsigned long long)t->wait_addr,
+            (unsigned long long)t->wait_mutex,
+            t->wait_tag, t->in_sync_wait, t->cur_svc,
+            (unsigned long long)t->cur_svc_pc);
+    }
+    pthread_mutex_unlock(&g_klock);
+}
+
 // Reboot, step 1: stop every guest thread (see rt_unwind_point) and join it. `idle` keeps the window responsive.
 void kernel_stop_threads(void (*idle)(void)) {
     g_rt_unwind = 1;
