@@ -2561,9 +2561,15 @@ static void draw_(CmdRec *r, bool indexed) {
     // ---- draw
     if (!use_index) vkCmdDraw(cb, count, inst, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
+    bool surface_write = pr->vi->uses_surface_write || pr->vi->uses_surface_atomic ||
+                         pr->fi->uses_surface_write || pr->fi->uses_surface_atomic;
     stat_draws++;
     g_draws_total++;
     cum_draws++;
+    // Storage-image writes are side effects outside the color/depth attachments.
+    // End dynamic rendering so the next operation takes begin_pass()/copy/compute's
+    // normal full barrier and observes the SUST/SURED result.
+    if (surface_write) vk_end_pass();
     if (g_gpuprof_frame && gp_n) {
         if (!gp_draws[gp_n - 1]) {  // first draw of the row: its fragment shader hash
             size_t l = strlen(gp_label[gp_n - 1]);
