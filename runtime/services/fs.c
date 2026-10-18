@@ -241,6 +241,53 @@ static void add_new_files(int fd, const uint64_t *h, const uint8_t *dmeta, uint6
     LOG("[fs] mod: %d new romfs files\n", added);
 }
 
+static bool romfs_validate_and_log(int fd) {
+    uint64_t h[10] = {0};
+    struct stat sb;
+    if (fstat(fd, &sb) != 0 || pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h) {
+        LOG("[fs-probe] cannot read RomFS header\n");
+        return false;
+    }
+
+    uint64_t file_size = (uint64_t)sb.st_size;
+    LOG("[fs-probe] header size=%#llx dh=%#llx+%#llx dm=%#llx+%#llx fh=%#llx+%#llx fm=%#llx+%#llx data=%#llx file=%#llx\n",
+        (unsigned long long)h[0],
+        (unsigned long long)h[1], (unsigned long long)h[2],
+        (unsigned long long)h[3], (unsigned long long)h[4],
+        (unsigned long long)h[5], (unsigned long long)h[6],
+        (unsigned long long)h[7], (unsigned long long)h[8],
+        (unsigned long long)h[9], (unsigned long long)file_size);
+
+    bool ok = h[0] == 0x50;
+    for (int i = 1; i <= 7; i += 2) {
+        uint64_t off = h[i], sz = h[i + 1];
+        if (off > file_size || sz > file_size - off) ok = false;
+    }
+    if (h[9] > file_size) ok = false;
+
+    uint8_t root[0x18] = {0};
+    if (h[4] < sizeof root || pread(fd, root, sizeof root, (off_t)h[3]) != (ssize_t)sizeof root) {
+        LOG("[fs-probe] cannot read root directory entry\n");
+        return false;
+    }
+    uint32_t parent, sibling, child, file, hash, name_size;
+    memcpy(&parent, root + 0x00, 4);
+    memcpy(&sibling, root + 0x04, 4);
+    memcpy(&child, root + 0x08, 4);
+    memcpy(&file, root + 0x0c, 4);
+    memcpy(&hash, root + 0x10, 4);
+    memcpy(&name_size, root + 0x14, 4);
+    LOG("[fs-probe] root parent=%#x sibling=%#x child=%#x file=%#x hash=%#x name=%u\n",
+        parent, sibling, child, file, hash, name_size);
+
+    if (name_size != 0) ok = false;
+    if (child != 0xffffffffu && child >= h[4]) ok = false;
+    if (file != 0xffffffffu && file >= h[8]) ok = false;
+
+    LOG("[fs-probe] structural validation: %s\n", ok ? "OK" : "FAILED");
+    return ok;
+}
+
 static void rom_index(int fd) {
     uint64_t h[10];
     if (pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h) return;
@@ -465,6 +512,8 @@ static Service *open_romfs_storage(void) {
             if (romfs_fd < 0) FATAL("built %s but cannot reopen it: %s\n", path, strerror(errno));
             LOG("[fs] romfs.bin ready: %s\n", path);
         }
+        if (!romfs_validate_and_log(romfs_fd))
+            FATAL("RomFS structural validation failed: %s\n", path);
         rom_index(romfs_fd);
     }
     Storage *st = calloc(1, sizeof *st);
