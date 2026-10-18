@@ -27,12 +27,54 @@ foreach ($Name in $Required) {
     }
 }
 
-$Python = (Get-Command python -ErrorAction Stop).Source
+# Prefer the project venv created by setup_windows.ps1. Falling back to the
+# global "python" caused Windows Store / other Python installs to miss the
+# generator dependencies even though setup had already installed them.
+$VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
+    $BasePython = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
+    if (-not (Test-Path -LiteralPath $BasePython -PathType Leaf)) {
+        $BasePython = (Get-Command python -ErrorAction Stop).Source
+    }
 
-& $Python -c "import lz4.block, unicorn, capstone" 2>$null
-if ($LASTEXITCODE -ne 0) {
-    throw "Dependencias Python ausentes. Rode: python -m pip install lz4 unicorn capstone"
+    Write-Host "[scarlet-gen] Criando ambiente Python do gerador..." -ForegroundColor Cyan
+    & $BasePython -m venv (Join-Path $RepoRoot ".venv")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Nao foi possivel criar .venv para o gerador (exit $LASTEXITCODE)"
+    }
 }
+$Python = $VenvPython
+
+# PowerShell 5.1 can promote native stderr to NativeCommandError while
+# ErrorActionPreference=Stop. Probe with Continue and inspect LASTEXITCODE.
+$PrevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $Python -c "import lz4.block, unicorn, capstone" 2>$null
+$DepsCode = $LASTEXITCODE
+$ErrorActionPreference = $PrevEap
+
+if ($DepsCode -ne 0) {
+    Write-Host "[scarlet-gen] Instalando dependencias Python do gerador..." -ForegroundColor Cyan
+    $PrevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & $Python -m pip install -q lz4 unicorn capstone
+    $PipCode = $LASTEXITCODE
+    $ErrorActionPreference = $PrevEap
+    if ($PipCode -ne 0) {
+        throw "Falha ao instalar lz4/unicorn/capstone na .venv (exit $PipCode)"
+    }
+
+    $PrevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & $Python -c "import lz4.block, unicorn, capstone" 2>$null
+    $DepsCode = $LASTEXITCODE
+    $ErrorActionPreference = $PrevEap
+    if ($DepsCode -ne 0) {
+        throw "A .venv ainda nao consegue importar lz4/unicorn/capstone."
+    }
+}
+
+Write-Host "[scarlet-gen] Python: $Python"
 
 if ($Clean -and (Test-Path -LiteralPath $OutDir)) {
     if ($Module -eq "all") {
