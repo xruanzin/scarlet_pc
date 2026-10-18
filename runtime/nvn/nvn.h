@@ -90,10 +90,11 @@ typedef struct NvnSync {
 
 // ---- command recording (stored in guest command memory)
 typedef struct {
-    uint64_t mem;    // current command memory chunk (guest address)
-    uint64_t size;   // chunk size
-    uint64_t used;   // bytes used in chunk
-    uint64_t start;  // first record of the list being recorded
+    uint64_t mem;         // current command memory chunk (guest address)
+    uint64_t size;        // current chunk size
+    uint64_t chunk_used;  // write cursor within the current chunk
+    uint64_t used;        // NVN usage since the most recent AddCommandMemory
+    uint64_t start;       // first record of the list being recorded
     uint64_t callback, callback_data;
     bool recording;
     uint64_t guest;  // the guest NVNcommandBuffer*
