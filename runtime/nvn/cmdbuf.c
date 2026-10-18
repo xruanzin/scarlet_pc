@@ -31,12 +31,18 @@ NVN(nvnCommandBufferAddCommandMemory) {
     NvnCmdBuf *cb = cb_of(A(0));
     uint64_t mem = HOST(NvnPool, A(1))->storage + A(2), size = A(3);
     if (cb->recording && cb->mem) {
-        // chain the list being recorded into the new chunk
-        CmdRec *j = raw_rec(cb->mem + cb->used, CMD_JUMP, sizeof(CmdRec));
+        // Chain a recording that crosses chunks. The jump occupies command
+        // memory too; account it before moving the physical write cursor.
+        CmdRec *j = raw_rec(cb->mem + cb->chunk_used, CMD_JUMP, sizeof(CmdRec));
         j->x[0] = mem;
+        cb->used += sizeof(CmdRec);
     }
     cb->mem = mem;
     cb->size = size;
+    cb->chunk_used = 0;
+    // NVN reports usage from the start of the most recently supplied command
+    // memory. BeginRecording does NOT reset this; engines pack many recorded
+    // lists into one allocation and use this value as the next write position.
     cb->used = 0;
 }
 NVN(nvnCommandBufferAddControlMemory) { (void)c; }
@@ -44,7 +50,7 @@ NVN(nvnCommandBufferGetCommandMemorySize) { RET(cb_of(A(0))->size); }
 NVN(nvnCommandBufferGetCommandMemoryUsed) { RET(cb_of(A(0))->used); }
 NVN(nvnCommandBufferGetCommandMemoryFree) {
     NvnCmdBuf *cb = cb_of(A(0));
-    RET(cb->size > cb->used + JUMP_RESERVE ? cb->size - cb->used - JUMP_RESERVE : 0);
+    RET(cb->size > cb->chunk_used + JUMP_RESERVE ? cb->size - cb->chunk_used - JUMP_RESERVE : 0);
 }
 NVN(nvnCommandBufferGetControlMemorySize) { RET(0x10000); }
 NVN(nvnCommandBufferGetControlMemoryUsed) { RET(0); }
@@ -59,7 +65,7 @@ NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; }
 // arguments first.
 static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     uint32_t size = (uint32_t)((sizeof(CmdRec) + extra + 7) & ~7u);
-    for (int tries = 0; !cb->mem || cb->used + size + JUMP_RESERVE > cb->size; tries++) {
+    for (int tries = 0; !cb->mem || cb->chunk_used + size + JUMP_RESERVE > cb->size; tries++) {
         if (!cb->callback || tries == 2) FATAL("nvn: out of command memory (need %u)\n", size);
         uint64_t saved[8];
         memcpy(saved, c->x, sizeof saved);
@@ -70,7 +76,8 @@ static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
         guest_call(c, cb->callback);
         memcpy(c->x, saved, sizeof saved);
     }
-    CmdRec *r = raw_rec(cb->mem + cb->used, op, size);
+    CmdRec *r = raw_rec(cb->mem + cb->chunk_used, op, size);
+    cb->chunk_used += size;
     cb->used += size;
     return r;
 }
@@ -119,7 +126,7 @@ NVN(nvnCommandBufferBeginRecording) {
     cb->obj_tag = 0;
     cb->recording = true;
     rec(c, cb, CMD_BARRIER, 0);  // makes sure memory exists; the list starts here
-    cb->start = cb->mem + cb->used - sizeof(CmdRec);
+    cb->start = cb->mem + cb->chunk_used - sizeof(CmdRec);
 }
 NVN(nvnCommandBufferEndRecording) {
     NvnCmdBuf *cb = cb_of(A(0));
