@@ -1778,6 +1778,7 @@ static int g_cs_n;  // (compute program table below)
 void vk_exec_reset(void) {
     memset(prog_tab, 0, sizeof prog_tab);
     memset(pipe_tab, 0, sizeof pipe_tab);
+    memset(surface_cache, 0, sizeof surface_cache);
     g_cs_n = 0;
     gcopy_gen++;
     if (gmem_buf) {
@@ -1847,7 +1848,6 @@ typedef struct {
 } SurfaceBindlessCache;
 
 static SurfaceBindlessCache surface_cache[8];
-RT_ON_RESET(surface_bindless_reset) { memset(surface_cache, 0, sizeof surface_cache); }
 
 static SurfaceBindlessCache *surface_cache_get(NvnDescPool *pool) {
     SurfaceBindlessCache *c = NULL;
