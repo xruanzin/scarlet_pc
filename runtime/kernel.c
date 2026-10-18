@@ -623,6 +623,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     switch (imm) {
     case 0x01: {  // SetHeapSize
         uint64_t size = x[1];
+        LOG("[kernel] SetHeapSize(%#llx)\n", (unsigned long long)size);
         if (size > HEAP_MAX) { x[0] = R_OUT_OF_RESOURCE; break; }
         heap_size = size;
         region_remove(HEAP_BASE);
