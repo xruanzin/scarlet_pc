@@ -11,6 +11,8 @@
 #include "vk.h"
 #include "../astc.h"
 #include "../renderer.h"
+#include "../../platform.h"
+#include "../../rt.h"
 
 // ================================================================== formats
 // expand_rgb: converted to RGBA8 on upload - 1 RGB8, 2 RGBA4 and 3 RGB5A1 (16-bit, red in the low bits: the
@@ -436,6 +438,64 @@ void vk_textures_reset(void) {
 // ================================================================== uploads (same change detection as metal.m)
 static uint64_t full_hash_budget, full_hash_budget_frame;
 
+// CPU texture memory change tracking. Dynamic/linear textures (notably the
+// glyph atlas) must notice writes anywhere in the buffer, so a sparse byte
+// sample is not sufficient. Windows' MEM_WRITE_WATCH tells us whether any
+// backing page was touched; per-page generations preserve that information
+// across overlapping texture ranges even though GetWriteWatch resets OS bits.
+#define TEX_WATCH_PAGE 4096ull
+static uint32_t *tex_page_gen;
+static uint32_t tex_write_gen = 1;
+
+static uint64_t texture_cpu_size(const NvnTexture *t) {
+    if ((t->flags & 0x10) && t->stride)
+        return t->stride * (uint64_t)(t->height ? t->height : 1);
+    return tegra_total_size(&t->layout);
+}
+
+static int texture_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) {
+    if (!size || addr < HEAP_BASE || size > HEAP_MAX || addr - HEAP_BASE > HEAP_MAX - size)
+        return -1;
+
+    uint64_t lo = (addr - HEAP_BASE) & ~(TEX_WATCH_PAGE - 1);
+    uint64_t hi = (addr - HEAP_BASE + size + TEX_WATCH_PAGE - 1) & ~(TEX_WATCH_PAGE - 1);
+    if (hi > HEAP_MAX) hi = HEAP_MAX;
+
+    if (!tex_page_gen) {
+        tex_page_gen = calloc((size_t)(HEAP_MAX / TEX_WATCH_PAGE), sizeof *tex_page_gen);
+        if (!tex_page_gen) return -1;
+    }
+
+    static uint64_t pages[4096];
+    uint64_t page_size = TEX_WATCH_PAGE;
+    int n = plat_written_pages(HEAP_BASE + lo, hi - lo, pages, 4096, &page_size);
+    if (n < 0 || page_size != TEX_WATCH_PAGE) return -1;
+
+    uint32_t gen = ++tex_write_gen;
+    if (!gen) {  // practically unreachable, but keep generation comparisons valid after wrap.
+        memset(tex_page_gen, 0, (size_t)(HEAP_MAX / TEX_WATCH_PAGE) * sizeof *tex_page_gen);
+        gen = tex_write_gen = 1;
+        since = 0;
+    }
+
+    if (n >= 4096) {
+        // The result array filled, so conservatively mark every page in range.
+        for (uint64_t p = lo / TEX_WATCH_PAGE; p < hi / TEX_WATCH_PAGE; p++)
+            tex_page_gen[p] = gen;
+    } else {
+        for (int i = 0; i < n; i++) {
+            uint64_t a = pages[i];
+            if (a < HEAP_BASE || a >= HEAP_BASE + HEAP_MAX) continue;
+            tex_page_gen[(a - HEAP_BASE) / TEX_WATCH_PAGE] = gen;
+        }
+    }
+
+    *now = gen;
+    for (uint64_t p = lo / TEX_WATCH_PAGE; p < hi / TEX_WATCH_PAGE; p++)
+        if (tex_page_gen[p] > since) return 1;
+    return 0;
+}
+
 // Four independent lanes (one serial multiply chain ran at ~1.5 bytes/cycle; dynamic textures are hashed every
 // frame). Values are only compared within a run.
 static uint64_t hash_full(const uint8_t *p, uint64_t n) {
@@ -481,7 +541,7 @@ static void upload_pending(TexBackend *b) {
                 vkCmdCopyBufferToImage(cb, s.buf, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
 }
 
-uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn;
+uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn, prof_tex_watch_skips;
 static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (!t->addr || t->target == 10) return;
     uint64_t frame = vk_frame_counter();
@@ -490,16 +550,54 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     const FormatInfo *fi = t->layout.fmt;
     if (!fi || !fi->bpb) return;
     VkFmt mf = fmt_of(t->format);
-    uint64_t total = tegra_total_size(&t->layout);
+    uint64_t total = texture_cpu_size(t);
     b->checked_frame = frame;
     prof_tex_checks++;
+    // Linear textures are CPU-written caches (font glyph atlas, video, etc.).
+    // They remain "dynamic" so a real write is checked in full; page write-watch
+    // below prevents that flag from forcing a multi-megabyte hash every frame.
     if (t->flags & 0x10) b->dynamic = true;
     if (full_hash_budget_frame != frame) { full_hash_budget_frame = frame; full_hash_budget = 4 << 20; }
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
     static int always_full = -1;
-    if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
+    if (always_full < 0) {
+        const char *e = getenv("LARECOMP_TEX_FULLHASH");
+        always_full = e && atoi(e) != 0;  // "=0" really means off.
+    }
+
     bool full = b->dynamic || !b->uploaded || always_full;
-    if (!full && frame - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
+    bool periodic = frame - b->full_frame >= 120 && full_hash_budget >= total;
+    if (!full && periodic) { full = true; full_hash_budget -= total; }
+
+    // Default-on on hosts that support write-watch. LARECOMP_VK_TEX_WATCH=0
+    // disables it for A/B debugging. A periodic full hash remains as a safety net.
+    static int watch = -1, watch_told;
+    if (watch < 0) {
+        const char *e = getenv("LARECOMP_VK_TEX_WATCH");
+        watch = !e || atoi(e) != 0;
+    }
+    if (watch && !always_full) {
+        uint32_t now = 0;
+        int changed = texture_pages_changed(t->addr, total, b->wgen, &now);
+        if (changed >= 0) {
+            if (!watch_told++) LOG("[vk] texture page write-watch enabled\n");
+            b->wgen = now;
+            if (!changed && b->uploaded) {
+                if (!periodic) {
+                    prof_tex_watch_skips++;
+                    return;
+                }
+                // Dynamic textures did not consume the periodic budget above
+                // because 'full' was already true.
+                if (b->dynamic) full_hash_budget -= total;
+            }
+        } else if (!watch_told) {
+            watch_told = 1;
+            LOG("[vk] texture page write-watch unavailable; using hash fallback\n");
+            watch = 0;
+        }
+    }
+
     if (!full) {
         prof_tex_samples++;
         uint64_t sh = fnv_sample(mem, total);
@@ -618,7 +716,7 @@ static void dirty_check(NvnTexture *t, TexBackend *b) {
     uint64_t now = g_dirty_seq;
     if (b->dirty_seq == now) return;
     if (!b->dirty_seq) { b->dirty_seq = now; return; }  // (new texture: uploaded from memory anyway)
-    uint64_t lo = t->addr, hi = t->addr + tegra_total_size(&t->layout);
+    uint64_t lo = t->addr, hi = t->addr + texture_cpu_size(t);
     pthread_mutex_lock(&dirty_lock);
     for (uint64_t s = now; s > b->dirty_seq && s + DIRTY_RING > now; s--) {
         int i = (int)(s % DIRTY_RING);
