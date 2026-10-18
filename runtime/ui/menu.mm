@@ -120,10 +120,11 @@ static ImGuiKey key_from_pad(Uint8 b) {
 // Scarlet's nn::swkbd::ShowKeyboard is handled with the PC keyboard only. Do NOT re-enter the Vulkan presenter
 // while ShowKeyboard is blocking: on AMD Windows that raced the normal renderer and crashed inside amdvlk64.dll.
 // SDL events stay on the main thread; the game thread simply waits for Enter/Esc.
-static std::atomic<int> g_kbd{0};  // 1 open, 2 confirmed, 3 cancelled
+static std::atomic<int> g_kbd{0};  // 1 open, 2 confirmed, 3 cancelled, 4 prompt accepted ("use anyway")
 static std::atomic<bool> g_last_pad{false};
-static char g_kbd_text[96];
-static int g_kbd_max = 8;
+static char g_kbd_text[256];
+static char g_kbd_title[320], g_kbd_sub[640], g_kbd_guide[1024], g_kbd_error[2048];
+static int g_kbd_min = 0, g_kbd_max = 8, g_kbd_prompt_mode = 0;
 static pthread_mutex_t g_kbd_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int kbd_utf8_chars(const char *p) {
@@ -172,40 +173,71 @@ bool menu_handle_event(const SDL_Event *e) {
     static bool back_down, start_down;
     if (e->type == SDL_EVENT_KEY_DOWN) g_last_pad = false;
     if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) g_last_pad = true;
-    bool typing = g_kbd.load() == 1;  // Scarlet name entry: physical PC keyboard, no Vulkan/OSK
+    bool typing = g_kbd.load() == 1;  // Switch-style software keyboard applet owns all input while open
     if (typing) {
         switch (e->type) {
-        case SDL_EVENT_KEY_DOWN:
-            if (e->key.scancode == SDL_SCANCODE_RETURN || e->key.scancode == SDL_SCANCODE_KP_ENTER) {
-                if (g_kbd_text[0]) g_kbd = 2;
-                return true;
+        case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
+            QEvent q = {};
+            q.kind = QEvent::KEY;
+            q.key = key_from_scancode(e->key.scancode);
+            q.down = e->type == SDL_EVENT_KEY_DOWN;
+            if (q.key != ImGuiKey_None) push(q);
+            return true;
+        }
+        case SDL_EVENT_TEXT_INPUT: {
+            QEvent q = {};
+            q.kind = QEvent::TEXT;
+            strlcpy(q.text, e->text.text, sizeof q.text);
+            push(q);
+            return true;
+        }
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: {
+            QEvent q = {};
+            q.kind = QEvent::KEY;
+            q.key = key_from_pad(e->gbutton.button);
+            q.down = e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+            if (q.key != ImGuiKey_None) push(q);
+            return true;
+        }
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
+            float v = e->gaxis.value / 32767.0f;
+            QEvent q = {};
+            q.kind = QEvent::ANALOG;
+            switch (e->gaxis.axis) {
+            case SDL_GAMEPAD_AXIS_LEFTX:
+                q.key = ImGuiKey_GamepadLStickLeft; q.value = v < -0.3f ? -v : 0; push(q);
+                q.key = ImGuiKey_GamepadLStickRight; q.value = v > 0.3f ? v : 0; push(q);
+                break;
+            case SDL_GAMEPAD_AXIS_LEFTY:
+                q.key = ImGuiKey_GamepadLStickUp; q.value = v < -0.3f ? -v : 0; push(q);
+                q.key = ImGuiKey_GamepadLStickDown; q.value = v > 0.3f ? v : 0; push(q);
+                break;
+            default: break;
             }
-            if (e->key.scancode == SDL_SCANCODE_ESCAPE) { g_kbd = 3; return true; }
-            if (e->key.scancode == SDL_SCANCODE_BACKSPACE) { kbd_backspace(); return true; }
-            if (e->key.scancode == SDL_SCANCODE_V && (e->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI))) {
-                char *clip = SDL_GetClipboardText();
-                if (clip) { kbd_append(clip); SDL_free(clip); }
-                return true;
-            }
-            return true;  // printable characters arrive through SDL_EVENT_TEXT_INPUT
-        case SDL_EVENT_KEY_UP:
             return true;
-        case SDL_EVENT_TEXT_INPUT:
-            kbd_append(e->text.text);
+        }
+        case SDL_EVENT_MOUSE_MOTION: {
+            QEvent q = {};
+            q.kind = QEvent::MOUSE_POS;
+            q.x = e->motion.x * g_pixel_density; q.y = e->motion.y * g_pixel_density;
+            push(q);
             return true;
-        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
-            if (e->gbutton.button == SDL_GAMEPAD_BUTTON_START && g_kbd_text[0]) g_kbd = 2;
-            else if (e->gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH) g_kbd = 3;  // B / cancel
+        }
+        case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP: {
+            QEvent q = {};
+            q.kind = QEvent::MOUSE_BUTTON;
+            q.button = e->button.button == SDL_BUTTON_LEFT ? 0 : e->button.button == SDL_BUTTON_RIGHT ? 1 : 2;
+            q.down = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+            push(q);
             return true;
-        case SDL_EVENT_GAMEPAD_BUTTON_UP:
-        case SDL_EVENT_GAMEPAD_AXIS_MOTION:
-        case SDL_EVENT_MOUSE_MOTION:
-        case SDL_EVENT_MOUSE_BUTTON_DOWN:
-        case SDL_EVENT_MOUSE_BUTTON_UP:
-        case SDL_EVENT_MOUSE_WHEEL:
+        }
+        case SDL_EVENT_MOUSE_WHEEL: {
+            QEvent q = {};
+            q.kind = QEvent::WHEEL; q.x = e->wheel.x; q.y = e->wheel.y; push(q);
             return true;
+        }
         default:
-            break;
+            return true;
         }
     }
     switch (e->type) {
@@ -305,26 +337,6 @@ void menu_apply_window_requests(void *win) {
         text_input = want_text;
     }
 
-    // Name entry has no renderer overlay: show what is being typed in the native window title instead.
-    static char normal_title[256];
-    static bool title_saved, kbd_title;
-    if (!title_saved) {
-        snprintf(normal_title, sizeof normal_title, "%s", SDL_GetWindowTitle(w));
-        title_saved = true;
-    }
-    if (g_kbd.load() == 1) {
-        char text[96], title[384];
-        pthread_mutex_lock(&g_kbd_lock);
-        snprintf(text, sizeof text, "%s", g_kbd_text);
-        pthread_mutex_unlock(&g_kbd_lock);
-        snprintf(title, sizeof title, "Pokemon Scarlet - Nome: %s  |  Enter confirma  |  Backspace apaga  |  Esc cancela", text);
-        SDL_SetWindowTitle(w, title);
-        kbd_title = true;
-    } else if (kbd_title) {
-        SDL_SetWindowTitle(w, normal_title);
-        kbd_title = false;
-    }
-
     static bool first = true;
     if (first || g_want_fullscreen_apply.exchange(false)) {
         first = false;
@@ -419,64 +431,129 @@ RT_ON_RESET(menu_reset) {
 }
 
 static void keyboard_draw(ImGuiIO &io, float scale) {
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 120));
-    float w = fminf(io.DisplaySize.x * 0.9f, 1100 * scale);
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    // Switch-style full-screen applet: dim/freeze the game frame and put the
+    // software keyboard in a light panel across the lower portion of the screen.
+    ImDrawList *bg = ImGui::GetBackgroundDrawList();
+    bg->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 105));
+
+    float w = fminf(io.DisplaySize.x * 0.94f, 1500 * scale);
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.54f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(w, 0), ImGuiCond_Always);
-    ImGui::Begin("##kbd", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                                    ImGuiWindowFlags_AlwaysAutoResize);
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.94f, 0.94f, 0.95f, 0.99f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.08f, 0.08f, 0.09f, 1));
+    ImGui::PushStyleColor(ImGuiCol_TextDisabled, ImVec4(0.32f, 0.32f, 0.34f, 1));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 1));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.84f, 0.91f, 1.0f, 1));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.65f, 0.82f, 1.0f, 1));
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0.08f, 0.47f, 0.95f, 1));
+
+    ImGui::Begin("##switch_swkbd", NULL,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize);
+
+    pthread_mutex_lock(&g_kbd_lock);
+    char title[sizeof g_kbd_title], sub[sizeof g_kbd_sub], guide[sizeof g_kbd_guide], error[sizeof g_kbd_error];
+    snprintf(title, sizeof title, "%s", g_kbd_title);
+    snprintf(sub, sizeof sub, "%s", g_kbd_sub);
+    snprintf(guide, sizeof guide, "%s", g_kbd_guide);
+    snprintf(error, sizeof error, "%s", g_kbd_error);
+    pthread_mutex_unlock(&g_kbd_lock);
+
     ImGui::PushFont(g_font_big);
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", M("Enter a name", "Digite o nome", "Введите имя"));
+    ImGui::TextUnformatted(title[0] ? title : M("Enter text", "Digite o texto", "Введите текст"));
     ImGui::PopFont();
-    static bool was_open, was_pad;
-    bool pad = g_last_pad.load(), appearing = !was_open || pad != was_pad;  // (switching device: focus the new one)
-    was_open = true, was_pad = pad;
-    if (!pad) {  // keyboard: type straight into the field
-        if (appearing) ImGui::SetKeyboardFocusHere();
-        ImGui::SetNextItemWidth(-1);
-        ImGui::PushFont(g_font_big);
-        ImGui::InputText("##name", g_kbd_text, (size_t)(g_kbd_max * 4 + 1 < (int)sizeof g_kbd_text ? g_kbd_max * 4 + 1 : sizeof g_kbd_text),
-                         ImGuiInputTextFlags_CallbackCharFilter,
-                         [](ImGuiInputTextCallbackData *d) -> int { return d->EventChar < 0x20 ? 1 : 0; });
-        ImGui::PopFont();
-        if ((int)strlen(g_kbd_text) > g_kbd_max) g_kbd_text[g_kbd_max] = 0;
-        ImGui::TextDisabled("%s      (%d / %d)", M("Enter  confirms      Esc  cancels", "Enter  confirma      Esc  cancela",
-                                                   "Enter  готово      Esc  отмена"),
-                            (int)strlen(g_kbd_text), g_kbd_max);
-    } else {  // controller: on-screen keyboard (osk.mm)
-        int r = osk_keys(g_kbd_text, sizeof g_kbd_text, g_kbd_max, appearing, scale, g_font_big);
-        if (r) g_kbd = r > 0 ? 2 : 3;  // (Start / + confirms in menu_handle_event too)
+    if (sub[0]) ImGui::TextWrapped("%s", sub);
+    if (guide[0]) ImGui::TextDisabled("%s", guide);
+    if (error[0]) {
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.78f, 0.08f, 0.08f, 1));
+        ImGui::TextWrapped("%s", error);
+        ImGui::PopStyleColor();
     }
+    ImGui::Separator();
+
+    static bool was_open;
+    bool appearing = !was_open;
+    was_open = true;
+
+    int r = osk_keys(g_kbd_text, sizeof g_kbd_text, g_kbd_max, appearing, scale, g_font_big, true);
+    int chars = kbd_utf8_chars(g_kbd_text);
+    if (r > 0 && chars < g_kbd_min) {
+        pthread_mutex_lock(&g_kbd_lock);
+        snprintf(g_kbd_error, sizeof g_kbd_error,
+                 g_mlang == 1 ? "Digite pelo menos %d caractere(s)." :
+                 g_mlang == 2 ? "Введите минимум %d символ(а)." :
+                                "Enter at least %d character(s).",
+                 g_kbd_min);
+        pthread_mutex_unlock(&g_kbd_lock);
+        r = 0;
+    }
+
+    if (g_kbd_prompt_mode) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextDisabled("%s", M("The game asks you to confirm this text.",
+                                     "O jogo pede para confirmar este texto.",
+                                     "Игра просит подтвердить этот текст."));
+        if (ImGui::Button(M("Use anyway", "Usar mesmo assim", "Использовать"), ImVec2(260 * scale, 0)))
+            g_kbd = 4;
+        ImGui::SameLine();
+        if (ImGui::Button(M("Edit", "Editar", "Изменить"), ImVec2(200 * scale, 0))) {
+            pthread_mutex_lock(&g_kbd_lock);
+            g_kbd_error[0] = 0;
+            pthread_mutex_unlock(&g_kbd_lock);
+        }
+    }
+
+    if (r > 0) g_kbd = 2;
+    else if (r < 0) g_kbd = 3;
+
     ImGui::End();
+    ImGui::PopStyleColor(7);
     if (g_kbd.load() != 1) was_open = false;
 }
 
 // Game thread (runtime/hle/swkbd.c): freeze the last game frame and wait while the SDL/main thread captures
 // the physical keyboard. Never call backend_present/backend_represent here: ShowKeyboard may run on a game worker
 // while the renderer owns Vulkan state, which crashes the AMD Windows driver.
-extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, int cap) {
+extern "C" int menu_keyboard_run(const char *initial, int min_len, int max_len,
+                                 const char *title, const char *sub, const char *guide,
+                                 const char *error, int prompt_mode,
+                                 char *out, int cap) {
     pthread_mutex_lock(&g_kbd_lock);
     snprintf(g_kbd_text, sizeof g_kbd_text, "%s", initial ? initial : "");
+    snprintf(g_kbd_title, sizeof g_kbd_title, "%s", title && *title ? title : M("Enter text", "Digite o texto", "Введите текст"));
+    snprintf(g_kbd_sub, sizeof g_kbd_sub, "%s", sub ? sub : "");
+    snprintf(g_kbd_guide, sizeof g_kbd_guide, "%s", guide ? guide : "");
+    snprintf(g_kbd_error, sizeof g_kbd_error, "%s", error ? error : "");
     pthread_mutex_unlock(&g_kbd_lock);
-    g_kbd_max = max_len > 0 && max_len < (int)sizeof g_kbd_text / 4 ? max_len : 8;
+    g_kbd_min = min_len > 0 ? min_len : 0;
+    g_kbd_max = max_len > 0 && max_len < 200 ? max_len : 64;
+    g_kbd_prompt_mode = prompt_mode;
     input_reset();
     g_kbd = 1;
+
     // (test) LARECOMP_KBD_AUTO=<text>: answer at once
     if (getenv("LARECOMP_KBD_AUTO")) {
         pthread_mutex_lock(&g_kbd_lock);
         snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO"));
         pthread_mutex_unlock(&g_kbd_lock);
-        g_kbd = 2;
+        g_kbd = prompt_mode ? 4 : 2;
     }
+
     while (g_kbd.load() == 1 && !g_rt_unwind) SDL_Delay(4);
-    bool ok = g_kbd.load() == 2;
+    int state = g_kbd.load();
+    bool ok = state == 2 || state == 4;
     pthread_mutex_lock(&g_kbd_lock);
-    ok = ok && g_kbd_text[0];
+    ok = ok && kbd_utf8_chars(g_kbd_text) >= g_kbd_min;
     if (ok) snprintf(out, cap, "%s", g_kbd_text);
     pthread_mutex_unlock(&g_kbd_lock);
     g_kbd = 0;
+    g_kbd_prompt_mode = 0;
     input_reset();
-    return ok;
+    if (!ok) return 0;
+    return state == 4 ? 2 : 1;
 }
 
 // "Close the game?" - Não has the focus first (Enter / A by reflex keeps playing); B / Esc answer Não.
@@ -510,7 +587,7 @@ static void quit_draw(ImGuiIO &io, float scale) {
 }
 
 void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
-    bool open = g_open.load(), kbd = false;  // Scarlet swkbd uses the physical keyboard; no Vulkan overlay
+    bool open = g_open.load(), kbd = g_kbd.load() == 1;
     float fx, fy;
     bool fdown, finger = !open && input_finger_cursor(&fx, &fy, &fdown);
     if (!open && !kbd && !g_settings.show_fps && !finger) {
