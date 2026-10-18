@@ -525,9 +525,23 @@ static uint32_t svc_wait_synchronization(uint64_t handles_ptr, int32_t count, in
             }
             if (o->signaled) { *index = i; r = R_OK; goto out; }
         }
-        if (t->cancel) { t->cancel = false; r = R_CANCELLED; goto out; }
-        if (g_rt_unwind) { r = R_CANCELLED; goto out; }
+        // Horizon checks an immediate (timeout==0) poll before a pending
+        // synchronization cancellation. This matters for Scarlet: worker
+        // cancellation can be left pending, while frame/event code frequently
+        // polls with zero timeout and expects only Success/TimedOut.
         if (timeout == 0) { r = R_TIMEOUT; goto out; }
+        if (t->cancel) {
+            t->cancel = false;
+            static _Atomic uint64_t cancel_returns;
+            uint64_t n = atomic_fetch_add(&cancel_returns, 1) + 1;
+            if (n <= 32 || !(n & 255))
+                LOG("[kernel] WaitSynchronization -> Cancelled #%llu: thread=%llu h=%x count=%d timeout=%lld lr=%llx\n",
+                    (unsigned long long)n, (unsigned long long)t->id, t->handle, count,
+                    (long long)timeout, (unsigned long long)t->cpu.x[30]);
+            r = R_CANCELLED;
+            goto out;
+        }
+        if (g_rt_unwind) { r = R_CANCELLED; goto out; }
         t->in_sync_wait = true;
         t->snext = g_syncwaiters;
         g_syncwaiters = t;
@@ -823,8 +837,19 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         pthread_mutex_lock(&g_klock);
         KObject *o = handle_get((uint32_t)x[0]);
         if (o && o->type == KOBJ_THREAD) {
-            ((KThread *)o)->cancel = true;
-            wake((KThread *)o);
+            KThread *target = (KThread *)o;
+            bool was_waiting = target->in_sync_wait;
+            bool was_pending = target->cancel;
+            target->cancel = true;
+            wake(target);
+            static _Atomic uint64_t cancel_calls;
+            uint64_t n = atomic_fetch_add(&cancel_calls, 1) + 1;
+            if (n <= 32 || !(n & 255))
+                LOG("[kernel] CancelSynchronization #%llu: caller=%llu target=%llu h=%x waiting=%d pending=%d lr=%llx\n",
+                    (unsigned long long)n,
+                    (unsigned long long)(t_cur ? t_cur->id : 0),
+                    (unsigned long long)target->id, (unsigned)(uint32_t)x[0],
+                    was_waiting, was_pending, (unsigned long long)x[30]);
             x[0] = R_OK;
         } else x[0] = R_INVALID_HANDLE;
         pthread_mutex_unlock(&g_klock);
