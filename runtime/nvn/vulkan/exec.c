@@ -219,23 +219,31 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     static _Atomic(uintptr_t) submit_owner;
     static _Atomic(unsigned) submit_active;
     static _Atomic(uint64_t) submit_overlap_count;
-    uintptr_t submit_me = (uintptr_t)pthread_self();
-    unsigned submit_before = atomic_fetch_add_explicit(&submit_active, 1, memory_order_acq_rel);
-    uintptr_t submit_prev = atomic_load_explicit(&submit_owner, memory_order_acquire);
-    if (!submit_before) atomic_store_explicit(&submit_owner, submit_me, memory_order_release);
-    else if (submit_prev != submit_me) {
-        uint64_t n = atomic_fetch_add_explicit(&submit_overlap_count, 1, memory_order_relaxed) + 1;
-        if (n <= 64 || !(n & 255))
-            LOG("[vk-thread] !!! overlapping vk_submit_extra #%llu: tid=%llx owner=%llx active=%u frame=%llu !!!\n",
-                (unsigned long long)n, (unsigned long long)submit_me,
-                (unsigned long long)submit_prev, submit_before + 1,
-                (unsigned long long)vk_frame_counter());
+    static int submit_diag = -1;
+    if (submit_diag < 0) submit_diag = getenv("LARECOMP_VK_THREAD_DIAG") ? 1 : 0;
+    uintptr_t submit_me = 0;
+    unsigned submit_before = 0;
+    if (submit_diag) {
+        submit_me = (uintptr_t)pthread_self();
+        submit_before = atomic_fetch_add_explicit(&submit_active, 1, memory_order_acq_rel);
+        uintptr_t submit_prev = atomic_load_explicit(&submit_owner, memory_order_acquire);
+        if (!submit_before) atomic_store_explicit(&submit_owner, submit_me, memory_order_release);
+        else if (submit_prev != submit_me) {
+            uint64_t n = atomic_fetch_add_explicit(&submit_overlap_count, 1, memory_order_relaxed) + 1;
+            if (n <= 64 || !(n & 255))
+                LOG("[vk-thread] !!! overlapping vk_submit_extra #%llu: tid=%llx owner=%llx active=%u frame=%llu !!!\n",
+                    (unsigned long long)n, (unsigned long long)submit_me,
+                    (unsigned long long)submit_prev, submit_before + 1,
+                    (unsigned long long)vk_frame_counter());
+        }
     }
     vk_end_pass();
     Sub *s = sub();
     if (!s->main_begun && !s->upload_begun && !wait && !signal) {
-        unsigned left = atomic_fetch_sub_explicit(&submit_active, 1, memory_order_acq_rel);
-        if (left == 1) atomic_store_explicit(&submit_owner, 0, memory_order_release);
+        if (submit_diag) {
+            unsigned left = atomic_fetch_sub_explicit(&submit_active, 1, memory_order_acq_rel);
+            if (left == 1) atomic_store_explicit(&submit_owner, 0, memory_order_release);
+        }
         return;
     }
     VkCommandBufferSubmitInfo cbs[2];
@@ -275,8 +283,10 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     cum_submits++;
     ring_retire();
     vk_collect_dead();
-    unsigned left = atomic_fetch_sub_explicit(&submit_active, 1, memory_order_acq_rel);
-    if (left == 1) atomic_store_explicit(&submit_owner, 0, memory_order_release);
+    if (submit_diag) {
+        unsigned left = atomic_fetch_sub_explicit(&submit_active, 1, memory_order_acq_rel);
+        if (left == 1) atomic_store_explicit(&submit_owner, 0, memory_order_release);
+    }
 }
 
 void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
@@ -3703,13 +3713,16 @@ static _Atomic(uintptr_t) vk_exec_owner;
 static _Atomic(unsigned) vk_exec_active;
 static _Atomic(uint64_t) vk_exec_overlap_count;
 
-static void vk_exec_diag_enter(uint64_t handle) {
+static bool vk_exec_diag_enter(uint64_t handle) {
+    static int enabled = -1;
+    if (enabled < 0) enabled = getenv("LARECOMP_VK_THREAD_DIAG") ? 1 : 0;
+    if (!enabled) return false;
     uintptr_t me = (uintptr_t)pthread_self();
     unsigned before = atomic_fetch_add_explicit(&vk_exec_active, 1, memory_order_acq_rel);
     uintptr_t owner = atomic_load_explicit(&vk_exec_owner, memory_order_acquire);
     if (!before) {
         atomic_store_explicit(&vk_exec_owner, me, memory_order_release);
-        return;
+        return true;
     }
     if (owner != me) {
         uint64_t n = atomic_fetch_add_explicit(&vk_exec_overlap_count, 1, memory_order_relaxed) + 1;
@@ -3719,16 +3732,18 @@ static void vk_exec_diag_enter(uint64_t handle) {
                 before + 1, (unsigned long long)handle,
                 (unsigned long long)vk_frame_counter());
     }
+    return true;
 }
 
-static void vk_exec_diag_leave(void) {
+static void vk_exec_diag_leave(bool enabled) {
+    if (!enabled) return;
     unsigned before = atomic_fetch_sub_explicit(&vk_exec_active, 1, memory_order_acq_rel);
     if (before == 1)
         atomic_store_explicit(&vk_exec_owner, 0, memory_order_release);
 }
 
 void backend_execute(uint64_t handle) {
-    vk_exec_diag_enter(handle);
+    bool thread_diag = vk_exec_diag_enter(handle);
     PROF_T0();
     if (ip_enabled()) ip_note_list(handle);
     exec_list(handle, 0);
@@ -3738,7 +3753,7 @@ void backend_execute(uint64_t handle) {
     if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
     if (sync_submit) renderer_flush();
     else renderer_submit();
-    vk_exec_diag_leave();
+    vk_exec_diag_leave(thread_diag);
 }
 
 // ================================================================== frame interpolation (prototype)
