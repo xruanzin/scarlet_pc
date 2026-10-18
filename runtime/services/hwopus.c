@@ -123,28 +123,46 @@ static uint32_t work_size(uint32_t channels) { return 0x4000 + channels * 0x8000
 SERVICE("hwopus", hwopus) {
     (void)s;
     switch (req->cmd) {
-    case 0: {  // OpenHardwareOpusDecoder(params, work size, transfer memory)
+    case 0: case 4: {  // OpenHardwareOpusDecoder / OpenHardwareOpusDecoderEx (12.0.0+)
+        // Ex adds {u32 UseLargeFrameSize,u32 pad} after rate/channels. The host
+        // decoder does not need the console work buffer and FFmpeg accepts up
+        // to 120 ms frames, so both variants use the same host object.
         OpusDec *d = calloc(1, sizeof *d);
         d->rate = IN(uint32_t, 0);
         d->channels = IN(uint32_t, 4);
         pthread_mutex_init(&d->lock, NULL);
         if (d->channels < 1 || d->channels > 2 || !opus_open(d)) {
             LOG("[hwopus] cannot open a decoder for %u Hz, %u ch\n", d->rate, d->channels);
+            pthread_mutex_destroy(&d->lock);
             free(d);
             resp->result = 111 | (1 << 9);
             return;
         }
         static int nlog;
-        if (nlog++ < 8) LOG("[hwopus] decoder opened: %u Hz, %u ch\n", d->rate, d->channels);
+        if (nlog++ < 12)
+            LOG("[hwopus] decoder opened%s: %u Hz, %u ch%s\n",
+                req->cmd == 4 ? " Ex" : "", d->rate, d->channels,
+                req->cmd == 4 && req->data_size >= 12 && IN(uint32_t, 8) ? " large-frame" : "");
         Service *dec = service_new("IHardwareOpusDecoder", opus_decoder, d);
         dec->on_close = opus_decoder_close;
         ipc_return_object(resp, dec);
         break;
     }
-    case 1:  // GetWorkBufferSize(params)
-        OUT(uint32_t, 0) = work_size(IN(uint32_t, 4));
+    case 1: case 5: {  // GetWorkBufferSize / GetWorkBufferSizeEx (12.0.0+)
+        uint32_t channels = IN(uint32_t, 4);
+        uint32_t size = work_size(channels);
+        // The console requires a larger work buffer for 120 ms frames. Host
+        // decoding doesn't use it, but return a realistic non-zero size so the
+        // SDK proceeds to OpenHardwareOpusDecoderEx instead of retrying.
+        if (req->cmd == 5 && req->data_size >= 12 && IN(uint32_t, 8)) size += 0x20000;
+        OUT(uint32_t, 0) = size;
         resp_size(resp, 4);
+        static int nlog;
+        if (nlog++ < 12)
+            LOG("[hwopus] work buffer%s: %u Hz, %u ch -> %#x\n",
+                req->cmd == 5 ? " Ex" : "", IN(uint32_t, 0), channels, size);
         break;
+    }
     default: LOG("[hwopus] IHardwareOpusDecoderManager cmd %u (not implemented)\n", req->cmd); resp_size(resp, 0x10);
     }
 }
