@@ -2538,21 +2538,6 @@ static void draw_(CmdRec *r, bool indexed) {
     begin_pass();
     VkCommandBuffer cb = vk_cmd();
 
-    if (st.tf_active && g_vk.transform_feedback) {
-        VkBuffer bufs[4];
-        VkDeviceSize offs[4], sizes[4];
-        uint32_t n = 0;
-        for (uint32_t i = 0; i < 4; i++) {
-            if (!st.tfbuf[i].addr || !st.tfbuf[i].size) continue;
-            VkBuffer b; VkDeviceSize o;
-            if (!guest_direct(st.tfbuf[i].addr, st.tfbuf[i].size, &b, &o)) continue;
-            // Scarlet binds streams densely from zero in all captured TF passes.
-            if (i != n) break;
-            bufs[n] = b; offs[n] = o; sizes[n] = st.tfbuf[i].size; n++;
-        }
-        if (n) vkCmdBindTransformFeedbackBuffersEXT(cb, 0, n, bufs, offs, sizes);
-    }
-
     uint32_t mode = (uint32_t)r->x[0];
     VkPrimitiveTopology topo;
     uint8_t cls;
@@ -3568,9 +3553,16 @@ static void exec_list(uint64_t handle, int depth) {
             if (!g_vk.transform_feedback) break;
             vk_end_pass();
             VkCommandBuffer cb = vk_cmd();
-            VkBuffer counter = VK_NULL_HANDLE;
-            VkDeviceSize coff = 0;
-            uint32_t ncounter = 0;
+            VkBuffer bufs[4], counter = VK_NULL_HANDLE;
+            VkDeviceSize offs[4], sizes[4], coff = 0;
+            uint32_t nbuf = 0, ncounter = 0;
+            for (uint32_t i = 0; i < 4; i++) {
+                if (!st.tfbuf[i].addr || !st.tfbuf[i].size) continue;
+                VkBuffer b; VkDeviceSize o;
+                if (i != nbuf || !guest_direct(st.tfbuf[i].addr, st.tfbuf[i].size, &b, &o)) break;
+                bufs[nbuf] = b; offs[nbuf] = o; sizes[nbuf] = st.tfbuf[i].size; nbuf++;
+            }
+            if (nbuf) vkCmdBindTransformFeedbackBuffersEXT(cb, 0, nbuf, bufs, offs, sizes);
             if (r->op == CMD_RESUME_TRANSFORM_FEEDBACK && r->x[0] &&
                 guest_direct(r->x[0], 4, &counter, &coff)) ncounter = 1;
             vkCmdBeginTransformFeedbackEXT(cb, 0, ncounter, ncounter ? &counter : NULL, ncounter ? &coff : NULL);
