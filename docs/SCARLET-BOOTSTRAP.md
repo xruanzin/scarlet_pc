@@ -14,6 +14,9 @@ For the later NVN initialization stop at `0x7000a7db34`, see
 If the main rebuild finishes compiling but reports `clang: Argument list too long`,
 see [the link recovery; no module regeneration is needed](SCARLET-SDK-INDIRECT-BOOT.md#link-recovery-after-argument-list-too-long).
 
+For the later access violation after `[nvn] window with 2 textures`, see
+[the graphics crash evidence and read-only instruction report](SCARLET-GRAPHICS-CRASH.md).
+
 ## Important
 
 Do **not** put Pokémon Scarlet game files, Switch keys, generated game code or Nintendo assets in this repository.
