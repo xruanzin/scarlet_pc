@@ -677,8 +677,9 @@ static bool rt_state_equal(const RtState *a, const RtState *b) {
     if (a->ncolor != b->ncolor || a->depth != b->depth) return false;
     for (int i = 0; i < a->ncolor; i++) {
         if (a->color[i] != b->color[i]) return false;
-        if (!rt_view_equal(&a->cview[i], a->has_cview[i] != 0, &b->cview[i], b->has_cview[i] != 0)) return false;
+        if (a->color[i] && !rt_view_equal(&a->cview[i], a->has_cview[i] != 0, &b->cview[i], b->has_cview[i] != 0)) return false;
     }
+    if (!a->depth) return true;
     return rt_view_equal(&a->dview, a->has_dview != 0, &b->dview, b->has_dview != 0);
 }
 
