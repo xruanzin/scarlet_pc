@@ -1,6 +1,7 @@
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
 #include <SDL3/SDL_cpuinfo.h>
 #include <SDL3/SDL_timer.h>
+#include <SDL3/SDL_thread.h>
 #include <float.h>
 #include <math.h>
 #include <stdarg.h>
@@ -417,6 +418,10 @@ static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
 
 static void *worker(void *a) {
     (void)a;
+    // Shader compilation is background work. Keeping these workers below the
+    // guest/render/audio threads prevents cold-cache compilation from stalling
+    // gameplay for seconds on 6c/12t APUs.
+    SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_LOW);
     for (;;) {
         pthread_mutex_lock(&jobs_lock);
         while (!jobs_head) pthread_cond_wait(&jobs_cond, &jobs_lock);
@@ -444,10 +449,14 @@ static void run_job(void (*fn)(void *), void *arg) {
     static bool started;
     if (!started) {
         started = true;
-        // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
-        int n = SDL_GetNumLogicalCPUCores() - 4;
-        if (n < 4) n = 4;
-        if (n > 16) n = 16;
+        // Leave substantial CPU headroom for the recompiled game. The old
+        // cores-4 policy spawned 8 compiler workers on a 12-thread Ryzen 4600G,
+        // starving game/audio threads and turning shader bursts into multi-second hitches.
+        int cores = SDL_GetNumLogicalCPUCores();
+        int n = cores / 3;
+        if (n < 2) n = 2;
+        if (n > 8) n = 8;
+        LOG("[shader] %d low-priority workers on %d logical CPUs\n", n, cores);
         for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
     }
     Job *j = malloc(sizeof *j);
@@ -1985,7 +1994,13 @@ static void draw(CmdRec *r, bool indexed) {
 static bool wait_built(_Atomic int *state) {
     if (atomic_load(state) != 0) return true;
     static int64_t budget = -1;
-    if (budget < 0) budget = (getenv("LARECOMP_SHADER_WAIT_MS") ? atoi(getenv("LARECOMP_SHADER_WAIT_MS")) : 20) * 1000000ll;
+    if (budget < 0) {
+        const char *e = getenv("LARECOMP_SHADER_WAIT_MS");
+        int ms = e ? atoi(e) : (SDL_GetNumLogicalCPUCores() <= 12 ? 4 : 8);
+        if (ms < 0) ms = 0;
+        budget = (int64_t)ms * 1000000ll;
+        LOG("[shader] per-frame compile wait budget: %d ms\n", ms);
+    }
     if (sync_shaders()) return true;  // (built already)
     extern uint64_t vk_frame_counter(void);
     static uint64_t frame;
