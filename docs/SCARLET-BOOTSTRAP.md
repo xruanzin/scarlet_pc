@@ -17,6 +17,9 @@ see [the link recovery; no module regeneration is needed](SCARLET-SDK-INDIRECT-B
 For the later access violation after `[nvn] window with 2 textures`, see
 [the confirmed 64-byte sampler-builder overflow and runtime-only fix](SCARLET-GRAPHICS-CRASH.md).
 
+For `no function at 7000026c94` after font/save initialization, see
+[the Lua protected-call return fix and main-only regeneration](SCARLET-LUA-LONGJMP.md).
+
 ## Important
 
 Do **not** put Pokémon Scarlet game files, Switch keys, generated game code or Nintendo assets in this repository.

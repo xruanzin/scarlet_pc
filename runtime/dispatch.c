@@ -1,6 +1,7 @@
 // Guest address -> recompiled function lookup, and host (HLE) function registry.
 #include <pthread.h>
 #include <signal.h>
+#include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -17,6 +18,29 @@ typedef struct {
 } FnTable;
 static FnTable tables[GAMELIB_MAX_MODULES];
 static int ntables;
+
+typedef struct GuestJumpScope {
+    jmp_buf native;
+    struct GuestJumpScope *prev;
+    Cpu *cpu;
+    uint64_t sp, pc;
+} GuestJumpScope;
+static __thread GuestJumpScope *guest_jump_scope;
+static __thread unsigned guest_jump_logs;
+
+void rt_guest_setjmp(Cpu *c, GuestFn setup, GuestFn continuation, uint64_t return_pc) {
+    GuestJumpScope scope = {.prev = guest_jump_scope, .cpu = c, .sp = c->sp, .pc = return_pc};
+    guest_jump_scope = &scope;
+    if (!setjmp(scope.native)) {
+        c->x[30] = return_pc;
+        setup(c);
+    }
+    // Call the static continuation directly: dispatching this PC would catch
+    // our own active scope again. Native frames below this scope remain live.
+    c->pc = return_pc;
+    continuation(c);
+    guest_jump_scope = scope.prev;
+}
 
 // HLE stubs live at fake addresses HLE_BASE + 16*i
 #define MAX_HLE 4096
@@ -212,6 +236,20 @@ static GuestFn dispatch_slow(Cpu *c) {
 
 // Always tail-calls, so chains of indirect jumps don't grow the host stack.
 void rt_dispatch(Cpu *c) {
+    if (__builtin_expect(guest_jump_scope != NULL, 0) && c->pc == c->x[30]) {
+        for (GuestJumpScope *j = guest_jump_scope; j; j = j->prev) {
+            if (j->cpu == c && j->pc == c->pc && j->sp == c->sp) {
+                // SDK longjmp has restored guest registers/SP already. Discard
+                // the abandoned native frames and any intervening jump scopes.
+                guest_jump_scope = j;
+                if (guest_jump_logs++ < 4)
+                    LOG("[dispatch] guest longjmp -> pc=%llx sp=%llx value=%llu\n",
+                        (unsigned long long)c->pc, (unsigned long long)c->sp,
+                        (unsigned long long)c->x[0]);
+                longjmp(j->native, 1);
+            }
+        }
+    }
     unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);
     GuestFn f = dcache[h].addr == c->pc ? dcache[h].fn : dispatch_slow(c);
     __attribute__((musttail)) return f(c);

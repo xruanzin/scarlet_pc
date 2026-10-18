@@ -44,6 +44,11 @@ foreach ($Name in @("main", "sdk")) {
     }
 }
 
+$MainTable = Join-Path $RepoRoot "generated\main\main_table.c"
+if (-not (Select-String -LiteralPath $MainTable -Pattern 'const uint64_t main_setjmp_site_count = [1-9][0-9]*;' -Quiet)) {
+    throw "Main gerado sem escopos setjmp/longjmp. Rode tools\scarlet_generate.ps1 -ExeFs 'D:\Pokemon Scarlet\Extracted\Base\exefs' -Module main e compile novamente."
+}
+
 if ($Jobs -lt 1) {
     $Jobs = 1
 }

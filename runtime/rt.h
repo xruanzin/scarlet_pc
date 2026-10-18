@@ -55,6 +55,9 @@ const char *loader_symbol_at(uint64_t addr, uint64_t *offset);
 typedef void (*HostFn)(Cpu *c);
 void dispatch_init(void);
 GuestFn dispatch_lookup(uint64_t addr);
+// A generated setjmp site tail-enters this scope; continuation runs while its
+// native jump buffer is live. Guest SDK code still saves/restores guest state.
+void rt_guest_setjmp(Cpu *c, GuestFn setup, GuestFn continuation, uint64_t return_pc);
 uint64_t hle_register(const char *name, HostFn fn);  // returns fake guest address
 HostFn hle_lookup_impl(const char *name);
 void hle_override(uint64_t guest_addr, HostFn fn, const char *name);

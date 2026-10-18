@@ -22,6 +22,11 @@ from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx, sext
 from nso import Nso, R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE
 
 SCRATCH_MEM = 0x7300000000
+# Verified by Scarlet's protected-call/longjmp boot trace. Addresses are NSO
+# relative and deliberately scoped to this exact main Build ID.
+SCARLET_SETJMP_THUNKS = {
+    'ca44e7dd62e61a2a4e8889b3319ae173375770fd': {0x3017B70},
+}
 
 
 def sext26(w):
@@ -50,6 +55,8 @@ class Module:
         self.cache = {}
         self.stats = Counter()
         self.mu = None
+        self.setjmp_targets = {base + a for a in SCARLET_SETJMP_THUNKS.get(n.build_id, set())} if name == 'main' else set()
+        self.setjmp_sites = {}
 
     def in_text(self, a):
         return self.lo <= a < self.hi and a % 4 == 0
@@ -391,9 +398,25 @@ class Module:
             roots = sorted(set(self.boundaries()) | {self.lo, self.hi})
         groups = {bisect.bisect_right(roots, a) - 1
                   for a, (end, labels, tables) in entries.items() if tables}
+        groups.update(bisect.bisect_right(roots, pc) - 1 for pc in self.setjmp_sites)
         return {a for a, (end, labels, tables) in entries.items()
                 if a not in hle and end > a + 4
                 and bisect.bisect_right(roots, a) - 1 in groups}
+
+    def prepare_setjmp(self, entries):
+        self.setjmp_sites = {}
+        if not self.setjmp_targets:
+            return
+        order = sorted(entries)
+        for entry, (end, labels, tables) in entries.items():
+            for pc in range(entry, end, 4):
+                ins = self.lift(pc)
+                if ins.kind == 'bl' and ins.target in self.setjmp_targets:
+                    ret = pc + 4
+                    owner = order[bisect.bisect_right(order, ret) - 1]
+                    if not owner <= ret < entries[owner][0]:
+                        raise ValueError(f'setjmp continuation outside text: {ret:x}')
+                    self.setjmp_sites[pc] = (ins.target, owner)
 
     def render_single(self, ins, a, jump, refs):
         """C for one lifted instruction (no batching); used for patch variants."""
@@ -438,6 +461,7 @@ class Module:
                     '    goto L_dispatch;']
         batch = []
         refs = set()
+        jump_helpers = []
 
         def flush():
             if batch:
@@ -509,6 +533,19 @@ class Module:
                 out.append(f'    if ({ins.cond}) {{ {jump(ins.target)} }}')
             elif k == 'bl':
                 t = ins.target
+                if a in self.setjmp_sites:
+                    target, owner = self.setjmp_sites[a]
+                    helper = fname(a) + '_setjmp'
+                    continuation = fname(owner) if owner == a + 4 else fname(owner) + '_resume'
+                    out.insert(0, f'void {helper}(Cpu *c);')
+                    refs.add(target)
+                    jump_helpers += [f'void {continuation}(Cpu *c);',
+                        'void rt_guest_setjmp(Cpu *, GuestFn, GuestFn, uint64_t);',
+                        f'void {helper}(Cpu *c) {{ rt_guest_setjmp(c, {fname(target)}, '
+                        f'{continuation}, {hx(a + 4)}); }}']
+                    out.append(f'    __attribute__((musttail)) return {helper}(c);')
+                    last = 'b'
+                    continue
                 if self.in_text(t):
                     refs.add(t)
                     out.append(f'    c->x[30] = {hx(a + 4)}; {fname(t)}(c);')
@@ -539,6 +576,7 @@ class Module:
             out.append(f'    switch (c->pc) {{ {cases} default: break; }}')
             out.append('    __attribute__((musttail)) return rt_dispatch(c);')
         out.append('}')
+        out += jump_helpers
         self._refs = refs
         return out
 
@@ -583,6 +621,8 @@ def main():
                     help='additional callable range start:end; every aligned instruction becomes an entry')
     ap.add_argument('--indirect-resume', action='store_true',
                     help='emit static interior-PC resume ranges for indirect-branch unwind intervals')
+    ap.add_argument('--setjmp-target', action='append', default=[], type=lambda s: int(s, 0),
+                    help='known setjmp thunk (absolute address); used for synthetic tests/other verified builds')
     ap.add_argument('--trace-stores', action='store_true')  # research build (docs/DEPURACAO.md, LARECOMP_TRACE_STORES)
     ap.add_argument('--simd', choices=('asm', 'c'),
                     default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
@@ -590,6 +630,9 @@ def main():
 
     t0 = time.time()
     m = Module(args.name, args.nso, args.base, args.simd, args.trace_stores)
+    m.setjmp_targets.update(args.setjmp_target)
+    if any(not m.in_text(a) for a in m.setjmp_targets):
+        raise SystemExit('setjmp target outside module text')
     bid = m.nso.build_id[:16]
     if args.name == 'main' and bid != EEVEE_100_BUILD:
         # The instruction patches are written for Let's Go Eevee 1.0.0's main: moved to the same instructions of a
@@ -671,8 +714,10 @@ def main():
         end = order[i + 1] if i + 1 < len(order) else m.hi
         labels, ext, tables = scanned[(a, end)]
         entries[a] = (end, labels, tables)
-    resume_entries = m.indirect_resume_entries(entries, hle) if args.indirect_resume else set()
+    m.prepare_setjmp(entries)
+    resume_entries = m.indirect_resume_entries(entries, hle) if args.indirect_resume or m.setjmp_sites else set()
     m.stats['resume_fragments'] = len(resume_entries)
+    m.stats['setjmp_sites'] = len(m.setjmp_sites)
     print(f'{args.name}: {len(starts)} boundaries, {len(entries)} functions, {rounds} rounds, {dict(m.stats)}, '
           f'{time.time() - t0:.0f}s', file=sys.stderr)
 
@@ -741,6 +786,7 @@ def main():
             f.write('    {0, 0, 0},\n')
         f.write('};\n')
         f.write(f'const uint64_t {args.name}_resume_count = {len(resumes)};\n')
+        f.write(f'const uint64_t {args.name}_setjmp_site_count = {len(m.setjmp_sites)};\n')
         write_if_changed(os.path.join(args.outdir, f'{args.name}_table.c'), f.getvalue())
     print(f'{args.name}: wrote {nchunks} chunks, {time.time() - t0:.0f}s total', file=sys.stderr)
 
