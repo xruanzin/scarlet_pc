@@ -286,7 +286,10 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     bool depthfmt = renderer_format_is_depth(t->format);
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (depthfmt) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    else if (format_supports(vf, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    else {
+        if (format_supports(vf, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if (format_supports(vf, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    }
     VkImageCreateFlags flags = 0;
     if (!depthfmt) flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;  // format views (NVN texture views, raw sRGB views)
     if (type == VK_IMAGE_TYPE_2D && layers >= 6 && tw == th && samples == 1) flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
@@ -301,6 +304,7 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         ci.format = vf = VK_FORMAT_R8G8B8A8_UNORM;
         ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if (format_supports(vf, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
         ci.flags &= ~VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
         depthfmt = false;
@@ -769,6 +773,79 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     if (nlog++ < 30) LOG("[tex] type mismatch: want %d have %d (%ux%ux%u target %u fmt %#x layers %u)\n", want, have, t->width,
                          t->height, t->depth, t->target, t->format, b->layers);
     return vk_dummy_view(want_textype);
+}
+
+static bool storage_float_format(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM:
+    case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SNORM:
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SNORM:
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+    case VK_FORMAT_R16_UNORM: case VK_FORMAT_R16_SNORM: case VK_FORMAT_R16_SFLOAT:
+    case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16_SNORM: case VK_FORMAT_R16G16_SFLOAT:
+    case VK_FORMAT_R16G16B16A16_UNORM: case VK_FORMAT_R16G16B16A16_SNORM: case VK_FORMAT_R16G16B16A16_SFLOAT:
+    case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32B32A32_SFLOAT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+VkImageView vk_storage_write_view(NvnTexture *t, const NvnTextureView *v, bool has_view) {
+    (void)v; (void)has_view;
+    if (!t) return VK_NULL_HANDLE;
+    TexBackend *b = vk_tex(t, true);
+    if (!b || !b->image || b->samples != 1 || b->base_type != VK_IMAGE_VIEW_TYPE_2D ||
+        b->aspect != VK_IMAGE_ASPECT_COLOR_BIT || !storage_float_format(b->format) ||
+        !format_supports(b->format, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+        return VK_NULL_HANDLE;
+    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, b->format, 0, 1, 0, 1,
+                         (VkComponentMapping){VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                              VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY},
+                         VK_IMAGE_ASPECT_COLOR_BIT);
+}
+
+VkImageView vk_storage_atomic_u32_view(NvnTexture *t, const NvnTextureView *v, bool has_view) {
+    (void)v; (void)has_view;
+    if (!t) return VK_NULL_HANDLE;
+    TexBackend *b = vk_tex(t, true);
+    if (!b || !b->image || b->samples != 1 || b->base_type != VK_IMAGE_VIEW_TYPE_2D ||
+        b->aspect != VK_IMAGE_ASPECT_COLOR_BIT || b->format != VK_FORMAT_R32_UINT ||
+        !format_supports(b->format, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT))
+        return VK_NULL_HANDLE;
+    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_UINT, 0, 1, 0, 1,
+                         (VkComponentMapping){VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                              VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY},
+                         VK_IMAGE_ASPECT_COLOR_BIT);
+}
+
+VkImageView vk_dummy_storage_view(bool atomic_u32) {
+    static TexBackend d[2];
+    static VkImageView view[2];
+    int k = atomic_u32 ? 1 : 0;
+    if (view[k]) return view[k];
+    TexBackend *b = &d[k];
+    VkFormat fmt = atomic_u32 ? VK_FORMAT_R32_UINT : VK_FORMAT_R8G8B8A8_UNORM;
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                            .format = fmt, .extent = {1, 1, 1}, .mipLevels = 1, .arrayLayers = 1,
+                            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
+    b->format = fmt; b->width = b->height = b->depth = b->layers = b->levels = b->samples = 1;
+    b->aspect = VK_IMAGE_ASPECT_COLOR_BIT; b->base_type = VK_IMAGE_VIEW_TYPE_2D;
+    VkCommandBuffer cb = vk_upload_cmd();
+    vk_image_init_layout(cb, b->image, b->aspect);
+    VkClearColorValue zero = {{0, 0, 0, 0}};
+    VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
+    view[k] = vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, fmt, 0, 1, 0, 1,
+                            (VkComponentMapping){VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                 VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY},
+                            VK_IMAGE_ASPECT_COLOR_BIT);
+    return view[k];
 }
 
 // 1x1 black textures for unbound slots, per type
