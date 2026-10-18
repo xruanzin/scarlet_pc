@@ -21,7 +21,7 @@
 #include "../../settings.h"
 
 static uint64_t g_draws_total;  // (never reset: LARECOMP_COUNTER_LOG)
-static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
+static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies, stat_a2c_1x;
 // Skipped draws by reason (logged with the stats): 0 no program bound, 1 program still compiling, 2 program failed,
 // 3 no program object, 4 primitive mode, 5 pipeline still building, 6 pipeline failed.
 static uint64_t stat_skip_why[8];
@@ -801,6 +801,10 @@ const char *renderer_stats(void) {
              atomic_exchange(&stat_compiles, 0), atomic_exchange(&stat_translate_ns, 0) / 1e6, atomic_exchange(&stat_spirv_ns, 0) / 1e6, atomic_exchange(&stat_pipe_ns, 0) / 1e6,
              stat_shader_wait_ns / 1e6,
              (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0);
+    if (stat_a2c_1x) {
+        size_t n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n, ", a2c1x %llu", (unsigned long long)stat_a2c_1x);
+    }
     stat_feedback_copies = stat_upload_bytes = stat_shader_wait_ns = 0;
     if (g_exp_count[0] | g_exp_count[1] | g_exp_count[2] | g_exp_count[3]) {
         LOG("[exp] skin identity %llu, ubo direct %llu, ubo copied %llu, one-bone shaders %llu\n",
@@ -846,7 +850,7 @@ const char *renderer_stats(void) {
         prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = prof_tex_watch_skips = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
-    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
+    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_a2c_1x = 0;
     return stats_text;
 }
 
@@ -2808,6 +2812,12 @@ static void draw_(CmdRec *r, bool indexed) {
     // pipeline turns ordinary translucent/material alpha into a 1-bit coverage
     // mask on some AMD drivers, producing the dense stipple/checker pattern seen
     // over Scarlet's cutscenes and character materials.
+    if (st.ms[0xC] && pass_samples == 1) {
+        stat_a2c_1x++;
+        static int told_a2c_1x;
+        if (!told_a2c_1x++)
+            LOG("[vk] suppressing NVN alpha-to-coverage on 1-sample target (prevents Scarlet stipple)\n");
+    }
     k.a2c = pass_samples > 1 && st.ms[0] && st.ms[0xC] != 0;
     k.topo_class = cls;
     k.poly_fill = st.poly[2] != 1;
