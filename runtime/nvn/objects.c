@@ -439,12 +439,33 @@ NVN(nvnTextureReadTexels) { LOG("[nvn] ReadTexels not implemented\n"); (void)c; 
 NVN(nvnTextureReadTexelsStrided) { (void)c; }
 
 // ================================================================== samplers
-// SamplerBuilder: device@0 then an NvnSamplerDesc at 8
-#define SD ((NvnSamplerDesc *)(AP(0) + 8))
+// Scarlet places a 0x40-byte builder immediately before saved X29/LR.
+// NvnSamplerDesc is a larger host/backend object: embedding it here overwrites
+// the guest stack. Keep small enum values packed and convert at the boundary.
+typedef struct {
+    uint64_t device;
+    uint8_t min_filter, mag_filter, wrap[3], compare_mode, compare_func, reduction;
+    float lod_min, lod_max, lod_bias, max_aniso;
+    float border[4];
+    uint8_t reserved[16];
+} NvnSamplerBuilder;
+_Static_assert(sizeof(NvnSamplerBuilder) == 0x40, "guest sampler builder size");
+
+static NvnSamplerDesc sampler_desc(const NvnSamplerBuilder *b) {
+    NvnSamplerDesc d = {0};  // backend cache belongs only to the host object
+    d.min_filter = b->min_filter; d.mag_filter = b->mag_filter;
+    for (int i = 0; i < 3; i++) d.wrap[i] = b->wrap[i];
+    d.compare_mode = b->compare_mode; d.compare_func = b->compare_func; d.reduction = b->reduction;
+    d.lod_min = b->lod_min; d.lod_max = b->lod_max; d.lod_bias = b->lod_bias; d.max_aniso = b->max_aniso;
+    memcpy(d.border, b->border, sizeof d.border);
+    return d;
+}
+
+#define SD ((NvnSamplerBuilder *)AP(0))
 NVN(nvnSamplerBuilderSetDevice) { G(uint64_t, A(0), 0) = A(1); }
 NVN(nvnSamplerBuilderSetDefaults) {
-    NvnSamplerDesc *d = SD;
-    memset(d, 0, sizeof *d);
+    NvnSamplerBuilder *d = SD;
+    memset((uint8_t *)d + sizeof d->device, 0, sizeof *d - sizeof d->device);
     d->min_filter = 0; d->mag_filter = 0;
     d->wrap[0] = d->wrap[1] = d->wrap[2] = 1;  // REPEAT
     d->lod_min = 0; d->lod_max = 1000.0f; d->max_aniso = 1.0f;
@@ -476,7 +497,7 @@ NVN(nvnSamplerBuilderGetLodSnap) { RETF(0); }
 
 NVN(nvnSamplerInitialize) {
     NvnSamplerDesc *d = malloc(sizeof *d);
-    *d = *(NvnSamplerDesc *)(AP(1) + 8);
+    *d = sampler_desc((const NvnSamplerBuilder *)AP(1));
     SET_HOST(A(0), d);
     RET(1);
 }
@@ -551,7 +572,7 @@ NVN(nvnSamplerPoolRegisterSampler) {
 NVN(nvnSamplerPoolRegisterSamplerBuilder) {
     NvnDescPool *d = HOST(NvnDescPool, A(0));
     int id = (int)A(1);
-    if (id >= 0 && id < d->count) ((NvnSamplerDesc *)d->entries)[id] = *(NvnSamplerDesc *)(AP(2) + 8);
+    if (id >= 0 && id < d->count) ((NvnSamplerDesc *)d->entries)[id] = sampler_desc((const NvnSamplerBuilder *)AP(2));
 }
 
 NvnDescPool *nvn_find_pool(NvnDescPool **reg, uint64_t guest_pool) {

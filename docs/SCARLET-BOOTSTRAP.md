@@ -15,7 +15,7 @@ If the main rebuild finishes compiling but reports `clang: Argument list too lon
 see [the link recovery; no module regeneration is needed](SCARLET-SDK-INDIRECT-BOOT.md#link-recovery-after-argument-list-too-long).
 
 For the later access violation after `[nvn] window with 2 textures`, see
-[the graphics crash evidence and read-only instruction report](SCARLET-GRAPHICS-CRASH.md).
+[the confirmed 64-byte sampler-builder overflow and runtime-only fix](SCARLET-GRAPHICS-CRASH.md).
 
 ## Important
 
