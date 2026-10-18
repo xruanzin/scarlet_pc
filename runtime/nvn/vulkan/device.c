@@ -202,14 +202,18 @@ static void create_device(void) {
     b->shaderStorageImageReadWithoutFormat = h->shaderStorageImageReadWithoutFormat;
     b->shaderStorageImageExtendedFormats = h->shaderStorageImageExtendedFormats;
     b->robustBufferAccess = h->robustBufferAccess;
+    uint32_t storage_limit = g_vk.props.limits.maxPerStageDescriptorStorageImages;
+    uint32_t storage_slots = storage_limit / 2;  // one write array + one atomic array
+    if (storage_slots > MAXWELL_BINDLESS_IMAGES) storage_slots = MAXWELL_BINDLESS_IMAGES;
     g_vk.bindless_storage = h->fragmentStoresAndAtomics &&
                             have12.shaderStorageImageArrayNonUniformIndexing &&
                             h->shaderStorageImageArrayDynamicIndexing &&
                             h->shaderStorageImageWriteWithoutFormat &&
-                            g_vk.props.limits.maxPerStageDescriptorStorageImages >= MAXWELL_BINDLESS_IMAGES * 2;
-    LOG("[vk] bindless storage images: %s (limit %u)\n",
+                            storage_slots > 0;
+    g_vk.bindless_storage_slots = g_vk.bindless_storage ? (uint8_t)storage_slots : 0;
+    LOG("[vk] bindless storage images: %s (limit %u, %u slots/type)\n",
         g_vk.bindless_storage ? "enabled" : "fallback",
-        g_vk.props.limits.maxPerStageDescriptorStorageImages);  // guest shaders index cbufs freely: keep OOB reads harmless
+        storage_limit, g_vk.bindless_storage_slots);  // guest shaders index cbufs freely: keep OOB reads harmless
     b->shaderClipDistance = h->shaderClipDistance;
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     float prio = 1.0f;
