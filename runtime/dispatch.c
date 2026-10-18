@@ -143,6 +143,18 @@ uint64_t guest_sym(const char *name) {
     return a;
 }
 
+// Shared direct-mapped cache in front of the binary search.
+// Guest address -> lifted function is immutable for a boot, so making this
+// per-thread only duplicated memory and forced every Scarlet worker to warm the
+// same lookup table again. 262144 entries (~4 MiB total) cover almost the
+// complete lifted working set and are shared by loader, jobs, audio and render.
+#define DCACHE 262144
+typedef struct {
+    _Atomic uint64_t addr;
+    _Atomic(uintptr_t) fn;
+} DCacheEnt;
+static DCacheEnt dcache[DCACHE];
+
 static uint64_t hle_next = HLE_HEAP;
 RT_ON_RESET(hle_heap_reset) { hle_next = HLE_HEAP; }  // (guest memory, wiped by the reboot)
 
@@ -228,18 +240,6 @@ GuestFn dispatch_lookup(uint64_t addr) {
     }
     return NULL;
 }
-
-// Shared direct-mapped cache in front of the binary search.
-// Guest address -> lifted function is immutable for a boot, so making this
-// per-thread only duplicated memory and forced every Scarlet worker to warm the
-// same lookup table again. 262144 entries (~4 MiB total) cover almost the
-// complete lifted working set and are shared by loader, jobs, audio and render.
-#define DCACHE 262144
-typedef struct {
-    _Atomic uint64_t addr;
-    _Atomic(uintptr_t) fn;
-} DCacheEnt;
-static DCacheEnt dcache[DCACHE];
 
 static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
