@@ -590,6 +590,29 @@ typedef struct {
 
 typedef struct { uint64_t addr, size; } Range;
 
+// Extension commands are not exported by vulkan-1.lib on Windows. Resolve them
+// from the device once, as required for device extension entry points.
+static PFN_vkCmdBindTransformFeedbackBuffersEXT tf_bind_buffers;
+static PFN_vkCmdBeginTransformFeedbackEXT tf_begin;
+static PFN_vkCmdEndTransformFeedbackEXT tf_end;
+static bool tf_api_ready(void) {
+    static int loaded;
+    if (!loaded) {
+        loaded = 1;
+        tf_bind_buffers = (PFN_vkCmdBindTransformFeedbackBuffersEXT)
+            vkGetDeviceProcAddr(g_vk.dev, "vkCmdBindTransformFeedbackBuffersEXT");
+        tf_begin = (PFN_vkCmdBeginTransformFeedbackEXT)
+            vkGetDeviceProcAddr(g_vk.dev, "vkCmdBeginTransformFeedbackEXT");
+        tf_end = (PFN_vkCmdEndTransformFeedbackEXT)
+            vkGetDeviceProcAddr(g_vk.dev, "vkCmdEndTransformFeedbackEXT");
+        if (!tf_bind_buffers || !tf_begin || !tf_end) {
+            LOG("[vk] transform feedback entry points unavailable; disabling TF\n");
+            g_vk.transform_feedback = false;
+        }
+    }
+    return g_vk.transform_feedback && tf_bind_buffers && tf_begin && tf_end;
+}
+
 static struct {
     RtState rt;
     bool rt_dirty;
@@ -2551,11 +2574,14 @@ static void draw_(CmdRec *r, bool indexed) {
             bufs[nbuf] = b; offs[nbuf] = o; sizes[nbuf] = st.tfbuf[i].size; nbuf++;
         }
         if (nbuf) {
-            vkCmdBindTransformFeedbackBuffersEXT(cb, 0, nbuf, bufs, offs, sizes);
+            if (!tf_api_ready()) { st.tf_active = false; }
+            else tf_bind_buffers(cb, 0, nbuf, bufs, offs, sizes);
             if (st.tf_resume && st.tf_counter &&
                 guest_direct(st.tf_counter, 4, &counter, &coff)) ncounter = 1;
-            vkCmdBeginTransformFeedbackEXT(cb, 0, ncounter, ncounter ? &counter : NULL, ncounter ? &coff : NULL);
-            st.tf_vk_active = true;
+            if (st.tf_active && tf_api_ready()) {
+                tf_begin(cb, 0, ncounter, ncounter ? &counter : NULL, ncounter ? &coff : NULL);
+                st.tf_vk_active = true;
+            }
         }
     }
 
@@ -3588,7 +3614,8 @@ static void exec_list(uint64_t handle, int depth) {
                 VkDeviceSize coff = 0;
                 uint32_t ncounter = 0;
                 if (r->x[0] && guest_direct(r->x[0], 4, &counter, &coff)) ncounter = 1;
-                vkCmdEndTransformFeedbackEXT(cb, 0, ncounter, ncounter ? &counter : NULL, ncounter ? &coff : NULL);
+                if (tf_api_ready())
+                    tf_end(cb, 0, ncounter, ncounter ? &counter : NULL, ncounter ? &coff : NULL);
                 st.tf_vk_active = false;
                 vk_end_pass();
                 vk_full_barrier(vk_cmd());
