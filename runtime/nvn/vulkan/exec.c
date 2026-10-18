@@ -450,6 +450,8 @@ static void *worker(void *a) {
     return NULL;
 }
 
+static uint64_t shader_wait_limit_ns(void);
+
 static bool sync_shaders(void) {
     static int v = -1;
     if (v < 0) v = getenv("LARECOMP_SYNC_SHADERS") != NULL;
@@ -469,7 +471,7 @@ static void run_job(void (*fn)(void *), void *arg) {
         // cores-4 policy spawned 8 compiler workers on a 12-thread Ryzen 4600G,
         // starving game/audio threads and turning shader bursts into multi-second hitches.
         int cores = SDL_GetNumLogicalCPUCores();
-        int n = cores <= 12 ? 1 : 2;
+        int n = cores <= 12 ? 2 : 3;  // >=2: one very slow compile must not block every other shader behind it
         for (int i = 0; i < n; i++) {
             pthread_t t;
             int error = pthread_create(&t, NULL, worker, NULL);
@@ -477,7 +479,7 @@ static void run_job(void (*fn)(void *), void *arg) {
             else LOG("[shader] worker creation failed: %d\n", error);
         }
         LOG("[shader] %d low-priority workers on %d logical CPUs\n", worker_count, cores);
-        LOG("[shader] build timeout: 8000 ms; translated AMD pipelines use fast creation\n");
+        LOG("[shader] wait limit %d ms then skip (LARECOMP_SHADER_WAIT_MS); translated AMD pipelines use fast creation\n", (int)(shader_wait_limit_ns() / 1000000ull));
     }
     if (!worker_count) { fn(arg); return; }  // no job may wait forever if the OS cannot start a worker
     Job *j = malloc(sizeof *j);
@@ -492,19 +494,41 @@ static void run_job(void (*fn)(void *), void *arg) {
 
 // SDL events are pumped by device.c's separate UI thread. Never re-enter Vulkan presentation here: the current
 // command list and its render pass still belong to this thread. Sleep while the worker finishes, preserving order.
+static uint64_t shader_wait_limit_ns(void) {
+    static uint64_t v;
+    if (!v) {
+        const char *e = getenv("LARECOMP_SHADER_WAIT_MS");
+        long ms = e ? atol(e) : 0;
+        v = (ms > 0 ? (uint64_t)ms : 3000ull) * 1000000ull;
+    }
+    return v;
+}
+
+// A pipeline/program that is still compiling after the limit is NOT fatal: the draw (callers check state != 1) is
+// skipped and the game keeps running while the driver finishes in the background. Killing the process here made
+// Scarlet "not start": its first large fragment shader (~140k SPIR-V words) takes the AMD driver far longer than
+// 8 s, and nothing else ever got to run. LARECOMP_SHADER_TIMEOUT_EXIT=1 restores the old behaviour for debugging.
 static void wait_built(_Atomic int *state, const char *kind, uint64_t code0, uint64_t code1) {
     if (atomic_load(state)) return;
+    static __thread _Atomic int *given_up[16];
+    static __thread unsigned ngiven_up;
+    for (unsigned i = 0; i < 16 && i < ngiven_up; i++)
+        if (given_up[i] == state) return;  // already waited the full limit once: don't stall every frame again
+    uint64_t limit = shader_wait_limit_ns();
     uint64_t start = SDL_GetTicksNS(), report = start + 1000000000ull;
     while (!atomic_load(state)) {
         SDL_Delay(1);
         uint64_t now = SDL_GetTicksNS();
-        if (!atomic_load(state) && now - start >= 8000000000ull) {
-            LOG("[build-timeout] %s %llx/%llx exceeded 8 s; stopping the process before further compiler work\n",
-                kind, (unsigned long long)code0, (unsigned long long)code1);
-            fflush(stderr);
-            // A Vulkan compiler call cannot be cancelled by killing its pthread or by destroying its device.
-            // End the process without driver/DLL teardown, which may otherwise wait for the stuck compiler.
-            plat_emergency_exit(86);
+        if (!atomic_load(state) && now - start >= limit) {
+            LOG("[shader-slow] %s %llx/%llx still compiling after %.1f s: skipping draws that use it until it is ready\n",
+                kind, (unsigned long long)code0, (unsigned long long)code1, (now - start) / 1e9);
+            if (getenv("LARECOMP_SHADER_TIMEOUT_EXIT")) {
+                fflush(stderr);
+                plat_emergency_exit(86);
+            }
+            given_up[ngiven_up++ & 15] = state;
+            stat_shader_wait_ns += now - start;
+            return;
         }
         if (now >= report) {
             LOG("[shader-wait] %s %llx/%llx: %.1f s, jobs=%d (command preserved)\n", kind,
