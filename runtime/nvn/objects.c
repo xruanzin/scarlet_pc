@@ -720,6 +720,17 @@ NVN(nvnQueuePresentTexture) {
     }
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
+    if (w && i >= 0 && i < w->ntextures) {
+        static NvnTexture *last_tex;
+        static int last_i = -1;
+        NvnTexture *pt = w->textures[i];
+        if (pt != last_tex || i != last_i) {
+            LOG("[present] window texture %d/%d -> %p (%ux%u fmt %#x)\n",
+                i, w->ntextures, (void *)pt,
+                pt ? pt->width : 0, pt ? pt->height : 0, pt ? pt->format : 0);
+            last_tex = pt; last_i = i;
+        }
+    }
     {   // LARECOMP_POKE32="<guest addr>=<value>[;...]": 32-bit values written to the game's memory before every present
         static const char *poke = (const char *)1;  // (experiments: a constant the game reads, without rebuilding anything)
         if (poke == (const char *)1) poke = getenv("LARECOMP_POKE32");
