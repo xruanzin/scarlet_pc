@@ -13,6 +13,47 @@
 
 const char *g_romfs_dir;
 
+/*
+ * Scarlet fast-boot guard for an SDK path-lookup failure seen after RomFS
+ * metadata is mounted. The SDK's indirect strncmp call occasionally arrives
+ * with a null-derived pointer (0x10). Normal strncmp calls still compare real
+ * guest strings; only obviously non-guest pointers are rejected as mismatch.
+ *
+ * This is deliberately an address/symbol override rather than a generated-code
+ * replacement, so removing it later does not require regenerating the SDK.
+ */
+static void scarlet_strncmp_guard(Cpu *c) {
+    uint64_t a = c->x[0], b = c->x[1], n = c->x[2], lr = c->x[30];
+    if (!n) {
+        c->x[0] = 0;
+        return;
+    }
+
+    bool a_ok = a >= GUEST_LO && a < GUEST_HI;
+    bool b_ok = b >= GUEST_LO && b < GUEST_HI;
+    if (!a_ok || !b_ok) {
+        LOG("[boot-guard] strncmp invalid a=%#llx b=%#llx n=%#llx lr=%#llx -> mismatch\n",
+            (unsigned long long)a, (unsigned long long)b,
+            (unsigned long long)n, (unsigned long long)lr);
+        c->x[0] = 1;
+        return;
+    }
+
+    int r = strncmp((const char *)(uintptr_t)a, (const char *)(uintptr_t)b, (size_t)n);
+    c->x[0] = (uint32_t)r;
+}
+
+static void install_scarlet_boot_guards(void) {
+    static bool installed;
+    if (installed) return;
+    uint64_t a = loader_find_symbol("strncmp");
+    if (a) {
+        hle_override(a, scarlet_strncmp_guard, "<scarlet_strncmp_guard>");
+        LOG("[boot] strncmp fast-boot guard at %#llx\n", (unsigned long long)a);
+    }
+    installed = true;
+}
+
 // rtld normally passes these to nn::init::Start: run every module's init/fini arrays.
 static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
     for (uint64_t i = 0; i < size / 8; i++) {
@@ -136,6 +177,7 @@ static void boot(const char *root) {
     { extern void settings_load(void); settings_load(); }
     kernel_init();
     dispatch_init();
+    install_scarlet_boot_guards();
 
     uint32_t stack_size = 0x100000;
     int prio = 44;
