@@ -566,9 +566,15 @@ static void record_call_commands(Cpu *c) {
         Snap part = s;
         part.x[1] = n;
         part.x[2] = handles + first * sizeof(uint64_t);
-        CmdRec *r = record(c, CMD_CALL, (uint32_t)(n * sizeof(uint64_t)), &part);
-        memcpy(r->extra, (const void *)(uintptr_t)part.x[2],
+
+        // rec() can re-enter the guest through the command-memory callback.
+        // Snapshot this portion of the caller's array before that happens.
+        uint64_t chunk[CALL_CHUNK];
+        memcpy(chunk, (const void *)(uintptr_t)part.x[2],
                (size_t)n * sizeof(uint64_t));
+
+        CmdRec *r = record(c, CMD_CALL, (uint32_t)(n * sizeof(uint64_t)), &part);
+        memcpy(r->extra, chunk, (size_t)n * sizeof(uint64_t));
     }
 }
 
