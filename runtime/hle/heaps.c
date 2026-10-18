@@ -165,10 +165,10 @@ static uint64_t g_std_declared_size = 0x10000000ull;
 static uint64_t g_std_live_bytes;
 
 // Keep StandardAllocator pointers inside Horizon's 39-bit guest address space.
-// HLE_HEAP ends at 0x70a0000000; the range up to ALIAS_BASE is otherwise
-// unused by the runtime and gives Scarlet a 1.5 GiB guest-visible arena.
-#define STD_GUEST_BASE (HLE_HEAP + HLE_HEAP_SIZE)
-#define STD_GUEST_LIMIT ALIAS_BASE
+// Use the runtime's canonical application heap range: it is directly encodable
+// in HIPC descriptors and provides up to 3.25 GiB without host-pointer truncation.
+#define STD_GUEST_BASE HEAP_BASE
+#define STD_GUEST_LIMIT (HEAP_BASE + HEAP_MAX)
 static uint64_t g_std_next = STD_GUEST_BASE;
 
 static uint64_t std_align(uint64_t a) {
