@@ -90,15 +90,22 @@ typedef struct NvnSync {
 
 // ---- command recording (stored in guest command memory)
 typedef struct {
-    uint64_t mem;         // current command memory chunk (guest address)
-    uint64_t size;        // current chunk size
-    uint64_t chunk_used;  // write cursor within the current chunk
-    uint64_t used;        // NVN usage since the most recent AddCommandMemory
-    uint64_t start;       // first record of the list being recorded
+    // Internal records are much larger than real Maxwell/NVN commands. Each
+    // recorded list therefore keeps a tiny handle/jump in the game's command
+    // memory and stores the expanded CmdRec stream in host overflow segments.
+    uint64_t mem;         // current internal write segment (guest or host address)
+    uint64_t size;        // current internal segment size
+    uint64_t chunk_used;  // write cursor within the current internal segment
+    uint64_t used;        // guest command-memory bytes consumed since AddCommandMemory
+    uint64_t guest_mem;   // most recently supplied guest command-memory chunk
+    uint64_t guest_size;
+    uint64_t start;       // opaque command handle: guest address of this list's first CMD_JUMP
     uint64_t callback, callback_data;
     bool recording;
-    uint64_t guest;  // the guest NVNcommandBuffer*
-    uint64_t obj_tag;  // frame interpolation: the game object the list's last CMD_OBJECT named (cmdbuf.c)
+    bool host_segment;    // current internal write segment is host-owned
+    uint64_t guest;       // the guest NVNcommandBuffer*
+    uint64_t obj_tag;     // frame interpolation: the game object the list's last CMD_OBJECT named (cmdbuf.c)
+    uint64_t host_origin_lo, host_origin_hi;  // guest handle slot owning the host segment chain
 } NvnCmdBuf;
 
 // One recorded command: header, the call's integer and float arguments, then copied data.
