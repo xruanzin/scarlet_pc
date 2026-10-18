@@ -169,6 +169,7 @@ static void create_device(void) {
         vkGetPhysicalDeviceProperties2(g_vk.phys, &tf_p2);
     }
     bool tf = tf_ext && tf_feat.transformFeedback && tf_prop.maxTransformFeedbackBuffers >= 3;
+    g_vk.transform_feedback = tf;
     if (tf) ext[n_ext++] = VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME;
     LOG("[vk] transform feedback: %s (feature=%u, buffers=%u, draw=%u)\n",
         tf ? "enabled" : tf_ext ? "extension present but unusable" : "extension absent",
