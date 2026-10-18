@@ -9,7 +9,9 @@ static uint64_t nvn_proc(const char *name) {
 }
 
 HLE_FUNC("nvnBootstrapLoader", nvn_bootstrap_loader) {
+    static int once;
     const char *name = (const char *)(uintptr_t)c->x[0];
+    if (!once++) LOG("[gfx-milestone] nvnBootstrapLoader reached (first proc: %s)\n", name ? name : "?");
     c->x[0] = nvn_proc(name);
 }
 
