@@ -850,6 +850,11 @@ static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
 
 // ------------------------------------------------------------------ instruction translation
 static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
+    // Maxwell binaries can contain an all-zero instruction word. Real Switch
+    // decoders treat this as a NOP; failing the whole shader here broke a
+    // Scarlet compute program immediately after the player-name sequence.
+    if (w == 0) return;
+
     char t[2048], u[2048];
     int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8);
     int pr = (int)bits(w, 16, 3);
@@ -1452,6 +1457,39 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (right) sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) >> (%s & 31u)))", hi, R(a), sh);
         else sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) << (%s & 31u)) >> 32)", hi, R(a), sh);
         set_reg(c, d, t);
+    } else if (OPM(0xeb00000000000000ull, 0xffe0000000000000ull)) {  // SULD: surface/image load
+        // Scarlet uses Maxwell surface operations in material/compute shaders. The
+        // Vulkan backend does not yet expose bindless storage images to translated
+        // GLSL. Do not discard the entire shader: return zero for the load so the
+        // rest of the material can execute. This is intentionally conservative and
+        // is replaced by real storage-image descriptors as that path is completed.
+        bool typed = bits(w, 52, 1);
+        int size = (int)bits(w, 20, 3);
+        int dst = (int)bits(w, 0, 8);
+        if (typed) {
+            int nr = size == 5 ? 2 : size >= 6 ? 4 : 1;
+            for (int k = 0; k < nr && dst + k < RZ; k++) set_reg(c, dst + k, "0u");
+        } else {
+            uint32_t swz = (uint32_t)bits(w, 20, 4);
+            // Maxwell's packed surface mask maps the common full-mask encoding
+            // (0xf) to four destination components. For partial forms, preserving
+            // four zero registers is harmless and avoids stale register data.
+            int nr = swz ? 4 : 1;
+            for (int k = 0; k < nr && dst + k < RZ; k++) set_reg(c, dst + k, "0u");
+        }
+        c->info->surface_fallbacks++;
+    } else if (OPM(0xeb20000000000000ull, 0xffe0000000000000ull)) {  // SUST: surface/image store
+        // Keep the shader alive even though this bindless storage-image side
+        // effect is not represented yet. Scarlet's failing FS word
+        // eb20010600f70004 is this instruction class.
+        c->info->surface_fallbacks++;
+        sp(&c->body, "    /* SUST storage-image fallback */\n");
+    } else if (OPM(0xeb40000000000000ull, 0xffe0000000000000ull)) {  // SURED: surface atomic/reduction
+        // Same compatibility policy as SUST. Scarlet's eb50008602070a00 is
+        // SURED.ADD.U32 on a bindless 2D image; dropping only the side effect is
+        // far safer than dropping the complete fragment shader and all its draws.
+        c->info->surface_fallbacks++;
+        sp(&c->body, "    /* SURED storage-image atomic fallback */\n");
     } else if (OPM(0xeed0000000000000ull, 0xfff8000000000000ull) || OPM(0xeed8000000000000ull, 0xfff8000000000000ull)) {  // LDG / STG
         bool store = bits(w, 51, 1);
         bool wide = bits(w, 45, 1);
