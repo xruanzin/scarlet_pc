@@ -30,6 +30,24 @@ int menu_keyboard_run(const char *initial, int min_len, int max_len,
                       const char *error, int prompt_mode,
                       char *out, int cap);
 
+// Name entry front end. On Windows the answer comes from a native modal dialog (plat_text_input_dialog): the in-window
+// overlay above is only drawn when the game presents a frame, and while ShowKeyboard blocks the game thread no frame
+// is presented (the window looked frozen, "SEM RESPOSTA", with no keyboard on screen). The dialog is a separate
+// top-level window with its own message loop, so it needs nothing from the Vulkan presenter.
+// LARECOMP_SWKBD_OVERLAY=1 brings the in-window overlay back.
+static int swkbd_ask(const char *initial, int min_len, int max_len, const char *title, const char *sub,
+                     const char *guide, const char *error, int prompt_mode, char *out, int cap) {
+#ifdef _WIN32
+    if (!prompt_mode && !getenv("LARECOMP_SWKBD_OVERLAY")) {
+        // a text-check rejection message replaces the sub text, so the person sees why the name was refused
+        const char *shown = error && *error ? error : sub;
+        LOG("[swkbd] native text dialog (min %d max %d)\n", min_len, max_len);
+        return plat_text_input_dialog(title, shown, guide, initial, min_len, max_len, out, (size_t)cap) ? 1 : 0;
+    }
+#endif
+    return menu_keyboard_run(initial, min_len, max_len, title, sub, guide, error, prompt_mode, out, cap);
+}
+
 #define SWKBD_RESULT_CANCELED 0x29Fu
 enum {
     ARG_HEADER = 0x24,
@@ -165,8 +183,8 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
     int ok = 0;
 
     for (;;) {
-        ok = menu_keyboard_run(current, min_len, max_len, title, sub, guide,
-                               error, 0, text, sizeof text);
+        ok = swkbd_ask(current, min_len, max_len, title, sub, guide,
+                       error, 0, text, sizeof text);
         if (!ok) break;
 
         LOG("[swkbd] candidate max=%d min=%d utf8=%u textCheck=%u callback=%llx -> \"%s\"\n",
