@@ -43,6 +43,11 @@ bool plat_reset_guest(uint64_t lo, uint64_t hi) {
 
 void plat_commit(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 
+int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page_size) {
+    (void)addr; (void)size; (void)pages; (void)max; (void)page_size;
+    return -1;  // no host write-watch backend on Linux in this port
+}
+
 int plat_protect(uint64_t addr, uint64_t size, int prot) {
     int p = prot == PLAT_PROT_NONE ? PROT_NONE : prot == PLAT_PROT_READ ? PROT_READ : PROT_READ | PROT_WRITE;
     return mprotect((void *)(uintptr_t)addr, size, p);
