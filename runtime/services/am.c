@@ -60,6 +60,7 @@ static void common_state_getter(Service *s, IpcReq *req, IpcResp *resp) {
     case 8: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;   // GetBootMode
     case 9: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;   // GetCurrentFocusState: in focus
     case 13: case 61: resp->copy_handles[resp->ncopy++] = new_event(); break;
+    case 900: break;  // SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled
     case 60: {  // GetDefaultDisplayResolution
         int w = getenv("LARECOMP_DISPLAY_W") ? atoi(getenv("LARECOMP_DISPLAY_W")) : 1920;
         LOG("[am] GetDefaultDisplayResolution -> %dx1080\n", w);
@@ -74,8 +75,12 @@ static void self_controller(Service *s, IpcReq *req, IpcResp *resp) {
     switch (req->cmd) {
     case 0: LOG("[am] application requested exit\n"); exit(0);
     case 9: resp->copy_handles[resp->ncopy++] = new_event(); break;
+    case 13: break;  // SetFocusHandlingMode
+    case 16: break;  // SetOutOfFocusSuspendingEnabled
     case 40: OUT(uint64_t, 0) = 1; resp_size(resp, 8); break;  // CreateManagedDisplayLayer
     case 69: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;
+    case 90: OUT(uint64_t, 0) = 0; resp_size(resp, 8); break;  // GetAccumulatedSuspendedTickValue
+    case 91: resp->copy_handles[resp->ncopy++] = new_event(); break; // GetAccumulatedSuspendedTickChangedEvent
     default: UNHANDLED("ISelfController");
     }
 }
@@ -84,6 +89,8 @@ static void window_controller(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     switch (req->cmd) {
     case 1: OUT(uint64_t, 0) = 0x1234; resp_size(resp, 8); break;  // GetAppletResourceUserId
+    case 2: OUT(uint64_t, 0) = 0x1234; resp_size(resp, 8); break;  // GetAppletResourceUserIdOfCallerApplet
+    case 10: break;  // AcquireForegroundRights
     default: UNHANDLED("IWindowController");
     }
 }
@@ -155,6 +162,7 @@ static void application_functions(Service *s, IpcReq *req, IpcResp *resp) {
     case 20: OUT(uint64_t, 0) = 0; resp_size(resp, 8); break;  // EnsureSaveData
     case 21: memset(resp->data, 0, 8); memcpy(resp->data, game_language(), strlen(game_language())); resp_size(resp, 8);  // GetDesiredLanguage
         LOG("[am] GetDesiredLanguage: %s\n", game_language()); break;
+    case 22: break;  // SetTerminateResult(Result)
     case 23: {  // GetDisplayVersion: the version of the set-up build (runtime/main.c)
         extern const char *g_game_version;
         memset(resp->data, 0, 0x10);
