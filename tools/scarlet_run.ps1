@@ -48,6 +48,25 @@ $CmdLine = $Q + $Exe + $Q + " " + $Q + $GameRoot + $Q + " --play 2>&1"
 & $env:ComSpec /d /s /c $CmdLine | Tee-Object -FilePath $Log
 
 $Code = $LASTEXITCODE
+
+# If the runtime crashed inside recompiled guest code, inspect the first guest
+# function from the host backtrace automatically. This turns the next crash log
+# into an actionable symbol/disassembly report without another manual step.
+if (Test-Path -LiteralPath $Log) {
+    $CrashLine = Select-String -Path $Log -Pattern 'f_([0-9a-fA-F]{8,})\+' | Select-Object -First 1
+    if ($CrashLine -and $CrashLine.Matches.Count -gt 0) {
+        $Addr = "0x" + $CrashLine.Matches[0].Groups[1].Value
+        $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+        $Inspector = Join-Path $RepoRoot "tools\scarlet_inspect_addr.py"
+        if ((Test-Path -LiteralPath $Python) -and (Test-Path -LiteralPath $Inspector)) {
+            Write-Host ""
+            Write-Host "[scarlet-run] Inspecionando crash guest $Addr ..." -ForegroundColor Yellow
+            "[crash-inspect] $Addr" | Tee-Object -FilePath $Log -Append
+            & $Python $Inspector $ExeFs $Addr 2>&1 | Tee-Object -FilePath $Log -Append
+        }
+    }
+}
+
 Write-Host ""
 Write-Host "[scarlet-run] Processo terminou com exit code $Code"
 exit $Code
