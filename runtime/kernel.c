@@ -653,8 +653,19 @@ static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc) {
     }
     if (trace_svc < 0) trace_svc = getenv("LARECOMP_TRACE_SVC") != NULL;
     if (!trace_svc) {
-        uint64_t a0 = c->x[0], a1 = c->x[1], lr = c->x[30];
+        uint64_t a0 = c->x[0], a1 = c->x[1], a2 = c->x[2], a3 = c->x[3], lr = c->x[30];
         svc_impl(c, imm, pc);
+        if (c->x[0] == R_CANCELLED && !g_rt_unwind) {
+            static _Atomic uint64_t ncancel;
+            uint64_t n = atomic_fetch_add(&ncancel, 1) + 1;
+            if (n <= 32 || !(n & 255))
+                LOG("[kernel] svc %02x -> Cancelled #%llu args=%llx,%llx,%llx,%llx pc=%llx lr=%llx thread=%llu\n",
+                    imm, (unsigned long long)n,
+                    (unsigned long long)a0, (unsigned long long)a1,
+                    (unsigned long long)a2, (unsigned long long)a3,
+                    (unsigned long long)pc, (unsigned long long)lr,
+                    (unsigned long long)(t_cur ? t_cur->id : 0));
+        }
         static int nbad;  // (the first ones: which call got a handle that doesn't exist, for crash reports)
         if (c->x[0] == R_INVALID_HANDLE && nbad < 16) {
             nbad++;
