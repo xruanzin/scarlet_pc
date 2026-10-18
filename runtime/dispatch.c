@@ -261,7 +261,7 @@ static GuestFn dispatch_slow(Cpu *c) {
         const char *s = loader_symbol_at(c->x[30], &off);
         FATAL("no function at %llx (lr=%llx %s+%llx)\n", pc, c->x[30], s ? s : "?", off);
     }
-    unsigned h = (unsigned)(pc >> 2) & (DCACHE - 1);
+    unsigned h = (unsigned)(((pc >> 2) * 11400714819323198485ull) >> (64 - 18));
     atomic_store_explicit(&dcache[h].fn, (uintptr_t)f, memory_order_relaxed);
     atomic_store_explicit(&dcache[h].addr, pc, memory_order_release);
     return f;
@@ -283,7 +283,7 @@ void rt_dispatch(Cpu *c) {
             }
         }
     }
-    unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);
+    unsigned h = (unsigned)(((c->pc >> 2) * 11400714819323198485ull) >> (64 - 18));
     uint64_t cached = atomic_load_explicit(&dcache[h].addr, memory_order_acquire);
     GuestFn f = cached == c->pc
         ? (GuestFn)(uintptr_t)atomic_load_explicit(&dcache[h].fn, memory_order_relaxed)
