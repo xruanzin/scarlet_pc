@@ -1495,17 +1495,52 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         }
         c->info->surface_fallbacks++;
     } else if (OPM(0xeb20000000000000ull, 0xffe0000000000000ull)) {  // SUST: surface/image store
-        // Keep the shader alive even though this bindless storage-image side
-        // effect is not represented yet. Scarlet's failing FS word
-        // eb20010600f70004 is this instruction class.
-        c->info->surface_fallbacks++;
-        sp(&c->body, "    /* SUST storage-image fallback */\n");
+        // Citron's Maxwell decoder: bit51 bound, bit52 typed, type@33, data@0,
+        // coords@8, bindless handle register@39. Scarlet's observed
+        // eb20010600f70004 is bindless, typeless, 2D, full XYZW.
+        bool bound = bits(w, 51, 1);
+        bool typed = bits(w, 52, 1);
+        int type = (int)bits(w, 33, 3);
+        uint32_t swz = (uint32_t)bits(w, 20, 4);
+        int data = (int)bits(w, 0, 8);
+        int coord = (int)bits(w, 8, 8);
+        int hreg = (int)bits(w, 39, 8);
+        if (c->glsl && c->key && c->key->bindless_storage && !bound && !typed && type == 3 && swz == 0xF &&
+            data + 3 < RZ && coord + 1 < RZ && hreg != RZ) {
+            c->info->uses_surface_write = true;
+            c->reg_used[hreg] = c->reg_used[coord] = c->reg_used[coord + 1] = 1;
+            for (int k = 0; k < 4; k++) c->reg_used[data + k] = 1;
+            sp(&c->body,
+               "    { uint _tic = r%d & 0xFFFFFu; if (_tic < uint(surfmap_.slot.length())) { uint _si = surfmap_.slot[_tic].x; "
+               "if (_si < %du) imageStore(surf_write[nonuniformEXT(_si)], ivec2(int(r%d), int(r%d)), "
+               "vec4(as_type<float>(r%d), as_type<float>(r%d), as_type<float>(r%d), as_type<float>(r%d))); } }\n",
+               hreg, MAXWELL_BINDLESS_IMAGES, coord, coord + 1, data, data + 1, data + 2, data + 3);
+        } else {
+            c->info->surface_fallbacks++;
+            sp(&c->body, "    /* SUST storage-image compatibility fallback */\n");
+        }
     } else if (OPM(0xeb40000000000000ull, 0xffe0000000000000ull)) {  // SURED: surface atomic/reduction
-        // Same compatibility policy as SUST. Scarlet's eb50008602070a00 is
-        // SURED.ADD.U32 on a bindless 2D image; dropping only the side effect is
-        // far safer than dropping the complete fragment shader and all its draws.
-        c->info->surface_fallbacks++;
-        sp(&c->body, "    /* SURED storage-image atomic fallback */\n");
+        // Scarlet's observed eb50008602070a00 is bindless 2D U32 ADD:
+        // operand R0, coords R10/R11, image handle R1.
+        bool bound = bits(w, 51, 1);
+        int op = (int)bits(w, 21, 3);
+        int type = (int)bits(w, 33, 3);
+        int size = (int)bits(w, 20, 3);
+        int operand = (int)bits(w, 0, 8);
+        int coord = (int)bits(w, 8, 8);
+        int hreg = (int)bits(w, 39, 8);
+        if (c->glsl && c->key && c->key->bindless_storage && !bound && op == 0 && type == 3 && size == 0 &&
+            operand != RZ && coord + 1 < RZ && hreg != RZ) {
+            c->info->uses_surface_atomic = true;
+            c->reg_used[operand] = c->reg_used[coord] = c->reg_used[coord + 1] = c->reg_used[hreg] = 1;
+            sp(&c->body,
+               "    { uint _tic = r%d & 0xFFFFFu; if (_tic < uint(surfmap_.slot.length())) { uint _si = surfmap_.slot[_tic].y; "
+               "if (_si < %du) imageAtomicAdd(surf_atomic[nonuniformEXT(_si)], ivec2(int(r%d), int(r%d)), r%d); } }\n",
+               hreg, MAXWELL_BINDLESS_IMAGES, coord, coord + 1, operand);
+        } else {
+            c->info->surface_fallbacks++;
+            sp(&c->body, "    /* SURED storage-image atomic compatibility fallback */\n");
+        }
     } else if (OPM(0xeed0000000000000ull, 0xfff8000000000000ull) || OPM(0xeed8000000000000ull, 0xfff8000000000000ull)) {  // LDG / STG
         bool store = bits(w, 51, 1);
         bool wide = bits(w, 45, 1);
@@ -1880,6 +1915,14 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (info->uses_gmem)
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");
+    if (info->uses_surface_write || info->uses_surface_atomic) {
+        sp(&s, "#extension GL_EXT_nonuniform_qualifier : require\n");
+        sp(&s, "layout(std430, set = %d, binding = 120) readonly buffer SurfaceMap { uvec2 slot[]; } surfmap_;\n", set);
+        if (info->uses_surface_write)
+            sp(&s, "layout(set = %d, binding = 121) writeonly uniform image2D surf_write[%d];\n", set, MAXWELL_BINDLESS_IMAGES);
+        if (info->uses_surface_atomic)
+            sp(&s, "layout(r32ui, set = %d, binding = 122) uniform uimage2D surf_atomic[%d];\n", set, MAXWELL_BINDLESS_IMAGES);
+    }
     if (c->uses_rscale && stage != STAGE_VERTEX) {
         sp(&s, "layout(std140, set = %d, binding = 18) uniform RScale { vec4 rscale[65]; };\n", set);
         info->uses_rscale = true;
