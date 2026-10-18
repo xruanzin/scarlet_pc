@@ -318,7 +318,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         add(&a, nso);
         add(&a, base[i]);
         add(&a, g->out);
-        if (i == 1) { add(&a, "--hle"); add(&a, t.hle); }
+        if (i == 1) { add(&a, "--indirect-resume"); add(&a, "--hle"); add(&a, t.hle); }
         g->p = spawn(a.v, g->log);
         args_free(&a);
         if (!g->p) { snprintf(why, why_size, "the game code builder didn't start"); ok = false; }
@@ -488,3 +488,4 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     if (ok && o->progress) o->progress(1, "Finishing...");
     return ok;
 }
+

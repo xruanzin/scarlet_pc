@@ -97,6 +97,7 @@ $Jobs = @(
         Name = "sdk"
         Base = "0x7006000000"
         Extra = @(
+            "--indirect-resume",
             "--hle", (Join-Path $RepoRoot "runtime\hle\hle_symbols.txt"),
             "--extra-entry", "0x7006323db4",
             "--extra-entry-range", "0x700640d240:0x700640d340"
@@ -154,3 +155,4 @@ Get-ChildItem -LiteralPath $OutDir -Directory | ForEach-Object {
         SizeMB = [Math]::Round($Bytes / 1MB, 1)
     }
 } | Sort-Object Module | Format-Table -AutoSize
+

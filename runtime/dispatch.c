@@ -8,7 +8,13 @@
 #include "gamelib.h"
 #include "hle.h"
 
-typedef struct { const uint64_t *addrs; const GuestFn *fns; uint64_t count, lo, hi; } FnTable;
+typedef struct {
+    const uint64_t *addrs;
+    const GuestFn *fns;
+    uint64_t count, lo, hi;
+    const GameLibResumeRange *resumes;
+    uint64_t resume_count;
+} FnTable;
 static FnTable tables[GAMELIB_MAX_MODULES];
 static int ntables;
 
@@ -133,7 +139,16 @@ void dispatch_init(void) {  // (after gamelib_load)
     for (uint32_t i = 0; i < g->nmods && i < GAMELIB_MAX_MODULES; i++) {
         const GameLibModule *m = &g->mods[i];
         uint64_t n = *m->count;
-        if (n) tables[ntables++] = (FnTable){m->addrs, m->fns, n, m->addrs[0], m->addrs[n - 1]};
+        uint64_t nr = m->resume_count ? *m->resume_count : 0;
+        if (n) {
+            uint64_t lo = m->addrs[0], hi = m->addrs[n - 1];
+            if (nr) {
+                if (m->resumes[0].lo < lo) lo = m->resumes[0].lo;
+                if (m->resumes[nr - 1].hi - 1 > hi) hi = m->resumes[nr - 1].hi - 1;
+                LOG("[dispatch] %s: %llu static resume ranges\n", m->name, (unsigned long long)nr);
+            }
+            tables[ntables++] = (FnTable){m->addrs, m->fns, n, lo, hi, m->resumes, nr};
+        }
     }
 }
 
@@ -148,6 +163,19 @@ GuestFn dispatch_lookup(uint64_t addr) {
             else hi = mid;
         }
         if (lo < ft->count && ft->addrs[lo] == addr) return ft->fns[lo];
+        // Indirect jumps can land in the middle of an emitted fragment (for
+        // example musl's printf switch tables). Resume generated C at that exact
+        // instruction; calling the containing function's entry would corrupt
+        // its stack/register state by running the prologue a second time.
+        if (addr & 3) continue;
+        lo = 0;
+        hi = ft->resume_count;
+        while (lo < hi) {
+            uint64_t mid = (lo + hi) / 2;
+            if (ft->resumes[mid].lo <= addr) lo = mid + 1;
+            else hi = mid;
+        }
+        if (lo && addr < ft->resumes[lo - 1].hi) return ft->resumes[lo - 1].fn;
     }
     return NULL;
 }
@@ -208,14 +236,19 @@ const char *rt_host_fn_name(uint64_t pc, uint64_t *offset) {
     static __thread char name[32];
     if (!byhost) {
         uint64_t total = 0, k = 0;
-        for (int t = 0; t < ntables; t++) total += tables[t].count;
+        for (int t = 0; t < ntables; t++) total += tables[t].count + tables[t].resume_count;
         uint64_t (*v)[2] = malloc(total * sizeof *v);
         if (!v) return NULL;
-        for (int t = 0; t < ntables; t++)
+        for (int t = 0; t < ntables; t++) {
             for (uint64_t i = 0; i < tables[t].count; i++) {
                 v[k][0] = (uint64_t)(uintptr_t)tables[t].fns[i];
                 v[k++][1] = tables[t].addrs[i];
             }
+            for (uint64_t i = 0; i < tables[t].resume_count; i++) {
+                v[k][0] = (uint64_t)(uintptr_t)tables[t].resumes[i].fn;
+                v[k++][1] = tables[t].resumes[i].lo;
+            }
+        }
         qsort(v, k, sizeof *v, cmp_host);
         n = k;
         byhost = v;
@@ -312,3 +345,4 @@ void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {
 }
 
 void crash_handler_install(void) { plat_crash_handler_install(); }
+

@@ -175,7 +175,7 @@ $(B)/imgui/imgui_impl_%.o: $(IMGUI)/backends/imgui_impl_%.cpp
 PY := $(firstword $(wildcard .venv/Scripts/python.exe) $(wildcard .venv/bin/python) $(wildcard tools/venv/bin/python) $(wildcard tools/venv/Scripts/python.exe))
 
 gen:
-	cd tools && $(abspath $(PY)) gen.py sdk ../extracted/exefs/sdk 0x7006000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py sdk ../extracted/exefs/sdk 0x7006000000 ../$(GEN)/sdk --indirect-resume --hle ../runtime/hle/hle_symbols.txt $(GENSIMD) $(GENTRACE)
 	cd tools && $(abspath $(PY)) gen.py main ../extracted/exefs/main 0x7000000000 ../$(GEN)/main $(GENSIMD) $(GENTRACE)
 	cd tools && $(abspath $(PY)) gen.py subsdk0 ../extracted/exefs/subsdk0 0x7008000000 ../$(GEN)/subsdk0 $(GENSIMD) $(GENTRACE)
 
@@ -239,3 +239,4 @@ jogo:
 	tools/publicar_jogo.sh
 
 .PHONY: all gen gen-objs runtime-objs dist deps-windows gen-helper jogo
+

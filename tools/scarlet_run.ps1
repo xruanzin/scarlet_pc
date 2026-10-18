@@ -55,6 +55,22 @@ if (Test-Path -LiteralPath $Log) {
     $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
     $Inspector = Join-Path $RepoRoot "tools\scarlet_inspect_addr.py"
     if ((Test-Path -LiteralPath $Python) -and (Test-Path -LiteralPath $Inspector)) {
+        # A host backtrace names the containing compiled function, which can
+        # hide the exact missing interior branch target. Inspect the failed PC
+        # and its guest caller before the more general backtrace inspection.
+        $Missing = Select-String -Path $Log -Pattern 'no function at ([0-9a-fA-F]+) \(lr=([0-9a-fA-F]+)' | Select-Object -First 1
+        if ($Missing -and $Missing.Matches.Count -gt 0) {
+            $Match = $Missing.Matches[0]
+            $Targets = @("0x" + $Match.Groups[1].Value)
+            $Lr = [Convert]::ToUInt64($Match.Groups[2].Value, 16)
+            if ($Lr -ge 4) { $Targets += ('0x{0:x}' -f ($Lr - 4)) }
+            foreach ($Addr in $Targets) {
+                Write-Host "[scarlet-run] Inspecionando salto sem funcao $Addr ..." -ForegroundColor Yellow
+                "[missing-dispatch-inspect] $Addr" | Tee-Object -FilePath $Log -Append
+                & $Python $Inspector $ExeFs $Addr 2>&1 | Tee-Object -FilePath $Log -Append
+            }
+        }
+
         $GuardLine = Select-String -Path $Log -Pattern '\[boot-guard\].*lr=0x([0-9a-fA-F]+)' | Select-Object -First 1
         if ($GuardLine -and $GuardLine.Matches.Count -gt 0) {
             $Lr = [Convert]::ToUInt64($GuardLine.Matches[0].Groups[1].Value, 16)
@@ -83,3 +99,4 @@ if (Test-Path -LiteralPath $Log) {
 Write-Host ""
 Write-Host "[scarlet-run] Processo terminou com exit code $Code"
 exit $Code
+

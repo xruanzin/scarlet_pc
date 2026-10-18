@@ -34,6 +34,13 @@ foreach ($Rel in $RequiredGenerated) {
     }
 }
 
+# ABI 4's SDK table must carry resume functions; other generated modules can
+# be reused. Fail here with the repair command instead of undefined symbols.
+$SdkTable = Join-Path $RepoRoot "generated\sdk\sdk_table.c"
+if (-not (Select-String -LiteralPath $SdkTable -Pattern 'const uint64_t sdk_resume_count = [1-9][0-9]*;' -Quiet)) {
+    throw 'SDK gerado sem retomadas de saltos indiretos. Rode tools\scarlet_generate.ps1 -ExeFs "D:\Pokemon Scarlet\Extracted\Base\exefs" -Module sdk -Clean e compile novamente.'
+}
+
 if ($Jobs -lt 1) {
     $Jobs = 1
 }
@@ -83,3 +90,4 @@ Write-Host "[scarlet-build] BUILD CONCLUIDO" -ForegroundColor Green
 Get-Item $Exe, $GameDll, $Id |
     Select-Object Name, @{N="SizeMB";E={[Math]::Round($_.Length / 1MB, 2)}}, LastWriteTime |
     Format-Table -AutoSize
+

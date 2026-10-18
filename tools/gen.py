@@ -124,7 +124,7 @@ class Module:
                 if target is not None and self.in_text(target):
                     starts.add(target)
 
-        starts = sorted(starts)
+        starts = sorted(a for a in starts if self.in_text(a))
         return starts
 
     # ------------------------------------------------------------ jump tables
@@ -366,11 +366,34 @@ class Module:
                     tables[a] = 'all'
                     self.stats['br_all_labels'] += 1
                 else:
+                    # A loaded target can be a local code pointer too. Try the
+                    # local labels before global dispatch, even when the table
+                    # recognizer cannot prove where the pointer came from.
+                    tables[a] = 'all'
                     self.stats['br_dispatch'] += 1
             terminated = ins.kind in ('b', 'br', 'ret', 'trap')
         if not terminated and end < self.hi:
             ext.add(end)
         return labels, ext, tables
+
+    def indirect_resume_entries(self, entries, hle):
+        """Fragments needing entry at an arbitrary PC after an indirect jump.
+
+        ADR/ADRP targets and external branches split unwind functions into
+        smaller emitted fragments. A switch target may be inside a *different*
+        fragment from its BR. Cover the enclosing unwind interval, including
+        fragments that do not themselves contain a BR. These are conservative
+        text intervals between unwind starts, not inferred symbol sizes.
+        """
+        roots = sorted({a + self.base for a in eh_frame_functions(self.nso)
+                        if self.in_text(a + self.base)} | {self.lo, self.hi})
+        if len(roots) == 2:  # stripped/no unwind table: use the known entries
+            roots = sorted(set(self.boundaries()) | {self.lo, self.hi})
+        groups = {bisect.bisect_right(roots, a) - 1
+                  for a, (end, labels, tables) in entries.items() if tables}
+        return {a for a, (end, labels, tables) in entries.items()
+                if a not in hle and end > a + 4
+                and bisect.bisect_right(roots, a) - 1 in groups}
 
     def render_single(self, ins, a, jump, refs):
         """C for one lifted instruction (no batching); used for patch variants."""
@@ -397,13 +420,22 @@ class Module:
             return ['return;']
         raise Unsupported(k)
 
-    def emit_function(self, entry, end, labels, tables, hle):
+    def emit_function(self, entry, end, labels, tables, hle, resumable=False):
         out = [f'void {fname(entry)}(Cpu *c) {{']
         if entry in hle:
             out.append(f'    {sanitize(hle[entry])}(c);')
             out.append('}')
             return out
         out.append(f'    FN_ENTER({hx(entry)});')
+        if resumable:
+            # Normal direct calls always start at entry. Only the runtime's
+            # range lookup calls _resume with an interior c->pc. Keep identical
+            # signatures so fragment transitions remain tail calls.
+            out.insert(0, f'void {fname(entry)}_resume(Cpu *c);')
+            out += [f'    c->pc = {hx(entry)};',
+                    f'    __attribute__((musttail)) return {fname(entry)}_resume(c);',
+                    '}', f'void {fname(entry)}_resume(Cpu *c) {{',
+                    '    goto L_dispatch;']
         batch = []
         refs = set()
 
@@ -422,7 +454,7 @@ class Module:
 
         # Functions with jump tables also get the all-instruction fallback: a table whose emulation
         # missed some cases then still reaches the right instruction instead of aborting.
-        all_labels = bool(tables)
+        all_labels = bool(tables) or resumable
         if all_labels:
             labels = set(range(entry, end, 4))
         rando_here = [a for a in range(entry, end, 4) if a - self.base in RANDO_CODE]
@@ -549,6 +581,8 @@ def main():
                     help='additional absolute guest code entry (repeatable; hex accepted)')
     ap.add_argument('--extra-entry-range', action='append', default=[],
                     help='additional callable range start:end; every aligned instruction becomes an entry')
+    ap.add_argument('--indirect-resume', action='store_true',
+                    help='emit static interior-PC resume ranges for indirect-branch unwind intervals')
     ap.add_argument('--trace-stores', action='store_true')  # research build (docs/DEPURACAO.md, LARECOMP_TRACE_STORES)
     ap.add_argument('--simd', choices=('asm', 'c'),
                     default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
@@ -637,6 +671,8 @@ def main():
         end = order[i + 1] if i + 1 < len(order) else m.hi
         labels, ext, tables = scanned[(a, end)]
         entries[a] = (end, labels, tables)
+    resume_entries = m.indirect_resume_entries(entries, hle) if args.indirect_resume else set()
+    m.stats['resume_fragments'] = len(resume_entries)
     print(f'{args.name}: {len(starts)} boundaries, {len(entries)} functions, {rounds} rounds, {dict(m.stats)}, '
           f'{time.time() - t0:.0f}s', file=sys.stderr)
 
@@ -657,7 +693,7 @@ def main():
                 a = order[ci]
                 ci += 1
                 end, labels, tables = entries[a]
-                lines = m.emit_function(a, end, labels, tables, hle)
+                lines = m.emit_function(a, end, labels, tables, hle, a in resume_entries)
                 r = getattr(m, '_refs', set())
                 m._refs = set()
             n = sum(len(l) + 1 for l in lines)
@@ -685,7 +721,7 @@ def main():
             os.remove(os.path.join(args.outdir, fn))
     import io
     with io.StringIO() as f:
-        f.write('#include "cpu.h"\n')
+        f.write('#include "gamelib.h"\n')
         for a in order:
             f.write(f'void {fname(a)}(Cpu *c);\n')
         f.write(f'const uint64_t {args.name}_fn_addrs[] = {{\n')
@@ -695,9 +731,20 @@ def main():
         f.write(',\n'.join(fname(a) for a in order))
         f.write('};\n')
         f.write(f'const uint64_t {args.name}_fn_count = {len(order)};\n')
+        resumes = sorted(set(order) & resume_entries)
+        for a in resumes:
+            f.write(f'void {fname(a)}_resume(Cpu *c);\n')
+        f.write(f'const GameLibResumeRange {args.name}_resume_ranges[] = {{\n')
+        for a in resumes:
+            f.write(f'    {{{hx(a)}, {hx(entries[a][0])}, {fname(a)}_resume}},\n')
+        if not resumes:
+            f.write('    {0, 0, 0},\n')
+        f.write('};\n')
+        f.write(f'const uint64_t {args.name}_resume_count = {len(resumes)};\n')
         write_if_changed(os.path.join(args.outdir, f'{args.name}_table.c'), f.getvalue())
     print(f'{args.name}: wrote {nchunks} chunks, {time.time() - t0:.0f}s total', file=sys.stderr)
 
 
 if __name__ == '__main__':
     main()
+

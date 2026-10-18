@@ -2,6 +2,9 @@
 
 This branch is the first Scarlet-specific development layer on top of the Let's Go Recomp runtime.
 
+For the SDK initialization failure `no function at 700657c59c`, see
+[the diagnosis, static resume fix and Windows rebuild commands](SCARLET-SDK-INDIRECT-BOOT.md).
+
 ## Important
 
 Do **not** put Pokémon Scarlet game files, Switch keys, generated game code or Nintendo assets in this repository.
@@ -47,3 +50,4 @@ The fork currently still contains Let's Go-specific assumptions:
 - an `aoc:u` service that currently reports zero DLC.
 
 These will be replaced from the Scarlet triage data instead of hard-coding guesses about Scarlet's executable layout.
+
