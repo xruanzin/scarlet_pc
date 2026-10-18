@@ -109,6 +109,24 @@ uint64_t loader_find_symbol(const char *name) {
     return 0;
 }
 
+void loader_log_symbols_prefix(const char *prefix) {
+    size_t n = strlen(prefix);
+    int found = 0;
+    for (int mi = 0; mi < g_nmodules; mi++) {
+        Module *m = &g_modules[mi];
+        for (uint64_t i = 1; i < m->nsyms; i++) {
+            Elf64Sym *s = sym(m, i);
+            const char *name = symname(m, s);
+            if (s->shndx && !strncmp(name, prefix, n)) {
+                LOG("[loader] symbol candidate %s: %s @ %llx\n",
+                    m->name, name, (unsigned long long)(m->base + s->value));
+                found++;
+            }
+        }
+    }
+    if (!found) LOG("[loader] no defined symbol with prefix %s\n", prefix);
+}
+
 const char *loader_symbol_at(uint64_t addr, uint64_t *offset) {
     const char *best = NULL;
     uint64_t best_addr = 0;
