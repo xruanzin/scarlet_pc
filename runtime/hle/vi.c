@@ -35,7 +35,13 @@ static void *vsync_thread(void *arg) {
 
 HLE_FUNC("_ZN2nn2vi10InitializeEv", vi_initialize) {
     static int once;
-    if (!once++) LOG("[gfx-milestone] VI initialize reached\n");
+    if (!once++) {
+        extern uint64_t g_boot_started_ns;
+        uint64_t now = plat_now_ns();
+        LOG("[gfx-milestone] VI initialize reached\n");
+        LOG("[boot-time] VI initialize after %.3f s\n",
+            g_boot_started_ns ? (double)(now - g_boot_started_ns) / 1e9 : 0.0);
+    }
     (void)c;
 }
 HLE_FUNC("_ZN2nn2vi8FinalizeEv", vi_finalize) { (void)c; }
