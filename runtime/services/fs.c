@@ -387,6 +387,22 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         }
 
         ssize_t n = romfs_read(st->fd, (uint8_t *)(uintptr_t)b->addr, size, off);
+
+        static unsigned early_reads;
+        if (early_reads < 16) {
+            unsigned idx = ++early_reads;
+            LOG("[fs-probe] read#%u off=%#llx size=%#llx dst=%#llx got=%lld\n",
+                idx, (unsigned long long)off, (unsigned long long)size,
+                (unsigned long long)b->addr, (long long)n);
+            if (n > 0) {
+                uint64_t dump = (uint64_t)n < 64 ? (uint64_t)n : 64;
+                LOG("[fs-probe] data:");
+                for (uint64_t j = 0; j < dump; j++)
+                    LOG(" %02x", ((uint8_t *)(uintptr_t)b->addr)[j]);
+                LOG("\n");
+            }
+        }
+
         if (n < 0) {
             LOG("[fs] storage read failed at %llx size %llx dst %llx: %s\n",
                 (unsigned long long)off, (unsigned long long)size,
