@@ -422,8 +422,9 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
 }
 
 // ================================================================== worker threads (shader / pipeline builds)
-// Builds run on workers, but every dependent operation must wait. A skipped atlas/cache write or compute
-// dispatch is not necessarily repeated by the game; dropping it can permanently hide text or stall a scene.
+// Builds run on workers. The current bounded-wait policy can defer dependent operations after its limit.
+// A first-use atlas/cache write or compute dispatch may not be repeated by the game; reducing compilation
+// latency remains necessary, because the caller's skipped operation is not automatically replayed.
 // LARECOMP_SYNC_SHADERS=1 builds inline (deterministic tests).
 typedef struct Job { void (*fn)(void *); void *arg; struct Job *next; } Job;
 static Job *jobs_head, *jobs_tail;
@@ -493,7 +494,7 @@ static void run_job(void (*fn)(void *), void *arg) {
 }
 
 // SDL events are pumped by device.c's separate UI thread. Never re-enter Vulkan presentation here: the current
-// command list and its render pass still belong to this thread. Sleep while the worker finishes, preserving order.
+// command list and its render pass still belong to this thread. Sleep until the build finishes or the wait limit.
 static uint64_t shader_wait_limit_ns(void) {
     static uint64_t v;
     if (!v) {
@@ -531,7 +532,7 @@ static void wait_built(_Atomic int *state, const char *kind, uint64_t code0, uin
             return;
         }
         if (now >= report) {
-            LOG("[shader-wait] %s %llx/%llx: %.1f s, jobs=%d (command preserved)\n", kind,
+            LOG("[shader-wait] %s %llx/%llx: %.1f s, jobs=%d (waiting for build)\n", kind,
                 (unsigned long long)code0, (unsigned long long)code1, (now - start) / 1e9,
                 atomic_load(&jobs_pending));
             report = now + 1000000000ull;
@@ -1051,6 +1052,8 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
 typedef struct {
     ShaderInfo *vi, *fi;
     uint64_t code[2], cmax[2];  // translation inputs (copied: translated on the translator thread)
+    const uint8_t *constants[2]; // immutable CB1 sections of these exact NVN stages
+    uint32_t constants_size[2];
     ShaderKey vkey, fkey;
     VkShaderModule vs, fs;
     VkBindingInfo binds[MAX_BIND];
@@ -1078,6 +1081,12 @@ static void save_glsl(const char *src, uint64_t addr, const char *suffix) {
     snprintf(path, sizeof path, "build/glsl/%llx_%s.glsl", (unsigned long long)addr, suffix);
     FILE *f = fopen(path, "w");
     if (f) { fputs(src, f); fclose(f); }
+}
+
+static void log_shader_flow(const ShaderInfo *si, uint64_t addr, const char *stage) {
+    if (si->indirect_tables || si->indirect_fallbacks)
+        LOG("[shader-flow] %s %llx: %u instructions, %u cases, BRX tables=%u fallback=%u\n", stage,
+            (unsigned long long)addr, si->num_insts, si->dispatch_labels, si->indirect_tables, si->indirect_fallbacks);
 }
 
 static void compile_program(void *arg) {
@@ -1117,7 +1126,8 @@ static void translate_program(void *arg) {
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
     uint64_t t0 = SDL_GetTicksNS();
-    p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], STAGE_VERTEX, &p->vkey);
+    p->vi = maxwell_translate_with_constants((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], STAGE_VERTEX,
+        &p->vkey, p->constants[0], p->constants_size[0]);
     // Experiment X4 (docs/PLANO-3D.md), LARECOMP_VK_SKIN_ONEBONE=1: skinned vertex shaders see 100% weight on the
     // first bone (a12 = bone weights) - rigid, but whole, if the first bone's matrix reaches the GPU correctly.
     // Experiment X6, LARECOMP_VK_SKIN_IDX_X=1: every bone slot uses the first bone index (a11.x), weights unchanged.
@@ -1176,7 +1186,8 @@ static void translate_program(void *arg) {
         p->fi->msl = strdup("#version 460\nvoid main() {}\n");
     } else if (p->vi->msl) {
         p->fkey.vs_out_mask = p->vi->out_mask;
-        p->fi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], STAGE_FRAGMENT, &p->fkey);
+        p->fi = maxwell_translate_with_constants((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], STAGE_FRAGMENT,
+            &p->fkey, p->constants[1], p->constants_size[1]);
     }
     atomic_fetch_add(&stat_translate_ns, SDL_GetTicksNS() - t0);
     if (!p->vi->msl) {
@@ -1209,6 +1220,8 @@ static void translate_program(void *arg) {
                 (unsigned long long)p->code[0], (unsigned long long)p->code[1]);
     }
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
+    log_shader_flow(p->vi, p->code[0], "vs");
+    log_shader_flow(p->fi, p->code[1], "fs");
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
     compile_program(p);  // (this worker: queued again it would wait behind the other translations)
@@ -1252,7 +1265,11 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
         return NULL;
     }
     uint64_t h = 0xcbf29ce484222325ull;
-    for (int i = 0; i < 2; i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
+    for (int i = 0; i < 2; i++) {
+        uint64_t values[] = {np->stages[i].code_addr, np->stages[i].const_offset, np->stages[i].const_size};
+        for (size_t j = 0; j < sizeof values / sizeof *values; j++)
+            for (int k = 0; k < 8; k++) { h ^= (values[j] >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; }
+    }
     const uint8_t *vb = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
@@ -1266,6 +1283,10 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     for (int i = 0; i < 2; i++) {
         p->code[i] = np->stages[i].code_addr;
         p->cmax[i] = np->stages[i].const_offset ? np->stages[i].const_offset : 0x10000;
+        if (np->stages[i].const_offset && np->stages[i].const_size) {
+            p->constants[i] = (const uint8_t *)(uintptr_t)(p->code[i] + np->stages[i].const_offset);
+            p->constants_size[i] = np->stages[i].const_size;
+        }
     }
     p->vkey = *vkey;
     p->fkey = *fkey;
@@ -2250,24 +2271,30 @@ static void build_compute(void *arg) {
     if (r != VK_SUCCESS) LOG("[compute] pipeline failed: %d\n", r);
 }
 
-static struct CsEnt { uint64_t addr; CsProg *cp; } g_cs_tab[256];  // compute programs by code address
+static struct CsEnt { uint64_t addr; uint32_t const_offset, const_size; CsProg *cp; } g_cs_tab[256];
 
 static CsProg *compute_program(NvnProgram *np) {
     NvnShaderStage *ss = &np->stages[5];
     if (!ss->code_addr) return NULL;
     struct CsEnt *tab = g_cs_tab;
     int n = g_cs_n;
-    for (int i = 0; i < n; i++) if (tab[i].addr == ss->code_addr) return tab[i].cp;
+    for (int i = 0; i < n; i++) if (tab[i].addr == ss->code_addr && tab[i].const_offset == ss->const_offset &&
+        tab[i].const_size == ss->const_size) return tab[i].cp;
     CsProg *cp = calloc(1, sizeof *cp);
-    if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
+    if (n < 256) {
+        tab[n] = (struct CsEnt){ss->code_addr, ss->const_offset, ss->const_size, cp}; g_cs_n = n + 1;
+    }
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
     ShaderKey k = {0};
     k.glsl = 1;
     k.bindless_storage = g_vk.bindless_storage_slots;
     k.storage_buffers = storage_buffer_count();
-    cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
+    const uint8_t *constants = ss->const_offset ? (const uint8_t *)(uintptr_t)(ss->code_addr + ss->const_offset) : NULL;
+    cp->si = maxwell_translate_with_constants((const uint8_t *)(uintptr_t)ss->code_addr,
+        ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k, constants, ss->const_size);
     cp->p.vi = cp->si;
+    log_shader_flow(cp->si, ss->code_addr, "cs");
     if (!cp->si->msl) {
         LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, (unsigned long long)ss->code_addr);
         atomic_store(&cp->p.state, 2);

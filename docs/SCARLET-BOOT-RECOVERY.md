@@ -1,5 +1,69 @@
 # Correção da regressão de abertura e resposta do Windows
 
+## Shader real recebido após o log 155335
+
+O shader enviado tem 1850 instruções/casos no dispatcher e dois BRX. Ambos
+usam o padrão `IMNMX.U32 -> SHL 2 -> LDC c1 -> BRX`, com três entradas por tabela,
+nos offsets 0 e 12 das constantes do programa. O fallback anterior tratava toda
+instrução como destino, criando 1850 entradas no switch. Há somente 32 destinos
+diretos/de reconvergência; os destinos adicionais devem vir das tabelas reais.
+
+O backend agora fornece ao tradutor a seção de constantes imutáveis CB1 do
+mesmo estágio NVN, tanto em graphics quanto em compute. A análise só reduz
+rótulos quando prova definições adjacentes e incondicionais, mínimo unsigned,
+shift de dois bits, LDC de 32 bits em CB1 e tabela limitada à seção válida.
+Entradas desalinhadas/fora do código, tabelas truncadas, predicação, outros
+buffers e saltos para o interior da sequência mantêm o dispatcher completo.
+As instruções e as leituras de CB1 continuam executando com os mesmos valores;
+não há seleção artificial de uma variante visual ou omissão de um draw.
+
+`[shader-flow]` informa instruções, casos, tabelas resolvidas e fallbacks.
+A implementação foi escrita a partir do padrão observado e conferida com a
+análise de tabelas do [Citron](https://github.com/citron-neo/emulator/blob/main/src/shader_recompiler/frontend/maxwell/indirect_branch_table_track.cpp).
+A recompilação estática da CPU do jogo permanece igual.
+
+Também substituímos os wrappers `as_f/as_u` por intrínsecos GLSL. Os atributos
+inteiros de vértice usam conversão explícita para uint; os atributos float usam
+bitcast. No shader enviado, essa mudança isolada reduz o SPIR-V de **140537 para
+87275 palavras**, antes de reduzir os rótulos. As chamadas de função no módulo
+caem de 4649 para 216. O código de vértice mantém
+`NoContraction`. O modo shaderc continua sem otimização agressiva por padrão.
+
+O ZIP enviado continha somente o log. O log mostra que a pasta de dados real
+é `.../scarlet_pc/build`; o runtime muda o diretório do processo para lá. Por
+isso, `build/shader-diagnostics` é relativo à pasta de dados, e não à raiz do
+repositório. A coleta do ZIP agora lê `[paths] data:` e resolve os arquivos a
+partir dessa pasta. Saves e caches existentes não são movidos. A coleta também é executada ao fechar
+uma sessão que registrou `[shader-slow]`, mesmo quando o processo retorna zero.
+
+Validação: duas tabelas na mesma seção, comparação do corpo GLSL compacto e do
+fallback completo, 13 formas de prova inválida, destinos em palavras de controle,
+MSL idêntico entre APIs e tipos de atributos de vértice. Doze renderizações
+Vulkan conferem todos os índices, saturação e wrap unsigned, nos dois dispatchers,
+com e sem a flag rápida de pipeline. Regressões de surface/storage/gather e
+compilação Windows x64 também são verificadas. O teste PowerShell reproduziu o
+ZIP sem shaders antes da correção e passou com a pasta real de dados depois.
+
+Os arquivos enviados não incluem as constantes binárias CB1 nem o shader Maxwell
+original; o número exato de casos do jogo será confirmado por `[shader-flow]`
+na próxima execução. Testes locais usam Lavapipe. Não há medição do boot completo
+nem confirmação do comportamento do driver AMD proprietário neste ambiente.
+
+## Política atual de espera, integrada da branch
+
+Enquanto esta correção era validada, a branch recebeu `2ac3841`. Essa mudança
+foi integrada sem ser revertida: o padrão passa a esperar 3 s por build e depois
+adiar/omitir operações que ainda dependem dele, mantendo a compilação em segundo
+plano. São dois workers até 12 CPUs lógicas e três nos demais computadores.
+`LARECOMP_SHADER_WAIT_MS` configura a espera. `LARECOMP_SHADER_TIMEOUT_EXIT=1`
+reativa a saída 86 ao atingir o prazo; os testes cobrem ambos os modos.
+
+Essa política não é replay de comandos: operações que só ocorrem uma vez podem
+ser perdidas caso o build ultrapasse o prazo. A correção deste documento atua no
+custo de compilação e no grafo do shader; não declara que a omissão de operações
+resolve textos/atlas. O novo boot AMD e eventuais `[shader-slow]` precisam ser
+conferidos. Os logs de saída 86 a seguir são das revisões anteriores.
+
 ## Resultado do log 153427 e correção do compilador
 
 O log `scarlet_boot(20261018-153427).log`, da revisão `1681e95`, chegou ao
@@ -33,8 +97,9 @@ de storage, textos/atlas e comandos de primeiro uso são preservadas.
 Shaders com fonte de pelo menos 64 KiB ou módulo de pelo menos 32768 palavras
 salvam automaticamente o GLSL e o SPIR-V em `build/shader-diagnostics`. A fonte
 grande é salva antes de chamar shaderc, inclusive se a compilação não terminar.
-Se houver saída 86, `scarlet_run.ps1` cria **`build/scarlet_shader_failure.zip`**
-com o log atual e os arquivos de shader mencionados nele. Esse arquivo permite
+Ao haver saída 86 ou `[shader-slow]` no log ao fechar o jogo, `scarlet_run.ps1`
+cria **`build/scarlet_shader_failure.zip`** com o log atual e os arquivos de
+shader mencionados nele. Esse arquivo permite
 investigar a entrada real caso a reversão ainda não resolva o pipeline na AMD.
 
 ## Evidência anterior
@@ -52,7 +117,7 @@ consumo de RAM, paginação ou um relatório de falha do driver; não permite af
 sozinho qual desses mecanismos travou o Windows. As mudanças abaixo corrigem a
 espera e reduzem o trabalho e a pressão de recursos associados à compilação.
 
-## Compilação e espera
+## Compilação e espera das revisões 1681e95 / 96aeda8
 
 - O laço que despacha o controle de fluxo dos shaders GLSL recebe `[[dont_unroll]]`.
   O limite de 100000 iterações é uma guarda de execução, e não deve ser expandido
@@ -101,10 +166,12 @@ Referências primárias:
 
 ## Cache e execução
 
-O script executa a partir da raiz do repositório, inclusive quando chamado por
-caminho absoluto. Isso mantém saves e caches no mesmo diretório e evita compilar
-de novo por procurar o cache em outra pasta. Não apague `cache` para atualizar.
-Shaders cujo GLSL mudou recebem outra chave; os demais continuam aproveitáveis.
+O script inicia a partir da raiz do repositório, inclusive quando chamado por
+caminho absoluto. O runtime escolhe a pasta de dados e a informa em `[paths] data:`;
+com o jogo extraído em outra unidade, ela normalmente é a pasta do executável,
+`build`. O script usa essa informação para reunir os diagnósticos corretamente.
+Não apague nem mova saves/caches para atualizar. Shaders cujo GLSL mudou recebem
+outra chave; os demais continuam aproveitáveis.
 
 ```powershell
 cd "C:\Users\ruana\Downloads\scarlet_pc"
@@ -116,9 +183,9 @@ if ($LASTEXITCODE -ne 0) { throw "Falha na compilacao." }
 .\tools\scarlet_run.ps1
 ```
 
-O teste inicial usa o perfil de GPU desligado. As linhas de boot e de timeout
-continuam no `scarlet_boot.log`. Se terminar com código 86, o pipeline ainda não
-concluiu dentro do prazo; preserve o log e `build/scarlet_shader_failure.zip`.
+O teste inicial usa o perfil de GPU desligado. As linhas de boot e de espera
+continuam no `scarlet_boot.log`. Se houver `[shader-slow]` ou saída 86 no modo
+de diagnóstico, preserve o log e `build/scarlet_shader_failure.zip`.
 Não é necessário regenerar a DLL do jogo para estas mudanças de runtime.
 
 ## Validação e limites

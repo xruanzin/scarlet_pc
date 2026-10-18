@@ -48,7 +48,14 @@ int main(void) {
     if (stuck) {
         _Atomic int state = 0;
         wait_built(&state, stuck, 0x1000, 0x2000);
-        assert(!"stuck compilation escaped its deadline");
+        assert(!getenv("LARECOMP_SHADER_TIMEOUT_EXIT"));
+        assert(!atomic_load(&state));  // deferred, not falsely marked ready/failed
+        uint64_t waited = stat_shader_wait_ns;
+        assert(waited >= 3000000000ull);
+        wait_built(&state, stuck, 0x1000, 0x2000);
+        assert(stat_shader_wait_ns == waited); // don't repeat the full wait on each draw
+        atomic_store(&state, 1); wait_built(&state, stuck, 0x1000, 0x2000);
+        return 0;
     }
     const char *operations[] = {"program", "pipeline", "compute"};
     for (int i = 0; i < 3; i++) {
@@ -227,36 +234,51 @@ class SceneProgressTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return r.stdout
 
-    def test_first_use_operations_are_preserved(self):
+    def test_completed_builds_preserve_first_use_operations(self):
         source = (ROOT / 'runtime/nvn/vulkan/exec.c').read_text()
-        start = source.index('static void wait_built(')
+        start = source.index('static uint64_t shader_wait_limit_ns(void) {')
         end = source.index('// ================================================================== state', start)
         self.run_harness(self.harness('wait', WAIT.replace('/*WAIT*/', source[start:end])))
         for invocation in ('wait_built(&pr->state, "program"', 'wait_built(&pp->state, "pipeline"',
                            'wait_built(&cp->p.state, "compute"'):
             self.assertIn(invocation, source)
-        self.assertNotIn('LARECOMP_SHADER_WAIT_MS', source)
+        self.assertIn('LARECOMP_SHADER_WAIT_MS', source)
 
     def test_real_npad_batch_adapters(self):
         self.run_harness(self.harness('input', INPUT, headers=True))
 
     def test_stuck_builds_stop_at_deadline(self):
         source = (ROOT / 'runtime/nvn/vulkan/exec.c').read_text()
-        start = source.index('static void wait_built(')
+        start = source.index('static uint64_t shader_wait_limit_ns(void) {')
         end = source.index('// ================================================================== state', start)
         exe = self.harness('stuck', WAIT.replace('/*WAIT*/', source[start:end]))
         for kind in ('program', 'pipeline', 'compute'):
             with self.subTest(kind=kind):
-                env = dict(os.environ, SCARLET_TEST_STUCK_BUILD=kind)
+                env = dict(os.environ, SCARLET_TEST_STUCK_BUILD=kind,
+                           LARECOMP_SHADER_TIMEOUT_EXIT='1', LARECOMP_SHADER_WAIT_MS='8000')
                 r = subprocess.run([str(exe)], env=env, capture_output=True, text=True, timeout=5)
                 self.assertEqual(r.returncode, 86, r.stderr)
-                self.assertIn('[build-timeout] ' + kind, r.stderr)
-                self.assertIn('exceeded 8 s', r.stderr)
+                self.assertIn('[shader-slow] ' + kind, r.stderr)
+                self.assertIn('after 8.0 s', r.stderr)
         header = (ROOT / 'runtime/platform.h').read_text()
         self.assertIn('plat_emergency_exit(int code)', header)
         device = (ROOT / 'runtime/nvn/vulkan/device.c').read_text()
         begin = device.index('static void quick_exit_handler(')
         self.assertLess(device.index('if (vk_builds_pending())', begin), device.index('vkDeviceWaitIdle', begin))
+
+    def test_slow_builds_are_deferred_by_current_default(self):
+        source = (ROOT / 'runtime/nvn/vulkan/exec.c').read_text()
+        start = source.index('static uint64_t shader_wait_limit_ns(void) {')
+        end = source.index('// ================================================================== state', start)
+        exe = self.harness('deferred', WAIT.replace('/*WAIT*/', source[start:end]))
+        for kind in ('program', 'pipeline', 'compute'):
+            with self.subTest(kind=kind):
+                env = dict(os.environ, SCARLET_TEST_STUCK_BUILD=kind)
+                env.pop('LARECOMP_SHADER_TIMEOUT_EXIT', None)
+                env.pop('LARECOMP_SHADER_WAIT_MS', None)
+                r = subprocess.run([str(exe)], env=env, capture_output=True, text=True, timeout=5)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn('after 3.0 s', r.stderr)
 
     def test_storage_view_probes_preserve_cpu_contents(self):
         source = (ROOT / 'runtime/nvn/vulkan/textures.c').read_text()

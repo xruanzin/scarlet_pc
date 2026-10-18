@@ -21,6 +21,7 @@ $Tokens = $null; $Errors = $null
 $null = [System.Management.Automation.Language.Parser]::ParseFile($Runner, [ref]$Tokens, [ref]$Errors)
 if ($Errors.Count) { throw ($Errors | Out-String) }
 $global:FixtureRepo = $Repo
+$global:FixtureDataRoot = Join-Path $Repo 'build'
 $global:FixtureExit = $WantedExit
 $global:FixtureShader = $WithShader
 $global:FixtureCalls = 0
@@ -34,9 +35,9 @@ function Invoke-FakeScarlet {
     if ((Get-Location).Path -ne $global:FixtureRepo) { throw 'runner did not anchor paths' }
     if ($env:LARECOMP_VK_OPT -ne '0') { throw 'runner inherited experimental shader optimization' }
     if ($env:LARECOMP_VK_PROF) { throw 'runner inherited GPU profiling' }
-    $Text = '[fake] boot'
+    $Text = '[paths] data: ' + $global:FixtureDataRoot + "`n[fake] boot"
     if ($global:FixtureShader) {
-        $Dir = Join-Path $global:FixtureRepo 'build/shader-diagnostics'
+        $Dir = Join-Path $global:FixtureDataRoot 'build/shader-diagnostics'
         $null = New-Item -ItemType Directory -Force -Path $Dir
         [IO.File]::WriteAllText((Join-Path $Dir '0123456789abcdef.frag.glsl'), 'current-source')
         [IO.File]::WriteAllBytes((Join-Path $Dir '0123456789abcdef.frag.spv'), [byte[]](1,2,3,4))
@@ -46,6 +47,7 @@ function Invoke-FakeScarlet {
         # A deadline may interrupt shaderc before any SPIR-V was written.
         [IO.File]::WriteAllText((Join-Path $Dir 'fedcba9876543210.comp.glsl'), 'pending-source')
         $Text += "`n[shader-diagnostic] input build/shader-diagnostics/fedcba9876543210.comp.glsl (14 bytes), SPIR-V=0 words"
+        $Text += "`n[shader-slow] pipeline still compiling after 3.0 s"
     }
     if ($global:FixtureExit -eq 86) { $Text += "`n[build-timeout] pipeline exceeded 8 s" }
     [IO.File]::WriteAllText((Join-Path $global:FixtureRepo 'scarlet_boot.log'), $Text)
@@ -72,7 +74,7 @@ class RunnerTests(unittest.TestCase):
             root = Path(tmp)
             fixture = root / 'fixture.ps1'
             fixture.write_text(SCRIPT)
-            for code, shaders in ((0, False), (86, False), (86, True)):
+            for code, shaders in ((0, False), (0, True), (86, False), (86, True)):
                 with self.subTest(code=code, shaders=shaders):
                     repo = root / f'repo_{code}_{shaders}'
                     game = root / 'game'
@@ -87,8 +89,8 @@ class RunnerTests(unittest.TestCase):
                                          cwd=root, capture_output=True, text=True, timeout=30)
                     self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
                     archive = repo / 'build/scarlet_shader_failure.zip'
-                    self.assertEqual(archive.exists(), code == 86, run.stdout + run.stderr)
-                    if code != 86:
+                    self.assertEqual(archive.exists(), code == 86 or shaders, run.stdout + run.stderr)
+                    if code != 86 and not shaders:
                         continue
                     with zipfile.ZipFile(archive) as z:
                         expected = {'scarlet_boot.log'}

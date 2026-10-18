@@ -25,7 +25,7 @@ static VkShaderModule module(const char *path) {
     VkShaderModule m; CHECK(vkCreateShaderModule(dev, &ci, NULL, &m)); free(code); return m;
 }
 int main(int argc, char **argv) {
-    assert(argc == 4);
+    assert(argc == 4 || argc == 5);
     VkApplicationInfo app = {.sType=VK_STRUCTURE_TYPE_APPLICATION_INFO,.apiVersion=VK_API_VERSION_1_3};
     VkInstanceCreateInfo ici = {.sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,.pApplicationInfo=&app};
     VkInstance inst; CHECK(vkCreateInstance(&ici, NULL, &inst));
@@ -108,7 +108,8 @@ int main(int argc, char **argv) {
         .renderArea={{0,0},{2,1}},.clearValueCount=1,.pClearValues=&clear};
     vkCmdBeginRenderPass(cmd, &rb, VK_SUBPASS_CONTENTS_INLINE); vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     for (int i = 0; i < 2; i++) {
-        uint32_t data[] = {i?17:0,3,0,0};
+        uint32_t selector = argc == 5 ? (uint32_t)strtoull(argv[4], NULL, 0) + (uint32_t)i : (uint32_t)(i?17:0);
+        uint32_t data[] = {selector,3,0,0};
         VkViewport vp = {(float)i,0,1,1,0,1}; VkRect2D sc = {{i,0},{1,1}};
         vkCmdSetViewport(cmd, 0, 1, &vp); vkCmdSetScissor(cmd, 0, 1, &sc);
         vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, data); vkCmdDraw(cmd, 3, 1, 0, 0);

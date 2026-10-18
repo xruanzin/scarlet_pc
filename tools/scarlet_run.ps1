@@ -51,7 +51,7 @@ $PreviousVkProf = $env:LARECOMP_VK_PROF
 $PreviousVkOpt = $env:LARECOMP_VK_OPT
 $LocationPushed = $false
 try {
-    # Keep save and shader caches in the repository even when invoked by absolute path from another directory.
+    # Anchor launcher-relative paths. The runtime chooses its own data root and reports it in the log.
     Push-Location -LiteralPath $RepoRoot
     $LocationPushed = $true
     # Normal runs use the stable compiler mode, even after experiments in this PowerShell session.
@@ -147,13 +147,21 @@ if (Test-Path -LiteralPath $Log) {
 Write-Host ""
 Write-Host "[scarlet-run] Processo terminou com exit code $Code"
 if ($Code -eq 86) {
-    Write-Host "[scarlet-run] Compilacao grafica excedeu 8 segundos. O processo foi encerrado; veja [build-timeout] no log." -ForegroundColor Yellow
+    Write-Host "[scarlet-run] Compilacao grafica excedeu o limite de espera; processo encerrado no modo de diagnostico." -ForegroundColor Yellow
+}
+$HadSlowBuild = (Test-Path -LiteralPath $Log) -and [bool](Select-String -LiteralPath $Log -Pattern '\[(shader-slow|build-timeout)\]' -Quiet)
+if ($Code -eq 86 -or $HadSlowBuild) {
     # Bundle only shaders referenced by this run, plus its log. No game dump, save or complete cache.
     try {
         $Files = @($Log)
+        # rt_paths_init changes the child process directory (usually to build/ when the game is external).
+        # Its relative diagnostic paths must be resolved from [paths] data, not the launcher's directory.
+        $RuntimeRoot = Split-Path -Parent $Exe
+        $DataLine = Select-String -LiteralPath $Log -Pattern '^\[paths\] data: (.+)$' | Select-Object -First 1
+        if ($DataLine) { $RuntimeRoot = $DataLine.Matches[0].Groups[1].Value.Trim() }
         $Diagnostics = Select-String -LiteralPath $Log -Pattern '\[shader-diagnostic\] input (build/shader-diagnostics/[0-9a-f]+\.(?:vert|frag|comp))\.glsl'
         foreach ($Entry in $Diagnostics) {
-            $Base = Join-Path $RepoRoot $Entry.Matches[0].Groups[1].Value
+            $Base = Join-Path $RuntimeRoot $Entry.Matches[0].Groups[1].Value
             foreach ($Suffix in @('.glsl', '.spv')) {
                 $Path = $Base + $Suffix
                 if (Test-Path -LiteralPath $Path -PathType Leaf) { $Files += $Path }

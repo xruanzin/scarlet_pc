@@ -79,6 +79,7 @@ typedef struct {
                             // target scale, [1 + i] = allocation scale of texture i
     uint32_t local_mem;     // bytes of local memory
     uint32_t num_insts;
+    uint32_t dispatch_labels, indirect_tables, indirect_fallbacks; // GLSL control-flow diagnostics
     uint32_t surface_fallbacks; // surface ops that still had to use a compatibility fallback
     bool uses_surface_write;   // bindless SUST 2D path
     bool uses_surface_atomic;  // bindless SURED.ADD.U32 / SUATOM path
@@ -99,6 +100,10 @@ extern const uint8_t *maxwell_dbg_vs;
 
 // code: shader binary (with the 0x50-byte SPH header for graphics stages)
 ShaderInfo *maxwell_translate(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key);
+// Optional immutable compiler constants bound as CB1 by NVN, belonging to this exact shader program.
+// They are used only to prove indirect branch destinations, never to specialize mutable draw uniforms.
+ShaderInfo *maxwell_translate_with_constants(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key,
+                                            const uint8_t *constants, size_t constants_size);
 void maxwell_free(ShaderInfo *s);
 // Disassemble for debugging (writes text to f).
 void maxwell_disassemble(const uint8_t *code, size_t max_size, int stage, void *file);

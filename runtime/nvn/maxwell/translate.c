@@ -6,7 +6,7 @@
 // branches become a `switch (pc)` state machine with explicit SSY/PBK/PCNT stacks.
 //
 // GLSL: the instruction body is generated in the MSL spelling and converted by glsl_rewrite() (a token-aware
-// pass: as_type<T>() -> as_u/as_f overloads, float4 -> vec4, ulong -> uint64_t, char()/short() casts -> sx8/sx16,
+// pass: as_type<T>() -> as_u/as_f bitcasts, float4 -> vec4, ulong -> uint64_t, char()/short() casts -> sx8/sx16,
 // in.x / out.x stage I/O -> GLSL globals and built-ins), helpers with MSL names (saturate, fmin, clz, mulhi, ...)
 // are defined in the GLSL prelude, and the structurally different constructs (texture lookups, global memory,
 // half-float packing, subgroup shuffles, barriers, discard, declarations and entry point) are emitted per dialect.
@@ -229,7 +229,7 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
             c->in_attr_mask |= 1u << a;
             c->vs_in_comp[a] |= 1u << comp;
             int kind = c->key ? c->key->attr_kind[a] : 0;
-            if (kind == 0) sprintf(e, "as_type<uint>(in.a%d[%d])", a, comp);
+            if (c->glsl && (kind == 1 || kind == 2)) sprintf(e, "uint(in.a%d[%d])", a, comp);
             else sprintf(e, "as_type<uint>(in.a%d[%d])", a, comp);
         } else if (addr == 0x2F8) { c->uses_iid = true; strcpy(e, "iid"); }
         else if (addr == 0x2FC) { c->uses_vid = true; strcpy(e, "vid"); }
@@ -1867,12 +1867,10 @@ static const char glsl_prelude[] =
     "#extension GL_KHR_shader_subgroup_shuffle_relative : require\n"
     "#extension GL_EXT_texture_shadow_lod : require\n"
     "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
-    "uint as_u(float x) { return floatBitsToUint(x); }\n"
-    "uint as_u(uint x) { return x; }\n"
-    "uint as_u(int x) { return uint(x); }\n"
-    "float as_f(uint x) { return uintBitsToFloat(x); }\n"
-    "float as_f(int x) { return intBitsToFloat(x); }\n"
-    "float as_f(float x) { return x; }\n"
+    // Typed bitcasts are intrinsics, not thousands of function calls/argument temporaries in -O0 SPIR-V.
+    // Integer vertex attributes are explicitly converted to uint in attr_load; all as_u inputs are float.
+    "#define as_u(x) floatBitsToUint(x)\n"
+    "#define as_f(x) uintBitsToFloat(x)\n"
     "int as_i(uint x) { return int(x); }\n"
     "int as_i(float x) { return floatBitsToInt(x); }\n"
     "int sx8(uint v) { return bitfieldExtract(int(v), 0, 8); }\n"
@@ -2104,7 +2102,58 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     return info;
 }
 
+static bool previous_instruction(size_t *index) {
+    if (*index <= 1) return false;
+    --*index;
+    if (!(*index % 4)) --*index;
+    return *index != 0;
+}
+
+static bool unpredicated(uint64_t w) { return bits(w, 16, 4) == PT; }
+
+// Recognize the compiler's bounded jump-table sequence:
+//   IMNMX.U32 idx, selector, last, PT; SHL addr, idx, 2; LDC.U32 dest, c1[addr+offset]; BRX dest+relative
+// Require adjacent, unconditional definitions and no entry into the middle of that proof. Unknown patterns
+// keep the full dispatcher. CB1 is the program's immutable constant section, not an arbitrary bound buffer.
+static bool indirect_table(const uint64_t *code, size_t end, size_t brx, const uint8_t *constants,
+                           size_t constants_size, uint8_t *label, uint8_t *proof_interior) {
+    if (!constants || !constants_size) return false;
+    size_t ldc = brx, shl, clamp;
+    if (!previous_instruction(&ldc)) return false;
+    shl = ldc; if (!previous_instruction(&shl)) return false;
+    clamp = shl; if (!previous_instruction(&clamp)) return false;
+    uint64_t b = code[brx], l = code[ldc], s = code[shl], m = code[clamp];
+    if ((l & 0xfff8000000000000ull) != 0xef90000000000000ull || bits(l, 48, 3) != 4 ||
+        bits(l, 44, 2) || bits(l, 36, 5) != 1 || bits(l, 0, 8) != bits(b, 8, 8) ||
+        bits(l, 8, 8) == RZ || bits(l, 0, 8) == RZ || !unpredicated(l)) return false;
+    if ((s & 0xfef8000000000000ull) != 0x3848000000000000ull || bits(s, 20, 19) != 2 || bits(s, 56, 1) ||
+        bits(s, 0, 8) != bits(l, 8, 8) || bits(s, 8, 8) == RZ || !unpredicated(s)) return false;
+    if ((m & 0xfef8000000000000ull) != 0x3820000000000000ull || bits(m, 56, 1) || bits(m, 48, 1) ||
+        bits(m, 43, 2) || bits(m, 47, 1) || bits(m, 39, 4) != PT ||
+        bits(m, 0, 8) != bits(s, 8, 8) || !unpredicated(m)) return false;
+    uint32_t count = (uint32_t)bits(m, 20, 19) + 1, offset = (uint32_t)bits(l, 20, 16);
+    if (count > 256 || (offset & 3) || (uint64_t)offset + (uint64_t)count * 4 > constants_size ||
+        (uint64_t)offset + (uint64_t)count * 4 > 65536) return false;
+    uint32_t targets[256];
+    for (uint32_t j = 0; j < count; j++) {
+        uint32_t entry; memcpy(&entry, constants + offset + j * 4, 4);
+        uint32_t t = (uint32_t)(brx * 8 + 8) + entry + (uint32_t)sbits(b, 20, 24);
+        if (t & 7) return false;
+        if (!((t >> 3) & 3)) t += 8; // scheduling word, same normalization as the GPU dispatcher
+        if ((size_t)(t / 8) >= end) return false;
+        targets[j] = t / 8;
+    }
+    for (uint32_t j = 0; j < count; j++) label[targets[j]] = 1;
+    proof_interior[brx] = proof_interior[ldc] = proof_interior[shl] = 1;
+    return true;
+}
+
 ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
+    return maxwell_translate_with_constants(blob, max_size, stage, key, NULL, 0);
+}
+
+ShaderInfo *maxwell_translate_with_constants(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key,
+                                            const uint8_t *constants, size_t constants_size) {
     ShaderInfo *info = calloc(1, sizeof *info);
     info->stage = stage;
     Ctx *c = calloc(1, sizeof *c);
@@ -2149,15 +2198,28 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
             if (t >= 0 && (size_t)(t / 8) < end) label[t / 8] = 1;
             any_branch = true;
         }
-        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: any instruction may be a target
+        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: prove table targets below, otherwise retain every instruction
             any_branch = true;
-            memset(label, 1, end);
         }
         if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || (w & 0xfff0000000000000ull) == 0xe340000000000000ull ||
             (w & 0xfff0000000000000ull) == 0xe350000000000000ull)
             any_branch = true;
         (void)is_branch_target_op;
     }
+    uint8_t *proof_interior = calloc(end + 4, 1);
+    bool all_labels = false;
+    for (size_t i = 1; i < end; i++) {
+        if (!(i % 4) || ((((const uint64_t *)code)[i] & 0xfff0000000000000ull) != 0xe250000000000000ull)) continue;
+        if (c->glsl && indirect_table((const uint64_t *)code, end, i, constants, constants_size, label, proof_interior))
+            info->indirect_tables++;
+        else { info->indirect_fallbacks++; all_labels = true; }
+    }
+    for (size_t i = 1; i < end; i++) if (label[i] && proof_interior[i]) {
+        all_labels = true; info->indirect_fallbacks++; break;
+    }
+    if (all_labels) memset(label, 1, end);
+    free(proof_interior);
+    if (any_branch) for (size_t i = 1; i < end; i++) if (i % 4 && label[i]) info->dispatch_labels++;
     // translate
     bool dbg = maxwell_dbg_code && blob == maxwell_dbg_code && stage == STAGE_FRAGMENT;
     static int annotate = -1;
