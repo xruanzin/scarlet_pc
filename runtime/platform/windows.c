@@ -102,6 +102,35 @@ void plat_thread_realtime(uint64_t period_ns) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
 }
 
+const void *plat_map_file_ro(int fd, uint64_t *size) {
+    if (size) *size = 0;
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    LARGE_INTEGER n;
+    if (!GetFileSizeEx(h, &n) || n.QuadPart <= 0) return NULL;
+    HANDLE mapping = CreateFileMappingW(h, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!mapping) return NULL;
+    void *p = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    CloseHandle(mapping);  // the mapped view keeps the section alive
+    if (!p) return NULL;
+    if (size) *size = (uint64_t)n.QuadPart;
+    return p;
+}
+
+void plat_unmap_file(const void *ptr) {
+    if (ptr) UnmapViewOfFile(ptr);
+}
+
+void plat_set_cpu_boost(bool enabled) {
+    static DWORD normal_class;
+    if (!normal_class) normal_class = GetPriorityClass(GetCurrentProcess());
+    DWORD target = enabled ? HIGH_PRIORITY_CLASS : (normal_class ? normal_class : NORMAL_PRIORITY_CLASS);
+    if (GetPriorityClass(GetCurrentProcess()) != target) {
+        SetPriorityClass(GetCurrentProcess(), target);
+        LOG("[plat] CPU fast-load boost %s (priority class %#lx)\n", enabled ? "on" : "off", (unsigned long)target);
+    }
+}
+
 // ---- process
 // Release builds are GUI-subsystem executables (no console window): stdout / stderr go to lasrecomp.log next to the
 // exe, and a fatal error shows a message box (plat_fatal_notice) instead of vanishing. Processes started by this one
