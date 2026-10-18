@@ -1910,12 +1910,14 @@ static SurfaceBindlessCache *surface_cache_get(NvnDescPool *pool) {
         }
 
         int nw = 0, na = 0;
+        int slot_cap = g_vk.bindless_storage_slots ? g_vk.bindless_storage_slots : 1;
+        if (slot_cap > MAXWELL_BINDLESS_IMAGES) slot_cap = MAXWELL_BINDLESS_IMAGES;
         if (pool) {
             NvnTexEntry *e = pool->entries;
             // Most recently registered images first. This keeps the compact window
             // focused on the render targets the current Scarlet scene actually uses.
             uint32_t before = UINT32_MAX;
-            for (int pass = 0; pass < pool->count && (nw < MAXWELL_BINDLESS_IMAGES || na < MAXWELL_BINDLESS_IMAGES); pass++) {
+            for (int pass = 0; pass < pool->count && (nw < slot_cap || na < slot_cap); pass++) {
                 int best = -1;
                 uint32_t best_seq = 0;
                 for (int i = 0; i < pool->count; i++)
@@ -1924,14 +1926,14 @@ static SurfaceBindlessCache *surface_cache_get(NvnDescPool *pool) {
                     }
                 if (best < 0) break;
                 before = best_seq;
-                if (nw < MAXWELL_BINDLESS_IMAGES) {
+                if (nw < slot_cap) {
                     VkImageView v = vk_storage_write_view(e[best].tex, &e[best].view, e[best].has_view);
                     if (v) {
                         c->map_ptr[best * 2 + 0] = (uint32_t)nw;
                         c->write[nw++] = (VkDescriptorImageInfo){VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL};
                     }
                 }
-                if (na < MAXWELL_BINDLESS_IMAGES) {
+                if (na < slot_cap) {
                     VkImageView v = vk_storage_atomic_u32_view(e[best].tex, &e[best].view, e[best].has_view);
                     if (v) {
                         c->map_ptr[best * 2 + 1] = (uint32_t)na;
@@ -1973,10 +1975,10 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             bi[n] = (VkDescriptorBufferInfo){surf->map_buf, 0, (VkDeviceSize)surf->map_count * 8};
             w[n].pBufferInfo = &bi[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && b->binding == 121 && surf) {
-            w[n].descriptorCount = MAXWELL_BINDLESS_IMAGES;
+            w[n].descriptorCount = b->count ? b->count : g_vk.bindless_storage_slots;
             w[n].pImageInfo = surf->write;
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && b->binding == 122 && surf) {
-            w[n].descriptorCount = MAXWELL_BINDLESS_IMAGES;
+            w[n].descriptorCount = b->count ? b->count : g_vk.bindless_storage_slots;
             w[n].pImageInfo = surf->atomic;
         } else if (b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && b->binding >= 32) {
             int ti = (int)b->binding - 32;
@@ -2059,7 +2061,7 @@ static CsProg *compute_program(NvnProgram *np) {
     maxwell_gmem_size = HEAP_MAX;
     ShaderKey k = {0};
     k.glsl = 1;
-    k.bindless_storage = g_vk.bindless_storage ? 1 : 0;
+    k.bindless_storage = g_vk.bindless_storage_slots;
     cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
     cp->p.vi = cp->si;
     if (!cp->si->msl) {
@@ -2193,7 +2195,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
-    vkey.bindless_storage = fkey.bindless_storage = g_vk.bindless_storage ? 1 : 0;
+    vkey.bindless_storage = fkey.bindless_storage = g_vk.bindless_storage_slots;
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
