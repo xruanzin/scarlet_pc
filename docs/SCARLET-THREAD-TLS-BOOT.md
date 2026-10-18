@@ -63,15 +63,73 @@ The report distinguishes candidate instructions from proof of execution.
 No SDK regeneration, runtime rebuild or game execution is needed to collect
 this report. The tool reads NSOs and writes diagnostic text outside ExeFS; it
 does not change the executable, reset TLS on every read, or suppress the crash.
-Use its output to locate the missing initialization/registration step before
-another semantic patch. Synthetic tests verify exact MRS/MSR discrimination,
+The report has now identified the missing publication step, described below.
+Synthetic tests verify exact MRS/MSR discrimination,
 zero-register writes, direct callers, Build-ID scoping, unchanged input hashes,
 and rejection of an output path that would overwrite a game file.
+
+## Report result: the SDK reloads the TLR's ThreadPointer slot
+
+The supplied `scarlet_tls_report.txt` finds only three TPIDR_EL0 writes across
+main/sdk/subsdk0. Two SDK paths use exactly this sequence:
+
+```text
+MRS X8, TPIDRRO_EL0
+LDR X8, [X8, #0x1F0]
+MSR TPIDR_EL0, X8
+```
+
+The main-thread path writes at `0x700637e110`, in the SDK thread-manager
+constructor; the worker entry writes at `0x700637e40c`. The host initialized
+`Cpu.tpidr` but left the source slot at `TLR+0x1F0` zero. Those reloads therefore
+discarded the otherwise valid bootstrap pointer. The SDK's third writer,
+`0x700640dbf0`, publishes its own nnmusl TLS pointer to **both** the TLR slot
+and TPIDR_EL0. This establishes the source/mirror contract for this SDK.
+
+Thread creation now publishes each thread's bootstrap pointer into its own
+`TLR+0x1F0` before guest code runs. Guest MRS/MSR instructions are unchanged.
+When nnmusl initializes a replacement block and updates the slot/register,
+subsequent SDK reloads use that replacement normally. The neighboring
+ThreadType field at `+0x1F8` and the IPC command buffer remain independent.
+
+The main-thread startup log now prints `tlr[0x1f0]` as well as both registers;
+the initial slot value must equal TPIDR_EL0. This patch still needs only a
+runtime rebuild and reuses the generated SDK/main/subsdk0 and game DLL.
+
+### Citron reference
+
+The supplied Citron repository was inspected at commit
+`598b700884c7cd3bee0a25ce30d0cab066117c5b`:
+
+- [k_thread.cpp](https://github.com/citron-neo/emulator/blob/598b700884c7cd3bee0a25ce30d0cab066117c5b/src/core/hle/kernel/k_thread.cpp)
+  allocates and zeroes the TLR for a user thread, separately from its CPU context.
+- [k_process.cpp](https://github.com/citron-neo/emulator/blob/598b700884c7cd3bee0a25ce30d0cab066117c5b/src/core/hle/kernel/k_process.cpp)
+  creates the main thread at the process entry point and sets its initial arguments.
+- [deconstructed_rom_directory.cpp](https://github.com/citron-neo/emulator/blob/598b700884c7cd3bee0a25ce30d0cab066117c5b/src/core/loader/deconstructed_rom_directory.cpp)
+  loads `rtld` first at that entry point, preserving the original loader path.
+
+These distinguish kernel thread storage from the later SDK initialization.
+This port replaces rtld with host callbacks, so it must publish its bootstrap
+state in the fields that the remaining original SDK code actually reads.
+The missing `+0x1F0` publication is established by the user's own SDK report;
+it is not a claim that Citron seeds a custom bootstrap pointer in that slot.
+The change is implemented in this port's existing native runtime.
+
+### Extended regression
+
+`test_thread_tls.py` now executes the actual lifted SDK reload sequence followed
+by the observed malloc load. A valid Cpu.tpidr plus an empty TLR slot reproduces
+the reset to zero. With the published slot, reload and malloc succeed. A second
+probe exercises nnmusl's observed ADD/STR/MSR publication and verifies that its
+replacement pointer survives later reloads. Checks also cover a direct guest
+MSR that does not update the slot, per-thread mirror isolation, IPC/ThreadType
+preservation, concurrent creation and zeroed/re-published slots after reset.
 
 ## Runtime change
 
 - Each newly created guest thread receives its own zero-initialized 8 KiB
   bootstrap area for `TPIDR_EL0`, before it can execute constructors or malloc.
+- Its TLR ThreadPointer field at `+0x1F0` publishes the same pointer for SDK reloads.
 - This area is separate from the existing 0x200-byte `TPIDRRO_EL0` TLR/IPC
   slot, from every other thread's area, and from the application/HLE heaps.
 - The writable pool has the same 2048-slot capacity as the existing TLR pool.
@@ -106,7 +164,7 @@ inputs. The build recompiles the runtime and keeps compatible game objects.
 The new log should include:
 
 ```text
-[kernel] main thread TLS: TPIDR_EL0=7090100000 TPIDRRO_EL0=7090000000 bootstrap=0x2000 bytes
+[kernel] main thread TLS: TPIDR_EL0=7090100000 TPIDRRO_EL0=7090000000 tlr[0x1f0]=7090100000 bootstrap=0x2000 bytes
 ```
 
 This line confirms bootstrap setup, not completion of the game's boot. Inspect

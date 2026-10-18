@@ -229,6 +229,11 @@ static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int
     t->cpu.tpidr = USER_TLS_BASE + slot * USER_TLS_STRIDE;
     memset((void *)(uintptr_t)t->cpu.tpidr, 0, USER_TLS_STRIDE);
     t->cpu.tpidrro = t->tlr;
+    // Scarlet SDK thread setup reloads TPIDR_EL0 from TLR+0x1F0. Publishing
+    // only Cpu.tpidr is insufficient: the SDK would immediately replace it
+    // with the zero value from the cleared TLR. nnmusl can later replace both
+    // the slot and the register with its own fully initialized TLS block.
+    *(uint64_t *)(uintptr_t)(t->tlr + TLR_THREAD_POINTER_OFFSET) = t->cpu.tpidr;
     t->anext = g_threads;
     g_threads = t;
     pthread_mutex_unlock(&g_klock);
@@ -254,8 +259,9 @@ KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio
 
 void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4) {
     t->cpu.x[0] = x0; t->cpu.x[1] = x1; t->cpu.x[2] = x2; t->cpu.x[3] = x3; t->cpu.x[4] = x4;
-    LOG("[kernel] main thread TLS: TPIDR_EL0=%llx TPIDRRO_EL0=%llx bootstrap=%#llx bytes\n",
+    LOG("[kernel] main thread TLS: TPIDR_EL0=%llx TPIDRRO_EL0=%llx tlr[0x1f0]=%llx bootstrap=%#llx bytes\n",
         (unsigned long long)t->cpu.tpidr, (unsigned long long)t->cpu.tpidrro,
+        (unsigned long long)*(uint64_t *)(uintptr_t)(t->tlr + TLR_THREAD_POINTER_OFFSET),
         (unsigned long long)USER_TLS_STRIDE);
     thread_start(t);  // the host main thread goes on to run the window event loop
 }

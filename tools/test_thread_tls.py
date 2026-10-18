@@ -116,6 +116,55 @@ static void test_isolation_and_guest_msr(void) {
     puts("thread isolation, IPC separation and guest MSR replacement: OK");
 }
 
+static void test_sdk_tlr_reload_and_nnmusl_replacement(void) {
+    KThread *a = thread_new(0, 0, 0x4000, 44, 0);
+    KThread *b = thread_new(0, 0, 0x5000, 44, 0);
+    uint64_t *slot = (uint64_t *)(uintptr_t)(a->tlr + 0x1f0);
+    uint64_t *thread_type = (uint64_t *)(uintptr_t)(a->tlr + 0x1f8);
+    assert(*slot == a->cpu.tpidr);  // bootstrap must publish the guest-visible source
+    memset((void *)(uintptr_t)a->tlr, 0x5a, 0x100);
+    *thread_type = 0x7006d70000ull;
+    Cpu c = a->cpu;
+    c.tpidr = 0;
+    sdk_tp_reload(&c);  // exact MRS/LDR/MSR sequence from both SDK thread paths
+    assert(c.tpidr == a->cpu.tpidr);
+    assert(*slot != *(uint64_t *)(uintptr_t)(b->tlr + 0x1f0));
+    c.x[0] = 0x38;
+    malloc_probe(&c);
+    assert(c.x[9] == 0);
+
+    // The prior patch's state: a valid Cpu.tpidr but an empty TLR pointer slot.
+    *slot = 0;
+    c.tpidr = a->cpu.tpidr;
+    sdk_tp_reload(&c);
+    assert(c.tpidr == 0);  // original guest semantics really overwrite the register
+    *slot = a->cpu.tpidr;
+    sdk_tp_reload(&c);
+    assert(c.tpidr == a->cpu.tpidr);
+
+    // A direct guest MSR is still honored and does not silently rewrite the TLR.
+    c.x[0] = b->cpu.tpidr;
+    guest_tp_probe(&c);
+    assert(c.tpidr == b->cpu.tpidr && *slot == a->cpu.tpidr);
+    sdk_tp_reload(&c);
+    assert(c.tpidr == a->cpu.tpidr);
+
+    // nnmusl's observed ADD/STR/MSR sequence replaces both with its own pointer.
+    c.x[21] = b->cpu.tpidr - 0x18;
+    nnmusl_tp_publish(&c);
+    assert(c.tpidr == b->cpu.tpidr && *slot == b->cpu.tpidr);
+    c.tpidr = 0;
+    sdk_tp_reload(&c);
+    assert(c.tpidr == b->cpu.tpidr);
+    *(uint64_t *)(uintptr_t)(b->cpu.tpidr + 0x20) = 0x7240007770ull;
+    c.x[0] = 0x38;
+    malloc_probe(&c);
+    assert(c.x[9] == 0x7240007770ull);
+    assert(*thread_type == 0x7006d70000ull);
+    for (int i = 0; i < 0x100; i++) assert(((unsigned char *)(uintptr_t)a->tlr)[i] == 0x5a);
+    puts("SDK TLR reload: empty slot reproduces reset; published slot survives; nnmusl replacement honored");
+}
+
 enum { WORKERS = 8, PER_WORKER = 32 };
 static KThread *created[WORKERS][PER_WORKER];
 static void *make_threads(void *arg) {
@@ -132,6 +181,7 @@ static void test_concurrent_creation(void) {
     for (int a = 0; a < WORKERS * PER_WORKER; a++) {
         KThread *x = created[a / PER_WORKER][a % PER_WORKER];
         assert(all_zero((void *)(uintptr_t)x->cpu.tpidr, USER_TLS_STRIDE));
+        assert(*(uint64_t *)(uintptr_t)(x->tlr + 0x1f0) == x->cpu.tpidr);
         for (int b = a + 1; b < WORKERS * PER_WORKER; b++) {
             KThread *y = created[b / PER_WORKER][b % PER_WORKER];
             assert(x->tlr != y->tlr && x->cpu.tpidr != y->cpu.tpidr && x->id != y->id);
@@ -149,7 +199,9 @@ static void test_reset_reuse_and_bounds(void) {
     kernel_reset();
     KThread *first = thread_new(0, 0, 0x4000, 44, 0);
     assert(first->tlr == TLS_BASE && first->cpu.tpidr == USER_TLS_BASE);
-    assert(all_zero((void *)(uintptr_t)first->tlr, 0x200));
+    assert(all_zero((void *)(uintptr_t)first->tlr, 0x1f0));
+    assert(*(uint64_t *)(uintptr_t)(first->tlr + 0x1f0) == first->cpu.tpidr);
+    assert(*(uint64_t *)(uintptr_t)(first->tlr + 0x1f8) == 0);
     assert(all_zero((void *)(uintptr_t)first->cpu.tpidr, USER_TLS_STRIDE));
     KThread *last = first;
     for (size_t i = 1; i < TLS_SIZE / 0x200; i++) last = thread_new(0, 0, 0x4000, 44, 0);
@@ -178,6 +230,7 @@ int main(void) {
     kernel_init();
     test_malloc_probe();
     test_isolation_and_guest_msr();
+    test_sdk_tlr_reload_and_nnmusl_replacement();
     test_concurrent_creation();
     test_reset_reuse_and_bounds();
     return 0;
@@ -195,6 +248,12 @@ class ThreadTlsTests(unittest.TestCase):
         probes += '\n' + lifted_probe('guest_tp_probe', [
             0xD51BD040, 0xD53BD041, 0xD53BD062, 0xD65F03C0,
         ])
+        probes += '\n' + lifted_probe('sdk_tp_reload', [
+            0xD53BD068, 0xF940F908, 0xD51BD048, 0xD65F03C0,
+        ])
+        probes += '\n' + lifted_probe('nnmusl_tp_publish', [
+            0x910062A8, 0xD53BD069, 0xF900F928, 0xD51BD048, 0xD65F03C0,
+        ])
         with tempfile.TemporaryDirectory() as temp:
             work = Path(temp)
             src, exe = work / 'tls_test.c', work / 'tls_test'
@@ -208,6 +267,7 @@ class ThreadTlsTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertIn('initialized thread passes', run.stdout)
             self.assertIn('256 concurrent thread creations', run.stdout)
+            self.assertIn('published slot survives; nnmusl replacement honored', run.stdout)
             self.assertIn('pool exhaustion stops safely', run.stdout)
             print(run.stdout, end='')
 

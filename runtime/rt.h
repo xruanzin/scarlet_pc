@@ -22,6 +22,7 @@
 #define HLE_SIZE     0x0000100000ull
 #define TLS_BASE     0x7090000000ull
 #define TLS_SIZE     0x0000100000ull
+#define TLR_THREAD_POINTER_OFFSET 0x1F0ull  // SDK reloads TPIDR_EL0 from this TLR slot
 // Bootstrap writable TPIDR_EL0 storage, separate from Horizon's TPIDRRO_EL0
 // IPC/TLR slots. Keep the same capacity as the 0x200-byte TLR slot pool.
 #define USER_TLS_STRIDE 0x2000ull
