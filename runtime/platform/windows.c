@@ -24,6 +24,11 @@
 static uint64_t g_lo, g_hi;
 #define COMMIT_CHUNK 0x10000ull
 
+// Windows can track which guest pages the CPU has written. The Vulkan texture
+// cache uses this to avoid hashing multi-megabyte dynamic/linear textures every
+// frame when their backing memory has not changed.
+static bool g_write_watch;
+
 static bool lazy_commit(uint64_t a) {
     if (a < g_lo || a >= g_hi) return false;
     MEMORY_BASIC_INFORMATION mi;
@@ -44,12 +49,38 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
 }
 
 bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
-    void *p = VirtualAlloc((void *)(uintptr_t)lo, hi - lo, MEM_RESERVE, PAGE_READWRITE);
+    void *p = VirtualAlloc((void *)(uintptr_t)lo, hi - lo, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE);
+    if (p == (void *)(uintptr_t)lo) {
+        g_write_watch = true;
+    } else {
+        if (p) VirtualFree(p, 0, MEM_RELEASE);
+        p = VirtualAlloc((void *)(uintptr_t)lo, hi - lo, MEM_RESERVE, PAGE_READWRITE);
+    }
     if (p != (void *)(uintptr_t)lo) return false;
     g_lo = lo;
     g_hi = hi;
     AddVectoredExceptionHandler(1, vectored_handler);
+    fprintf(stderr, "[plat] guest write-watch %s\n", g_write_watch ? "enabled" : "unavailable");
     return true;
+}
+
+int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page_size) {
+    if (!g_write_watch || !size || addr < g_lo || addr - g_lo > g_hi - g_lo ||
+        size > g_hi - addr || !pages || max <= 0 || !page_size)
+        return -1;
+
+    ULONG_PTR n = (ULONG_PTR)max;
+    DWORD granularity = 4096;
+    if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (void *)(uintptr_t)addr, (SIZE_T)size,
+                      (PVOID *)pages, &n, &granularity) != 0)
+        return -1;
+
+    *page_size = granularity;
+    // When the caller's array filled, conservatively treat the whole queried
+    // range as dirty. ResetWriteWatch makes sure a later query starts clean.
+    if (n >= (ULONG_PTR)max)
+        ResetWriteWatch((void *)(uintptr_t)addr, (SIZE_T)size);
+    return (int)n;
 }
 
 // Decommit everything: the range stays reserved, and pages come back zeroed when committed again (lazily).
