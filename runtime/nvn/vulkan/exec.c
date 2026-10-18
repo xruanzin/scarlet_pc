@@ -1880,6 +1880,26 @@ static SurfaceBindlessCache *surface_cache_get(NvnDescPool *pool) {
     uint32_t gen = pool ? pool->generation : 0;
     uint32_t token = gen + 1u;
     if (c->generation != token) {
+        // Descriptor sets recorded before this registration change may still be
+        // in the pending/in-flight command buffers. Never rewrite their map in
+        // place: snapshot a fresh buffer for the new generation. The old VMA
+        // allocation intentionally stays alive for this run (small and rare,
+        // registration-time only), exactly like the immutable descriptor sets.
+        if (c->generation) {
+            VkBufferCreateInfo mbi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                      .size = (VkDeviceSize)c->map_count * 8,
+                                      .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+            VmaAllocationCreateInfo mai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                           .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                                                    VMA_ALLOCATION_CREATE_MAPPED_BIT};
+            VmaAllocationInfo minf;
+            VkBuffer new_buf;
+            VmaAllocation new_mem;
+            VK_CHECK(vmaCreateBuffer(g_vk.vma, &mbi, &mai, &new_buf, &new_mem, &minf));
+            c->map_buf = new_buf;
+            c->map_mem = new_mem;
+            c->map_ptr = minf.pMappedData;
+        }
         for (uint32_t i = 0; i < c->map_count; i++) {
             c->map_ptr[i * 2 + 0] = UINT32_MAX;
             c->map_ptr[i * 2 + 1] = UINT32_MAX;
