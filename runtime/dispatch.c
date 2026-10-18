@@ -2,6 +2,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <setjmp.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -159,6 +160,7 @@ void *hle_alloc(uint64_t size) {
 
 void dispatch_init(void) {  // (after gamelib_load)
     const GameLibTables *g = gamelib_tables();
+    memset(dcache, 0, sizeof dcache);
     ntables = 0;
     for (uint32_t i = 0; i < g->nmods && i < GAMELIB_MAX_MODULES; i++) {
         const GameLibModule *m = &g->mods[i];
@@ -204,12 +206,17 @@ GuestFn dispatch_lookup(uint64_t addr) {
     return NULL;
 }
 
-// Per-thread direct-mapped cache in front of the binary search.
-// Scarlet has ~271k lifted functions/resume targets and a 4096-entry table
-// thrashed badly in engine/job-system indirect calls. 32768 entries cost
-// 512 KiB per active guest thread but avoid most repeated binary searches.
-#define DCACHE 32768
-static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
+// Shared direct-mapped cache in front of the binary search.
+// Guest address -> lifted function is immutable for a boot, so making this
+// per-thread only duplicated memory and forced every Scarlet worker to warm the
+// same lookup table again. 262144 entries (~4 MiB total) cover almost the
+// complete lifted working set and are shared by loader, jobs, audio and render.
+#define DCACHE 262144
+typedef struct {
+    _Atomic uint64_t addr;
+    _Atomic(uintptr_t) fn;
+} DCacheEnt;
+static DCacheEnt dcache[DCACHE];
 
 static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
@@ -232,8 +239,8 @@ static GuestFn dispatch_slow(Cpu *c) {
         FATAL("no function at %llx (lr=%llx %s+%llx)\n", pc, c->x[30], s ? s : "?", off);
     }
     unsigned h = (unsigned)(pc >> 2) & (DCACHE - 1);
-    dcache[h].addr = pc;
-    dcache[h].fn = f;
+    atomic_store_explicit(&dcache[h].fn, (uintptr_t)f, memory_order_relaxed);
+    atomic_store_explicit(&dcache[h].addr, pc, memory_order_release);
     return f;
 }
 
@@ -254,7 +261,10 @@ void rt_dispatch(Cpu *c) {
         }
     }
     unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);
-    GuestFn f = dcache[h].addr == c->pc ? dcache[h].fn : dispatch_slow(c);
+    uint64_t cached = atomic_load_explicit(&dcache[h].addr, memory_order_acquire);
+    GuestFn f = cached == c->pc
+        ? (GuestFn)(uintptr_t)atomic_load_explicit(&dcache[h].fn, memory_order_relaxed)
+        : dispatch_slow(c);
     __attribute__((musttail)) return f(c);
 }
 
