@@ -116,6 +116,13 @@ typedef struct {
     uint8_t extra[];
 } CmdRec;
 
+// Expanded command streams are host-backed. Queue submission pins the stream
+// so command-memory reuse on another guest thread cannot recycle/overwrite it
+// while the Vulkan executor is still reading it. pin() returns the resolved
+// host start address (or the original handle when no host stream is known).
+uint64_t nvn_cmdstream_pin(uint64_t handle);
+void nvn_cmdstream_unpin(uint64_t handle);
+
 enum {
     CMD_END = 0, CMD_JUMP, CMD_CALL,
     CMD_BIND_PROGRAM, CMD_BIND_BLEND, CMD_BIND_CHANNEL_MASK, CMD_BIND_COLOR, CMD_BIND_DEPTH_STENCIL,
