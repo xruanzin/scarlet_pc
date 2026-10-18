@@ -4,6 +4,9 @@ param(
 
     [string]$OutDir = "generated",
 
+    [ValidateSet("all", "main", "sdk", "subsdk0")]
+    [string]$Module = "all",
+
     [switch]$Clean
 )
 
@@ -32,8 +35,17 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if ($Clean -and (Test-Path -LiteralPath $OutDir)) {
-    Write-Host "[scarlet-gen] Limpando $OutDir"
-    Remove-Item -LiteralPath $OutDir -Recurse -Force
+    if ($Module -eq "all") {
+        Write-Host "[scarlet-gen] Limpando $OutDir"
+        Remove-Item -LiteralPath $OutDir -Recurse -Force
+    }
+    else {
+        $ModuleOut = Join-Path $OutDir $Module
+        if (Test-Path -LiteralPath $ModuleOut) {
+            Write-Host "[scarlet-gen] Limpando somente $ModuleOut"
+            Remove-Item -LiteralPath $ModuleOut -Recurse -Force
+        }
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -58,6 +70,9 @@ $Jobs = @(
 
 foreach ($Job in $Jobs) {
     $Name = $Job.Name
+    if ($Module -ne "all" -and $Name -ne $Module) {
+        continue
+    }
     $InputPath = Join-Path $ExeFs $Name
     $OutputPath = Join-Path $OutDir $Name
     New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
