@@ -46,6 +46,7 @@ typedef struct {
     bool flip_y;            // lower-left window origin
     uint32_t vs_out_mask;   // fragment: varyings the vertex shader provides
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
+    uint8_t bindless_storage; // Vulkan backend can execute bindless SUST/SURED through storage images
 } ShaderKey;
 
 typedef struct {
