@@ -33,7 +33,44 @@ foreach ($Rel in $RequiredGenerated) {
 
 if ($Jobs -lt 1) { $Jobs = 1 }
 
-$env:SCARLET_REPO = $RepoRoot
+$RepoPosix = $RepoRoot -replace '\\', '/'
+if ($RepoPosix -match '^([A-Za-z]):/(.*)
+$Log = Join-Path $RepoRoot "scarlet_build.log"
+if (Test-Path -LiteralPath $Log) {
+    Remove-Item -LiteralPath $Log -Force
+}
+
+Write-Host "[scarlet-build] Compilando runtime + 1.186 fontes geradas com -j$Jobs..." -ForegroundColor Cyan
+Write-Host "[scarlet-build] Log: $Log"
+
+$Cmd = 'set -o pipefail; export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"; cd "$SCARLET_REPO_POSIX"; make -j"$SCARLET_JOBS" EXE_NAME=ScarletRecomp build/ScarletRecomp.exe build/lasgame.dll 2>&1 | tee scarlet_build.log'
+
+& $Bash -lc $Cmd
+$Code = $LASTEXITCODE
+if ($Code -ne 0) {
+    throw "Build falhou (exit $Code). Envie as ultimas linhas de scarlet_build.log."
+}
+
+$Exe = Join-Path $RepoRoot "build\ScarletRecomp.exe"
+$GameDll = Join-Path $RepoRoot "build\lasgame.dll"
+$Id = Join-Path $RepoRoot "build\lasgame.dll.id"
+
+foreach ($P in @($Exe, $GameDll, $Id)) {
+    if (-not (Test-Path -LiteralPath $P -PathType Leaf)) {
+        throw "Build terminou sem criar o artefato esperado: $P"
+    }
+}
+
+Write-Host ""
+Write-Host "[scarlet-build] BUILD CONCLUIDO" -ForegroundColor Green
+Get-Item $Exe, $GameDll, $Id |
+    Select-Object Name, @{N="SizeMB";E={[Math]::Round($_.Length / 1MB, 2)}}, LastWriteTime |
+    Format-Table -AutoSize
+) {
+    $Drive = $matches[1].ToLowerInvariant()
+    $RepoPosix = "/$Drive/$($matches[2])"
+}
+$env:SCARLET_REPO_POSIX = $RepoPosix
 $env:SCARLET_JOBS = [string]$Jobs
 $Log = Join-Path $RepoRoot "scarlet_build.log"
 if (Test-Path -LiteralPath $Log) {
