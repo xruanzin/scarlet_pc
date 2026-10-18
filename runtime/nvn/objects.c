@@ -542,7 +542,9 @@ static NvnDescPool *desc_pool_init(uint64_t guest, uint64_t pool, uint64_t off, 
 }
 
 NVN(nvnTexturePoolInitialize) {
-    desc_pool_init(A(0), A(1), A(2), (int)A(3), sizeof(NvnTexEntry), g_texture_pools);
+    NvnDescPool *d = desc_pool_init(A(0), A(1), A(2), (int)A(3), sizeof(NvnTexEntry), g_texture_pools);
+    static unsigned nlog;
+    if (nlog++ < 8) LOG("[nvn] texture pool: %d descriptors\n", d->count);
     RET(1);
 }
 NVN(nvnTexturePoolFinalize) { (void)c; }
@@ -550,17 +552,19 @@ NVN(nvnTexturePoolSetDebugLabel) { (void)c; }
 NVN(nvnTexturePoolGetMemoryPool) { RET(G(uint64_t, A(0), 8)); }
 NVN(nvnTexturePoolGetMemoryOffset) { RET(G(uint64_t, A(0), 16)); }
 NVN(nvnTexturePoolGetSize) { RET(G(uint32_t, A(0), 24)); }
-static void register_texture(Cpu *c) {
+static void register_texture(Cpu *c, bool image) {
     NvnDescPool *d = HOST(NvnDescPool, A(0));
     int id = (int)A(1);
     if (id < 0 || id >= d->count) return;
     NvnTexEntry *e = &((NvnTexEntry *)d->entries)[id];
     e->tex = HOST(NvnTexture, A(2));
     e->has_view = A(3) != 0;
+    e->is_image = image;
+    e->image_seq = ++d->generation;
     if (e->has_view) memcpy(&e->view, AP(3), sizeof e->view);
 }
-NVN(nvnTexturePoolRegisterTexture) { register_texture(c); }
-NVN(nvnTexturePoolRegisterImage) { register_texture(c); }
+NVN(nvnTexturePoolRegisterTexture) { register_texture(c, false); }
+NVN(nvnTexturePoolRegisterImage) { register_texture(c, true); }
 
 NVN(nvnSamplerPoolInitialize) {
     desc_pool_init(A(0), A(1), A(2), (int)A(3), sizeof(NvnSamplerDesc), g_sampler_pools);
