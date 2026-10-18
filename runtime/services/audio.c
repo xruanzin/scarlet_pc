@@ -1110,10 +1110,11 @@ static void *audout_thread(void *arg) {
         if (!SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(a->stream), &dev, &dev_frames) || dev_frames <= 0)
             dev_frames = 1024;
         target = 2 * dev_frames * 2 * (int)ch;  // bytes of s16 at the source rate (close enough at 48 kHz)
-        // Let's Go mixes everything itself into audout: two device periods (~20 ms) of queue left no slack for its
-        // mixer thread and the sound stuttered. Keep at least LARECOMP_AUDOUT_MS (default 60) queued.
+        // Scarlet's lifted CPU has short streaming/job hitches even when the GPU is idle.
+        // Keep enough host audio queued to ride through ordinary ~100 ms spikes; multi-second
+        // stalls are fixed at their CPU source rather than hidden here.
         const char *e = getenv("LARECOMP_AUDOUT_MS");
-        int ms = e ? atoi(e) : 60;
+        int ms = e ? atoi(e) : 120;
         int min_target = (int)((uint64_t)ms * (a->rate ? a->rate : 48000) / 1000) * 2 * (int)ch;
         if (target < min_target) target = min_target;
         LOG("[audout] %u ch: device period %d frames, queue target %d ms\n", ch, dev_frames,
