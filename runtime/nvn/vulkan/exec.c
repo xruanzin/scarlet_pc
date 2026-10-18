@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 
 #include "../../kernel.h"
+#include "../../platform.h"
 #include "shaders.h"
 #include "storage_ranges.h"
 #include "../indirect.h"
@@ -2040,11 +2041,55 @@ static VkDescriptorBufferInfo gmem_info(void) {
 static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
     static int copy = -1;
     if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
-    if (copy || addr < HEAP_BASE) return false;
-    if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
-    if (!gmem_buf || addr + size > HEAP_BASE + gmem_size) return false;
+    if (copy || !size || addr < HEAP_BASE) return false;
+
+    uint64_t rel = addr - HEAP_BASE;
+    if (rel >= HEAP_MAX || size > HEAP_MAX - rel) return false;
+
+    /*
+     * Scarlet allocates important GPU work buffers (notably transform-feedback
+     * output) from its guest-backed StandardAllocator without first growing the
+     * Horizon SetHeapSize region.  kernel_heap_size() is therefore still zero
+     * while valid TF buffers already live hundreds of MiB above HEAP_BASE.
+     *
+     * The old direct path only imported kernel_heap_size(), so those buffers
+     * could never become VkBuffers: every TF begin logged nbuf=0/direct0=0 and
+     * the stream-output pass silently produced no geometry.
+     *
+     * Import enough of the reserved guest window to cover the actual binding.
+     * Grow geometrically to avoid reallocating the external-memory buffer for
+     * every nearby allocation.  Windows reserves this whole guest window but
+     * commits it lazily, so make the range real before importing it.
+     */
+    uint64_t need = (rel + size + 0xFFFFull) & ~0xFFFFull;
+    if (need > gmem_size) {
+        uint64_t known = kernel_heap_size();
+        if (known > need) need = (known + 0xFFFFull) & ~0xFFFFull;
+
+        uint64_t want = need;
+        uint64_t grow = gmem_size ? gmem_size * 2 : (256ull << 20);
+        if (grow < gmem_size || grow > HEAP_MAX) grow = HEAP_MAX;
+        if (want < grow) want = grow;
+        if (want > HEAP_MAX) want = HEAP_MAX;
+
+        if (want != gmem_tried) {
+            gmem_tried = want;
+#ifdef _WIN32
+            plat_commit(HEAP_BASE, want);
+#endif
+            if (!gmem_import(want)) {
+                static _Atomic int import_fail_logged;
+                if (!atomic_exchange(&import_fail_logged, 1))
+                    LOG("[vk] guest direct import could not cover %llx+%llx (want %llu MB); using copy paths where possible\n",
+                        (unsigned long long)addr, (unsigned long long)size,
+                        (unsigned long long)(want >> 20));
+            }
+        }
+    }
+
+    if (!gmem_buf || rel + size > gmem_size) return false;
     *buf = gmem_buf;
-    *off = addr - HEAP_BASE;
+    *off = rel;
     return true;
 }
 bool vk_guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {  // (cbuf_info, above)
