@@ -60,6 +60,20 @@ static void common_state_getter(Service *s, IpcReq *req, IpcResp *resp) {
     case 8: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;   // GetBootMode
     case 9: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;   // GetCurrentFocusState: in focus
     case 13: case 61: resp->copy_handles[resp->ncopy++] = new_event(); break;
+    case 66: {  // SetCpuBoostMode: 0 Normal, 1 FastLoad
+        uint32_t mode = IN(uint32_t, 0);
+        LOG("[am] SetCpuBoostMode %u (%s)\n", mode, mode == 1 ? "FastLoad" : "Normal");
+#ifdef _WIN32
+        plat_set_cpu_boost(mode == 1);
+#endif
+        break;
+    }
+    case 67:  // CancelCpuBoostMode
+#ifdef _WIN32
+        plat_set_cpu_boost(false);
+#endif
+        LOG("[am] CancelCpuBoostMode\n");
+        break;
     case 900: break;  // SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled
     case 60: {  // GetDefaultDisplayResolution
         int w = getenv("LARECOMP_DISPLAY_W") ? atoi(getenv("LARECOMP_DISPLAY_W")) : 1920;
