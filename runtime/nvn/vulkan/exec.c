@@ -1106,7 +1106,8 @@ static void translate_program(void *arg) {
         return;
     }
     if (!p->fi->msl) {
-        LOG("[shader] FS translate failed: %s\n", p->fi->error);
+        LOG("[shader] FS translate failed: %s (code %llx)\n",
+            p->fi->error, (unsigned long long)p->code[1]);
         atomic_store(&p->state, 2);
         return;
     }
