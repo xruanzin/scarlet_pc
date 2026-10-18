@@ -934,6 +934,7 @@ static void begin_pass(void) {
     }
     VkRenderingAttachmentInfo ca[8], da = {0}, sa = {0};
     uint32_t w = 0, minw = UINT32_MAX, minh = UINT32_MAX;  // w: first attachment seen
+    uint32_t pass_layers = 1;
     pass_ncolor = (uint32_t)st.rt.ncolor;
     pass_samples = 1;
     for (int i = 0; i < st.rt.ncolor; i++) {
@@ -962,6 +963,15 @@ static void begin_pass(void) {
         if (ew < minw) minw = ew;
         if (eh < minh) minh = eh;
         pass_samples = b->samples;
+        if (b->base_type == VK_IMAGE_VIEW_TYPE_3D) {
+            uint32_t lv_depth = b->depth >> lv;
+            if (!lv_depth) lv_depth = 1;
+            uint32_t ly0 = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 2) ? st.rt.cview[i].min_layer : 0;
+            uint32_t nly = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 2) && st.rt.cview[i].num_layers
+                         ? st.rt.cview[i].num_layers : lv_depth;
+            if (ly0 < lv_depth && nly > lv_depth - ly0) nly = lv_depth - ly0;
+            if (nly > pass_layers) pass_layers = nly;
+        }
     }
     pass_depth = pass_stencil = VK_FORMAT_UNDEFINED;
     bool has_d = false, has_s = false;
@@ -985,7 +995,7 @@ static void begin_pass(void) {
     }
     if (!w) { pass_sx = pass_sy = 1; minw = minh = 16; }
     pass_w = minw; pass_h = minh;
-    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = 1,
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = pass_layers,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = ca,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
     vkCmdBeginRendering(cb, &ri);
@@ -2621,6 +2631,15 @@ static void draw_(CmdRec *r, bool indexed) {
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     vkey.xfb = st.tf_active && g_vk.transform_feedback;
+    // Scarlet's post-processing renders one instance per Z slice into a 3D
+    // colour-grading LUT. Let the vertex shader route instance N to layer N.
+    for (int i = 0; i < st.rt.ncolor; i++) {
+        NvnTexture *rt = st.rt.color[i];
+        if (rt && rt->target == 2 && rt->depth > 1) {
+            vkey.layer_from_instance = 1;
+            break;
+        }
+    }
     if (vkey.xfb && st.program) {
         const NvnShaderStage *vs = &st.program->stages[0];
         // Scarlet's stream-output programs captured in graphics diagnostics all
