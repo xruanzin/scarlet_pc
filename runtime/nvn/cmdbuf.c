@@ -12,11 +12,13 @@
 // Expanded host records must not consume the game's real NVN command-memory
 // budget. Every recording gets a tiny opaque handle in guest memory and the
 // actual CmdRec stream lives in host segments chained from that handle.
-#define HOSTSEG_SIZE (256u << 10)
+#define HOSTSEG_SIZE (128u << 10)
 #define HOSTSEG_CAP  (256u << 20)
 typedef struct {
     uint8_t *mem;
     bool busy;
+    bool pending_release;
+    uint32_t refs;
     uint64_t origin_lo, origin_hi;  // guest handle slot that owns this segment chain
 } HostSeg;
 static HostSeg *g_hostseg;
@@ -26,9 +28,16 @@ static pthread_mutex_t g_hostseg_lock = PTHREAD_MUTEX_INITIALIZER;
 static void hostseg_release_range(uint64_t lo, uint64_t hi) {
     if (!lo || hi <= lo) return;
     pthread_mutex_lock(&g_hostseg_lock);
-    for (int i = 0; i < g_nhostseg; i++)
-        if (g_hostseg[i].busy && g_hostseg[i].origin_hi > lo && g_hostseg[i].origin_lo < hi)
-            g_hostseg[i].busy = false;
+    for (int i = 0; i < g_nhostseg; i++) {
+        HostSeg *s = &g_hostseg[i];
+        if (!s->busy || s->origin_hi <= lo || s->origin_lo >= hi) continue;
+        if (s->refs) s->pending_release = true;
+        else {
+            s->busy = false;
+            s->pending_release = false;
+            s->origin_lo = s->origin_hi = 0;
+        }
+    }
     pthread_mutex_unlock(&g_hostseg_lock);
 }
 
@@ -37,8 +46,9 @@ static uint64_t hostseg_take(NvnCmdBuf *cb) {
     uint8_t *mem = NULL;
     pthread_mutex_lock(&g_hostseg_lock);
     for (int i = 0; i < g_nhostseg; i++) {
-        if (!g_hostseg[i].busy) {
+        if (!g_hostseg[i].busy && !g_hostseg[i].refs) {
             g_hostseg[i].busy = true;
+            g_hostseg[i].pending_release = false;
             g_hostseg[i].origin_lo = cb->host_origin_lo;
             g_hostseg[i].origin_hi = cb->host_origin_hi;
             mem = g_hostseg[i].mem;
@@ -55,7 +65,7 @@ static uint64_t hostseg_take(NvnCmdBuf *cb) {
             mem = malloc(HOSTSEG_SIZE);
             if (mem) {
                 g_hostseg[g_nhostseg++] = (HostSeg){
-                    .mem = mem, .busy = true,
+                    .mem = mem, .busy = true, .pending_release = false, .refs = 0,
                     .origin_lo = cb->host_origin_lo, .origin_hi = cb->host_origin_hi
                 };
             }
@@ -69,6 +79,75 @@ static uint64_t hostseg_take(NvnCmdBuf *cb) {
         LOG("[nvn] expanded command records -> host segments (take %llu, pool %d x %u KB)\n",
             (unsigned long long)n, pool, HOSTSEG_SIZE >> 10);
     return (uint64_t)(uintptr_t)mem;
+}
+
+uint64_t nvn_cmdstream_pin(uint64_t handle) {
+    if (!handle) return 0;
+    uint64_t resolved = handle;
+    pthread_mutex_lock(&g_hostseg_lock);
+
+    bool matched = false;
+    // Normal NVN handle: a tiny guest CMD_JUMP whose whole host chain shares
+    // the same origin range. Pin every segment in that chain.
+    for (int i = 0; i < g_nhostseg; i++) {
+        HostSeg *s = &g_hostseg[i];
+        if (!s->busy || !s->origin_lo || handle < s->origin_lo || handle >= s->origin_hi) continue;
+        s->refs++;
+        matched = true;
+    }
+    if (matched) {
+        const CmdRec *r = (const CmdRec *)(uintptr_t)handle;
+        if (r->op == CMD_JUMP && r->x[0]) resolved = r->x[0];
+    } else {
+        // Host-only fallback / already-resolved handle: pin the segment which
+        // contains the address. Chains with a guest origin are already protected
+        // by the queue-level pin; this extra ref protects the active segment too.
+        for (int i = 0; i < g_nhostseg; i++) {
+            HostSeg *s = &g_hostseg[i];
+            uint64_t lo = (uint64_t)(uintptr_t)s->mem, hi = lo + HOSTSEG_SIZE;
+            if (s->busy && handle >= lo && handle < hi) {
+                s->refs++;
+                break;
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&g_hostseg_lock);
+    return resolved;
+}
+
+void nvn_cmdstream_unpin(uint64_t handle) {
+    if (!handle) return;
+    pthread_mutex_lock(&g_hostseg_lock);
+
+    bool matched = false;
+    for (int i = 0; i < g_nhostseg; i++) {
+        HostSeg *s = &g_hostseg[i];
+        if (!s->origin_lo || handle < s->origin_lo || handle >= s->origin_hi) continue;
+        if (s->refs) s->refs--;
+        matched = true;
+        if (!s->refs && s->pending_release) {
+            s->busy = false;
+            s->pending_release = false;
+            s->origin_lo = s->origin_hi = 0;
+        }
+    }
+    if (!matched) {
+        for (int i = 0; i < g_nhostseg; i++) {
+            HostSeg *s = &g_hostseg[i];
+            uint64_t lo = (uint64_t)(uintptr_t)s->mem, hi = lo + HOSTSEG_SIZE;
+            if (handle < lo || handle >= hi) continue;
+            if (s->refs) s->refs--;
+            if (!s->refs && s->pending_release) {
+                s->busy = false;
+                s->pending_release = false;
+                s->origin_lo = s->origin_hi = 0;
+            }
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&g_hostseg_lock);
 }
 
 static NvnCmdBuf *cb_of(uint64_t guest) { return HOST(NvnCmdBuf, guest); }
