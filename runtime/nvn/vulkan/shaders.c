@@ -160,7 +160,7 @@ VkShaderModule vk_compile_glsl(const char *src, int stage, const char *name) {
 // ================================================================== reflection
 // Just enough SPIR-V parsing to list the descriptor bindings a module declares (set, binding, type).
 enum { OP_TYPE_IMAGE = 25, OP_TYPE_SAMPLER = 26, OP_TYPE_SAMPLED_IMAGE = 27, OP_TYPE_ARRAY = 28, OP_TYPE_RUNTIME_ARRAY = 29,
-       OP_TYPE_STRUCT = 30, OP_TYPE_POINTER = 32, OP_VARIABLE = 59, OP_DECORATE = 71 };
+       OP_TYPE_STRUCT = 30, OP_TYPE_POINTER = 32, OP_CONSTANT = 43, OP_VARIABLE = 59, OP_DECORATE = 71 };
 enum { DEC_BLOCK = 2, DEC_BUFFER_BLOCK = 3, DEC_BINDING = 33, DEC_SET = 34 };
 enum { SC_UNIFORM_CONSTANT = 0, SC_UNIFORM = 2, SC_STORAGE_BUFFER = 12 };
 
@@ -169,7 +169,9 @@ int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *out, int max) {
     uint32_t bound = spv[3];
     int32_t *binding = malloc(bound * sizeof *binding), *set = malloc(bound * sizeof *set);
     uint8_t *flags = calloc(bound, 1);    // 1 Block, 2 BufferBlock
+    uint8_t *image_sampled = calloc(bound, 1); // OpTypeImage Sampled: 1 sampled, 2 storage
     uint32_t *op = calloc(bound, sizeof *op), *ref = calloc(bound, sizeof *ref), *sc = calloc(bound, sizeof *sc);
+    uint32_t *arr_len_id = calloc(bound, sizeof *arr_len_id), *constant = calloc(bound, sizeof *constant);
     for (uint32_t i = 0; i < bound; i++) binding[i] = set[i] = -1;
     for (size_t i = 5; i < n;) {
         uint32_t wc = spv[i] >> 16, o = spv[i] & 0xFFFF;
@@ -182,9 +184,13 @@ int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *out, int max) {
             else if (w[2] == DEC_BUFFER_BLOCK) flags[w[1]] |= 2;
         } else if ((o == OP_TYPE_IMAGE || o == OP_TYPE_SAMPLER || o == OP_TYPE_SAMPLED_IMAGE || o == OP_TYPE_STRUCT) && wc >= 2 && w[1] < bound) {
             op[w[1]] = o;
+            if (o == OP_TYPE_IMAGE && wc >= 8) image_sampled[w[1]] = (uint8_t)w[7];
         } else if ((o == OP_TYPE_ARRAY || o == OP_TYPE_RUNTIME_ARRAY) && wc >= 3 && w[1] < bound) {
             op[w[1]] = o;
             ref[w[1]] = w[2];
+            if (o == OP_TYPE_ARRAY && wc >= 4) arr_len_id[w[1]] = w[3];
+        } else if (o == OP_CONSTANT && wc >= 4 && w[2] < bound) {
+            constant[w[2]] = w[3];
         } else if (o == OP_TYPE_POINTER && wc >= 4 && w[1] < bound) {
             op[w[1]] = o;
             sc[w[1]] = w[2];
@@ -200,18 +206,25 @@ int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *out, int max) {
     for (uint32_t id = 0; id < bound && cnt < max; id++) {
         if (op[id] != OP_VARIABLE || binding[id] < 0) continue;
         uint32_t t = ref[ref[id]];  // pointee
-        while (t < bound && (op[t] == OP_TYPE_ARRAY || op[t] == OP_TYPE_RUNTIME_ARRAY)) t = ref[t];
+        uint32_t count = 1;
+        while (t < bound && (op[t] == OP_TYPE_ARRAY || op[t] == OP_TYPE_RUNTIME_ARRAY)) {
+            if (op[t] == OP_TYPE_ARRAY) {
+                uint32_t n = arr_len_id[t] < bound ? constant[arr_len_id[t]] : 0;
+                if (n) count *= n;
+            }
+            t = ref[t];
+        }
         VkDescriptorType dt;
         if (t >= bound) continue;
         if (op[t] == OP_TYPE_SAMPLED_IMAGE) dt = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        else if (op[t] == OP_TYPE_IMAGE) dt = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        else if (op[t] == OP_TYPE_IMAGE) dt = image_sampled[t] == 2 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         else if (op[t] == OP_TYPE_SAMPLER) dt = VK_DESCRIPTOR_TYPE_SAMPLER;
         else if (op[t] == OP_TYPE_STRUCT && (sc[id] == SC_STORAGE_BUFFER || (flags[t] & 2))) dt = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         else if (op[t] == OP_TYPE_STRUCT && sc[id] == SC_UNIFORM) dt = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         else continue;
-        out[cnt++] = (VkBindingInfo){(uint32_t)(set[id] < 0 ? 0 : set[id]), (uint32_t)binding[id], dt};
+        out[cnt++] = (VkBindingInfo){(uint32_t)(set[id] < 0 ? 0 : set[id]), (uint32_t)binding[id], dt, count ? count : 1};
     }
-    free(binding); free(set); free(flags); free(op); free(ref); free(sc);
+    free(binding); free(set); free(flags); free(image_sampled); free(op); free(ref); free(sc); free(arr_len_id); free(constant);
     return cnt;
 }
 
@@ -219,7 +232,7 @@ VkDescriptorSetLayout vk_set_layout(const VkBindingInfo *b, int n, uint32_t set,
     VkDescriptorSetLayoutBinding lb[96];
     uint32_t k = 0;
     for (int i = 0; i < n && k < 96; i++)
-        if (b[i].set == set) lb[k++] = (VkDescriptorSetLayoutBinding){b[i].binding, b[i].type, 1, stages, NULL};
+        if (b[i].set == set) lb[k++] = (VkDescriptorSetLayoutBinding){b[i].binding, b[i].type, b[i].count ? b[i].count : 1, stages, NULL};
     VkDescriptorSetLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = k, .pBindings = lb};
     VkDescriptorSetLayout l;
     VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &ci, NULL, &l));
