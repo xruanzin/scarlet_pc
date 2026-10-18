@@ -216,9 +216,28 @@ void vk_gpuprof_report(void) {
 // Submit the pending work (if any). wait/signal: binary semaphores for presentation (may be null).
 void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra) {
     (void)extra;
+    static _Atomic(uintptr_t) submit_owner;
+    static _Atomic(unsigned) submit_active;
+    static _Atomic(uint64_t) submit_overlap_count;
+    uintptr_t submit_me = (uintptr_t)pthread_self();
+    unsigned submit_before = atomic_fetch_add_explicit(&submit_active, 1, memory_order_acq_rel);
+    uintptr_t submit_prev = atomic_load_explicit(&submit_owner, memory_order_acquire);
+    if (!submit_before) atomic_store_explicit(&submit_owner, submit_me, memory_order_release);
+    else if (submit_prev != submit_me) {
+        uint64_t n = atomic_fetch_add_explicit(&submit_overlap_count, 1, memory_order_relaxed) + 1;
+        if (n <= 64 || !(n & 255))
+            LOG("[vk-thread] !!! overlapping vk_submit_extra #%llu: tid=%llx owner=%llx active=%u frame=%llu !!!\n",
+                (unsigned long long)n, (unsigned long long)submit_me,
+                (unsigned long long)submit_prev, submit_before + 1,
+                (unsigned long long)vk_frame_counter());
+    }
     vk_end_pass();
     Sub *s = sub();
-    if (!s->main_begun && !s->upload_begun && !wait && !signal) return;
+    if (!s->main_begun && !s->upload_begun && !wait && !signal) {
+        unsigned left = atomic_fetch_sub_explicit(&submit_active, 1, memory_order_acq_rel);
+        if (left == 1) atomic_store_explicit(&submit_owner, 0, memory_order_release);
+        return;
+    }
     VkCommandBufferSubmitInfo cbs[2];
     int n = 0;
     if (s->upload_begun) {
@@ -256,6 +275,8 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     cum_submits++;
     ring_retire();
     vk_collect_dead();
+    unsigned left = atomic_fetch_sub_explicit(&submit_active, 1, memory_order_acq_rel);
+    if (left == 1) atomic_store_explicit(&submit_owner, 0, memory_order_release);
 }
 
 void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
@@ -3673,7 +3694,41 @@ static void exec_list(uint64_t handle, int depth) {
     }
 }
 
+// Scarlet can submit NVN work from more than one guest thread. The Vulkan
+// backend was inherited from a runtime where command execution was effectively
+// single-threaded, and almost all renderer state below is global. Diagnose real
+// overlap at the executor boundary instead of merely remembering the last thread
+// that called vk_cmd() (which would produce false positives after ownership ended).
+static _Atomic(uintptr_t) vk_exec_owner;
+static _Atomic(unsigned) vk_exec_active;
+static _Atomic(uint64_t) vk_exec_overlap_count;
+
+static void vk_exec_diag_enter(uint64_t handle) {
+    uintptr_t me = (uintptr_t)pthread_self();
+    unsigned before = atomic_fetch_add_explicit(&vk_exec_active, 1, memory_order_acq_rel);
+    uintptr_t owner = atomic_load_explicit(&vk_exec_owner, memory_order_acquire);
+    if (!before) {
+        atomic_store_explicit(&vk_exec_owner, me, memory_order_release);
+        return;
+    }
+    if (owner != me) {
+        uint64_t n = atomic_fetch_add_explicit(&vk_exec_overlap_count, 1, memory_order_relaxed) + 1;
+        if (n <= 64 || !(n & 255))
+            LOG("[vk-thread] !!! overlapping backend_execute #%llu: tid=%llx owner=%llx active=%u handle=%llx frame=%llu !!!\n",
+                (unsigned long long)n, (unsigned long long)me, (unsigned long long)owner,
+                before + 1, (unsigned long long)handle,
+                (unsigned long long)vk_frame_counter());
+    }
+}
+
+static void vk_exec_diag_leave(void) {
+    unsigned before = atomic_fetch_sub_explicit(&vk_exec_active, 1, memory_order_acq_rel);
+    if (before == 1)
+        atomic_store_explicit(&vk_exec_owner, 0, memory_order_release);
+}
+
 void backend_execute(uint64_t handle) {
+    vk_exec_diag_enter(handle);
     PROF_T0();
     if (ip_enabled()) ip_note_list(handle);
     exec_list(handle, 0);
@@ -3683,6 +3738,7 @@ void backend_execute(uint64_t handle) {
     if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
     if (sync_submit) renderer_flush();
     else renderer_submit();
+    vk_exec_diag_leave();
 }
 
 // ================================================================== frame interpolation (prototype)
