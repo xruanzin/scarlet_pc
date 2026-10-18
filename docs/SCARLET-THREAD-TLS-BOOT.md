@@ -31,6 +31,43 @@ For the general AArch64 writable thread-pointer convention, see the primary
 The diagnosis above comes from this port's code and the supplied register dump;
 it does not assume that the entire Horizon TLS layout is System V compatible.
 
+## Follow-up: the SDK path replaces the bootstrap pointer
+
+The subsequent `scarlet_boot(20261018-024121).log` shows both:
+
+```text
+[kernel] main thread TLS: TPIDR_EL0=7090100000 TPIDRRO_EL0=7090000000 bootstrap=0x2000 bytes
+guest: ... tpidr=0 tpidrro=7090000000
+```
+
+The bootstrap allocation was loaded, but the writable pointer became zero
+later in initialization and the malloc fault persists. This means the
+creation-only change is insufficient for the real boot, despite passing the
+isolated malloc-access test. The log does not identify the guest instruction
+that replaced the pointer or establish the intended rtld/SDK TLS contract.
+
+Collect that missing evidence directly from the matching extracted NSOs:
+
+```powershell
+git pull --ff-only origin scarlet-bootstrap
+.\.venv\Scripts\python.exe .\tools\scarlet_tls_report.py "D:\Pokemon Scarlet\Extracted\Base\exefs" --output .\scarlet_tls_report.txt
+```
+
+The report lists every `MSR TPIDR_EL0,Xn` site, its instruction context,
+candidate function starts/callers, available libc startup symbols, SDK DT_INIT,
+and the function address observed in x0 at the no-op `rtld_mark` callback. That
+argument alone does not establish the callback's intended semantics. The
+fixed-address contexts are enabled only for the SDK Build ID from the log.
+The report distinguishes candidate instructions from proof of execution.
+
+No SDK regeneration, runtime rebuild or game execution is needed to collect
+this report. The tool reads NSOs and writes diagnostic text outside ExeFS; it
+does not change the executable, reset TLS on every read, or suppress the crash.
+Use its output to locate the missing initialization/registration step before
+another semantic patch. Synthetic tests verify exact MRS/MSR discrimination,
+zero-register writes, direct callers, Build-ID scoping, unchanged input hashes,
+and rejection of an output path that would overwrite a game file.
+
 ## Runtime change
 
 - Each newly created guest thread receives its own zero-initialized 8 KiB
