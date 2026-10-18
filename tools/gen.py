@@ -520,6 +520,8 @@ def main():
     ap.add_argument('--chunk-bytes', type=int, default=1500000)  # and about this much C (even compile times)
     ap.add_argument('--big-fn', type=int, default=100000)  # bytes of C from which a function gets its own file
     ap.add_argument('--limit', type=int, default=0)
+    ap.add_argument('--extra-entry', action='append', default=[],
+                    help='additional absolute guest code entry (repeatable; hex accepted)')
     ap.add_argument('--trace-stores', action='store_true')  # research build (docs/DEPURACAO.md, LARECOMP_TRACE_STORES)
     ap.add_argument('--simd', choices=('asm', 'c'),
                     default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
@@ -547,6 +549,11 @@ def main():
     # Partition text into functions; any branch/call target outside its function becomes a new
     # boundary (splitting the containing function) until a fixpoint is reached.
     start_set = set(starts)
+    for raw in args.extra_entry:
+        a = int(raw, 0)
+        if not m.in_text(a):
+            raise SystemExit(f'--extra-entry {raw}: outside {args.name} .text')
+        start_set.add(a)
     for i, w in enumerate(m.words):
         if (w & 0xFC000000) == 0x94000000:
             t = m.lo + i * 4 + sext26(w) * 4
