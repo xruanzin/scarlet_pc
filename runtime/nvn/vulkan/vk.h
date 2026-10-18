@@ -36,7 +36,7 @@ typedef struct {
     VkPipelineCache pcache;
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
-    bool custom_border, divisor, host_import;
+    bool custom_border, divisor, host_import, transform_feedback;
     bool bindless_storage;    // dynamic/non-uniform storage-image descriptor indexing
     uint8_t bindless_storage_slots; // slots per write/atomic array, <= MAXWELL_BINDLESS_IMAGES
     // window
