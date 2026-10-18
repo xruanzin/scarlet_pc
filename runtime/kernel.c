@@ -983,6 +983,28 @@ void kernel_dump_guest_threads(void) {
             (unsigned long long)t->wait_mutex,
             t->wait_tag, t->in_sync_wait, t->cur_svc,
             (unsigned long long)t->cur_svc_pc);
+        if (t->wait_kind == WAIT_MUTEX) {
+            // who owns the mutex this thread waits on, and what that owner is doing: a lost wake-up or a
+            // lock held by a thread that waits for us shows up here
+            uint32_t v = __atomic_load_n((uint32_t *)(uintptr_t)t->wait_addr, __ATOMIC_SEQ_CST);
+            uint32_t oh = v & ~WAITERS_BIT;
+            KThread *o = NULL;
+            for (KThread *q = g_threads; q; q = q->anext) if (q->handle == oh) { o = q; break; }
+            LOG("[guest-thread]     waits mutex %llx word=%08x owner h=%x -> %s id=%llu finished=%d svc=%d wait=%d sync=%d\n",
+                (unsigned long long)t->wait_addr, v, oh, o ? "thread" : "NO SUCH THREAD",
+                (unsigned long long)(o ? o->id : 0), o ? o->finished : -1, o ? o->cur_svc : -1,
+                o ? (int)o->wait_kind : -1, o ? o->in_sync_wait : -1);
+        }
+        if (t->in_sync_wait && t->cur_svc == 0x18) {
+            uint32_t *hs = (uint32_t *)(uintptr_t)t->cur_svc_args[1];
+            int n = (int)t->cur_svc_args[2];
+            LOG("[guest-thread]     WaitSynchronization count=%d timeout=%lld:", n, (long long)t->cur_svc_args[3]);
+            for (int i = 0; i < n && i < 8; i++) {
+                KObject *ko = (hs[i] && t_cur) ? handle_get(hs[i]) : (hs[i] >= 0x101 && hs[i] < 0x100 + MAX_HANDLES ? handles[hs[i] - 0x100] : NULL);
+                LOG(" %x%s", hs[i], ko ? (ko->signaled ? "(signaled)" : "(not signaled)") : "(none)");
+            }
+            LOG("\n");
+        }
         // Guest call stack (AArch64 frame-record chain from x29), the same walk LARECOMP_THREAD_DUMP does: it shows
         // which guest function each blocked thread is waiting inside, i.e. what a hung scene is waiting for.
         uint64_t fp = t->cpu.x[29];
