@@ -69,10 +69,12 @@ typedef struct NvnShaderStage {
     const uint8_t *control;   // control section
     uint32_t const_offset, const_size;  // compiler constants (bound as c1), within the code blob
     void *backend;
+    void *diag_snapshot;      // opt-in immutable control/header copy, owned by this stage
 } NvnShaderStage;
 
 // Opt-in, bounded local diagnostics: immutable shader controls and TF API calls.
-void nvn_diag_shader(const NvnShaderStage *stage);
+void nvn_diag_shader(NvnShaderStage *stage);
+void nvn_diag_shader_release(NvnShaderStage *stage);
 void nvn_diag_tf_call(const char *name, const Cpu *cpu);
 
 typedef struct NvnProgram {
@@ -110,7 +112,12 @@ typedef struct {
     uint64_t guest;       // the guest NVNcommandBuffer*
     uint64_t obj_tag;     // frame interpolation: the game object the list's last CMD_OBJECT named (cmdbuf.c)
     uint64_t host_origin_lo, host_origin_hi;  // guest handle slot owning the host segment chain
+    NvnProgram *diag_programs[6]; // diagnostic-only bindings; never used by the executor
+    bool diag_tf_active;
 } NvnCmdBuf;
+
+void nvn_diag_bind_program(NvnCmdBuf *cb, NvnProgram *program, uint32_t mask);
+void nvn_diag_tf_state(NvnCmdBuf *cb, const char *name);
 
 // One recorded command: header, the call's integer and float arguments, then copied data.
 typedef struct {

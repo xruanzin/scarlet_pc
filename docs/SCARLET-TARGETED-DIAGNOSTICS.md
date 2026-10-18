@@ -27,10 +27,18 @@ counters together or subtract all waits from the executor as one CPU budget.
   are not timed by this probe.
 - `-GraphicsDiagnostics` saves a known shader-control prefix (0x704 bytes) and
   the NVN/SPH header (0x80 bytes), plus constants offsets and sizes. It captures
-  up to 128 distinct non-fragment graphics shaders and 128 TF API calls.
+  up to 128 initial non-fragment graphics shaders and 128 TF API calls. An
+  independent quota selects up to 128 programs bound during TF, including
+  programs bound before Begin or after Begin/Resume. Early UI programs cannot
+  consume the TF quota.
 - Shader controls are deduplicated by code/control/stage. The collector does
   not follow embedded pointers or guess larger allocations. Normal launches
   disable these dumps and the added per-call timing.
+- With diagnostics enabled, SetShaders retains an immutable copy of each
+  non-fragment graphics stage's known prefix/header, bounded to 16 MiB across
+  live programs. Selection at BindProgram/Begin uses that copy rather than
+  dereferencing caller-owned control memory later. Replacement and Finalize
+  release it; allocation/budget exhaustion is reported in the log.
 - On exit the launcher collects this run's log, the captured controls, the
   no-position GLSL/SASS files named in that log and an executable SHA-256 into
   a fresh timestamped ZIP. Older diagnostic files are not included by globbing
@@ -57,6 +65,9 @@ path the launcher prints after exit:
 
 - Native tests verify control-prefix sizes, disabled-path non-dereference,
   deduplication, shader/call caps and exclusion of fragment/compute controls.
+  They also fill the initial quota before binding late TF programs, overwrite
+  caller control bytes before binding, and check both binding orders and the
+  separate quota.
 - Native HLE tests verify preservation of function results and PC changes,
   nested-call accounting, 16,000 concurrent calls and interval reset.
 - PowerShell 7 tests exercise normal and abnormal process exit, both profiling

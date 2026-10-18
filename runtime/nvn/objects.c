@@ -703,7 +703,11 @@ NvnDescPool *nvn_find_pool(NvnDescPool **reg, uint64_t guest_pool) {
 
 // ================================================================== programs
 NVN(nvnProgramInitialize) { SET_HOST(A(0), calloc(1, sizeof(NvnProgram))); RET(1); }
-NVN(nvnProgramFinalize) { g_nvn_destroyed++; free(HOST(NvnProgram, A(0))); SET_HOST(A(0), 0); }
+NVN(nvnProgramFinalize) {
+    NvnProgram *p = HOST(NvnProgram, A(0));
+    if (p) for (int i = 0; i < 6; i++) nvn_diag_shader_release(&p->stages[i]);
+    g_nvn_destroyed++; free(p); SET_HOST(A(0), 0);
+}
 NVN(nvnProgramSetDebugLabel) { (void)c; }
 NVN(nvnProgramSetSampleShading) { (void)c; }
 NVN(nvnProgramSetSubroutineLinkage) { RET(1); }
@@ -711,6 +715,7 @@ static void set_shaders(Cpu *c, int stride) {
     NvnProgram *p = HOST(NvnProgram, A(0));
     int n = (int)A(1);
     const uint8_t *data = AP(2);  // NVNshaderData[n] = {u64 data (GPU addr), const void* control}
+    for (int i = 0; i < 6; i++) nvn_diag_shader_release(&p->stages[i]);
     memset(p->stages, 0, sizeof p->stages);
     p->stage_mask = 0;
     p->backend = NULL;

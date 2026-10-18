@@ -14,6 +14,7 @@
 // APIs remain unimplemented; report their actual use once per entry point so
 // a missing model is not incorrectly diagnosed as a texture/driver problem.
 #define TF_UNIMPLEMENTED(name) NVN(name) { \
+    nvn_diag_tf_state(cb_of(A(0)), #name); \
     nvn_diag_tf_call(#name, c); \
     static atomic_bool reported; \
     if (!atomic_exchange_explicit(&reported, true, memory_order_relaxed)) \
@@ -387,6 +388,8 @@ NVN(nvnCommandBufferBeginRecording) {
     }
     NvnCmdBuf *cb = cb_of(A(0));
     cb->obj_tag = 0;
+    memset(cb->diag_programs, 0, sizeof cb->diag_programs);
+    cb->diag_tf_active = false;
     cb->host_origin_lo = cb->host_origin_hi = 0;
 
     // Request the next ring chunk before marking the buffer recording. That
@@ -486,6 +489,7 @@ NVN(nvnCommandBufferBindProgram) {
     CmdRec *r = record(c, CMD_BIND_PROGRAM, 0, &s);
     r->x[0] = s.x[1] ? (uint64_t)(uintptr_t)HOST(NvnProgram, s.x[1]) : 0;  // host program (0: unbind the stages)
     r->x[1] = s.x[2];                                                      // NVNshaderStageBits
+    nvn_diag_bind_program(cb_of(s.x[0]), (NvnProgram *)(uintptr_t)r->x[0], (uint32_t)s.x[2]);
 }
 NVN(nvnCommandBufferBindBlendState) { record_copy(c, CMD_BIND_BLEND, 1, 8); }
 NVN(nvnCommandBufferBindChannelMaskState) { record_copy(c, CMD_BIND_CHANNEL_MASK, 1, 4); }

@@ -149,6 +149,7 @@ typedef struct StdAllocRec {
     uint64_t addr;
     uint64_t size;
     uint64_t align;
+    uint64_t capacity;  // reserved span; size remains the caller-visible requested size
     // all-list is only for reset; hash chain is the hot lookup path.
     struct StdAllocRec *next, *prev, *hnext;
 } StdAllocRec;
@@ -167,6 +168,27 @@ static StdAllocRec *g_std_hash[STD_REC_HASH];
 static StdFreeRec *g_std_free_bins[STD_FREE_BINS];
 static uint64_t g_std_free_bytes;
 static pthread_mutex_t g_std_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// The old split-span lists accumulate tiny alignment fragments and search them
+// under one global lock on every small allocation. Scarlet's HLE profile reports
+// seconds in these APIs during customization, including lock waiting. Keep exact
+// size/alignment classes, reusing their metadata as well as memory.
+// The cache is shared, so cross-thread frees do not strand memory in TLS.
+#define STD_SMALL_SIZES 256             // 16-byte classes through 4096 bytes
+#define STD_SMALL_ALIGNS 9              // alignments 16, 32, ... 4096
+#define STD_SMALL_CLASSES (STD_SMALL_SIZES * STD_SMALL_ALIGNS)
+#define STD_SMALL_CLASS_LIMIT 2048
+#define STD_SMALL_CACHE_LIMIT (64ull << 20)
+static StdAllocRec *g_std_small[STD_SMALL_CLASSES];
+static uint16_t g_std_small_count[STD_SMALL_CLASSES];
+static uint64_t g_std_small_bytes;
+
+static int std_small_class(uint64_t capacity, uint64_t align) {
+    if (!capacity || capacity > 4096 || (capacity & 15) || align < 16 || align > 4096 || (align & (align - 1))) return -1;
+    int a = 0;
+    for (uint64_t v = align; v > 16; v >>= 1) a++;
+    return a * STD_SMALL_SIZES + (int)(capacity / 16) - 1;
+}
 
 static inline uint32_t std_rec_hash(uint64_t addr) {
     return (uint32_t)(((addr >> 4) * 11400714819323198485ull) >> (64 - 17));
@@ -253,29 +275,40 @@ static void std_free_insert_locked(uint64_t addr, uint64_t size) {
 
 static uint64_t std_guest_alloc(uint64_t size, uint64_t align) {
     if (!size) size = 1;
+    if (size > UINT64_MAX - 15) return 0;
+    uint64_t capacity = (size + 15) & ~15ull;
     align = std_align(align);
 
     pthread_mutex_lock(&g_std_lock);
 
     uint64_t addr = 0;
-    // Segregated free lists keep the common allocate/free path O(1)-ish even
-    // after the open world has churned through thousands of objects. Search
-    // only bins that can contain the requested size; alignment is checked per span.
-    int first_bin = std_free_bin(size);
+    StdAllocRec *r = NULL;
+    int small = std_small_class(capacity, align);
+    if (small >= 0 && g_std_small[small]) {
+        r = g_std_small[small];
+        g_std_small[small] = r->next;
+        g_std_small_count[small]--;
+        g_std_small_bytes -= capacity;
+        g_std_free_bytes -= capacity;
+        addr = r->addr;
+    }
+    // Cache misses and large objects use the general free spans. These searches
+    // remain linear within a bin; check alignment on each candidate span.
+    int first_bin = std_free_bin(capacity);
     for (int b = first_bin; b < STD_FREE_BINS && !addr; b++) {
         StdFreeRec **pp = &g_std_free_bins[b];
         while (*pp) {
             StdFreeRec *f = *pp;
             uint64_t a = align_up_u64(f->addr, align);
             uint64_t prefix = a - f->addr;
-            if (prefix <= f->size && size <= f->size - prefix) {
+            if (prefix <= f->size && capacity <= f->size - prefix) {
                 uint64_t old_size = f->size;
                 uint64_t old_end = f->addr + f->size;
                 *pp = f->next;
                 free(f);
                 if (g_std_free_bytes >= old_size) g_std_free_bytes -= old_size;
 
-                uint64_t suffix_addr = a + size;
+                uint64_t suffix_addr = a + capacity;
                 uint64_t suffix = old_end - suffix_addr;
                 if (prefix) std_free_insert_locked(a - prefix, prefix);
                 if (suffix) std_free_insert_locked(suffix_addr, suffix);
@@ -288,23 +321,24 @@ static uint64_t std_guest_alloc(uint64_t size, uint64_t align) {
 
     if (!addr) {
         uint64_t a = align_up_u64(g_std_next, align);
-        if (a < STD_GUEST_BASE || a > STD_GUEST_LIMIT || size > STD_GUEST_LIMIT - a) {
+        if (a < STD_GUEST_BASE || a > STD_GUEST_LIMIT || capacity > STD_GUEST_LIMIT - a) {
             pthread_mutex_unlock(&g_std_lock);
             return 0;
         }
         addr = a;
-        g_std_next = a + size;
+        g_std_next = a + capacity;
     }
 
-    StdAllocRec *r = malloc(sizeof *r);
+    if (!r) r = malloc(sizeof *r);
     if (!r) {
-        std_free_insert_locked(addr, size);
+        std_free_insert_locked(addr, capacity);
         pthread_mutex_unlock(&g_std_lock);
         return 0;
     }
     r->addr = addr;
     r->size = size;
     r->align = align;
+    r->capacity = capacity;
     std_rec_insert_locked(r);
     g_std_live_bytes += size;
 
@@ -314,7 +348,7 @@ static uint64_t std_guest_alloc(uint64_t size, uint64_t align) {
     //
     // Do this while holding g_std_lock: another guest thread must not observe an
     // advanced commit frontier until VirtualAlloc has actually completed.
-    uint64_t end = addr + size;
+    uint64_t end = addr + capacity;
     if (end > g_std_committed_to) {
         uint64_t want = align_up_u64(end, STD_COMMIT_GRANULE);
         if (want > STD_GUEST_LIMIT) want = STD_GUEST_LIMIT;
@@ -339,7 +373,18 @@ static void std_guest_free(uint64_t addr) {
     }
     std_rec_remove_locked(r);
     if (g_std_live_bytes >= r->size) g_std_live_bytes -= r->size;
-    std_free_insert_locked(r->addr, r->size);
+    int small = std_small_class(r->capacity, r->align);
+    if (small >= 0 && g_std_small_count[small] < STD_SMALL_CLASS_LIMIT &&
+        r->capacity <= STD_SMALL_CACHE_LIMIT - g_std_small_bytes) {
+        r->next = g_std_small[small];
+        g_std_small[small] = r;
+        g_std_small_count[small]++;
+        g_std_small_bytes += r->capacity;
+        g_std_free_bytes += r->capacity;
+        pthread_mutex_unlock(&g_std_lock);
+        return;
+    }
+    std_free_insert_locked(r->addr, r->capacity);
     pthread_mutex_unlock(&g_std_lock);
     free(r);
 }
@@ -354,6 +399,13 @@ static uint64_t std_guest_realloc(uint64_t addr, uint64_t size) {
     if (r) {
         old_size = r->size;
         align = r->align;
+        if (size <= r->capacity) {
+            g_std_live_bytes -= r->size;
+            g_std_live_bytes += size;
+            r->size = size;
+            pthread_mutex_unlock(&g_std_lock);
+            return addr;
+        }
     }
     pthread_mutex_unlock(&g_std_lock);
     if (!r) return 0;
@@ -379,10 +431,15 @@ RT_ON_RESET(stdalloc_reset) {
     pthread_mutex_lock(&g_std_lock);
     StdAllocRec *r = g_std_recs;
     StdFreeRec *free_bins[STD_FREE_BINS];
+    StdAllocRec *small_bins[STD_SMALL_CLASSES];
     memcpy(free_bins, g_std_free_bins, sizeof free_bins);
+    memcpy(small_bins, g_std_small, sizeof small_bins);
     g_std_recs = NULL;
     memset(g_std_hash, 0, sizeof g_std_hash);
     memset(g_std_free_bins, 0, sizeof g_std_free_bins);
+    memset(g_std_small, 0, sizeof g_std_small);
+    memset(g_std_small_count, 0, sizeof g_std_small_count);
+    g_std_small_bytes = 0;
     g_std_free_bytes = 0;
     g_std_live_bytes = 0;
     g_std_declared_size = 0x10000000ull;
@@ -400,6 +457,14 @@ RT_ON_RESET(stdalloc_reset) {
             StdFreeRec *n = f->next;
             free(f);
             f = n;
+        }
+    }
+    for (int b = 0; b < STD_SMALL_CLASSES; b++) {
+        StdAllocRec *cached = small_bins[b];
+        while (cached) {
+            StdAllocRec *next = cached->next;
+            free(cached);
+            cached = next;
         }
     }
 }
