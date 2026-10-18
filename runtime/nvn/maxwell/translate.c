@@ -1513,8 +1513,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             sp(&c->body,
                "    { uint _tic = r%d & 0xFFFFFu; if (_tic < uint(surfmap_.slot.length())) { uint _si = surfmap_.slot[_tic].x; "
                "if (_si < %du) imageStore(surf_write[nonuniformEXT(_si)], ivec2(int(r%d), int(r%d)), "
-               "vec4(as_type<float>(r%d), as_type<float>(r%d), as_type<float>(r%d), as_type<float>(r%d))); } }\n",
-               hreg, (unsigned)c->key->bindless_storage, coord, coord + 1, data, data + 1, data + 2, data + 3);
+               "vec4(as_type<float>(r%d), as_type<float>(r%d), as_type<float>(r%d), as_type<float>(r%d))); "
+               "else { _si = surfmap_.slot[_tic].y; if (_si < %du) "
+               "imageStore(surf_atomic[nonuniformEXT(_si)], ivec2(int(r%d), int(r%d)), uvec4(r%d, r%d, r%d, r%d)); } } }\n",
+               hreg, (unsigned)c->key->bindless_storage, coord, coord + 1, data, data + 1, data + 2, data + 3,
+               (unsigned)c->key->bindless_storage, coord, coord + 1, data, data + 1, data + 2, data + 3);
         } else {
             c->info->surface_fallbacks++;
             sp(&c->body, "    /* SUST storage-image compatibility fallback */\n");
@@ -1979,7 +1982,9 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (info->uses_surface_write)
             sp(&s, "layout(set = %d, binding = 121) writeonly uniform image2D surf_write[%u];\n", set,
                key && key->bindless_storage ? key->bindless_storage : 1);
-        if (info->uses_surface_atomic)
+        // Typeless SUST uses the descriptor's component type. R32_UINT stores share the existing integer
+        // image array with SURED; reinterpreting the register as float would corrupt (or drop) the store.
+        if (info->uses_surface_atomic || info->uses_surface_write)
             sp(&s, "layout(r32ui, set = %d, binding = 122) uniform uimage2D surf_atomic[%u];\n", set,
                key && key->bindless_storage ? key->bindless_storage : 1);
     }

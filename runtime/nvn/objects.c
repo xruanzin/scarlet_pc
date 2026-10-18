@@ -8,6 +8,7 @@
 void renderer_sync(void);
 
 static uint64_t next_debug_id = 1;
+NvnDescPool *g_texture_pools[64], *g_sampler_pools[64];
 
 // ================================================================== device
 // NVNdeviceInfo -> value
@@ -371,10 +372,25 @@ NVN(nvnTextureInitialize) {
     SET_HOST(A(0), t);
     RET(1);
 }
+static void forget_texture_descriptors(NvnTexture *texture) {
+    for (int p = 0; p < 64; p++) {
+        NvnDescPool *pool = g_texture_pools[p];
+        if (!pool) continue;
+        NvnTexEntry *entries = pool->entries;
+        bool changed = false;
+        for (int i = 0; i < pool->count; i++) {
+            if (entries[i].tex != texture) continue;
+            memset(&entries[i], 0, sizeof entries[i]);
+            changed = true;
+        }
+        if (changed) pool->generation++;  // rebuild the immutable surface map before it can use a freed texture
+    }
+}
+
 NVN(nvnTextureFinalize) {
     g_nvn_destroyed++;
     NvnTexture *t = HOST(NvnTexture, A(0));
-    if (t) { backend_texture_destroyed(t); free(t); }
+    if (t) { forget_texture_descriptors(t); backend_texture_destroyed(t); free(t); }
     SET_HOST(A(0), 0);
 }
 NVN(nvnTextureSetDebugLabel) {
@@ -525,7 +541,6 @@ NVN(nvnSamplerCompare) { RET(memcmp(HOST(NvnSamplerDesc, A(0)), HOST(NvnSamplerD
 NVN(nvnSamplerGetDebugID) { RET(A(0)); }
 
 // ================================================================== descriptor pools
-NvnDescPool *g_texture_pools[64], *g_sampler_pools[64];
 RT_ON_RESET(desc_pools_reset) { memset(g_texture_pools, 0, sizeof g_texture_pools); memset(g_sampler_pools, 0, sizeof g_sampler_pools); }
 
 static NvnDescPool *desc_pool_init(uint64_t guest, uint64_t pool, uint64_t off, int count, size_t entry, NvnDescPool **reg) {

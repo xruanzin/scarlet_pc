@@ -42,6 +42,7 @@ uint64_t prof_up_ns = ~0ull;  // textures.c upload checks (~0: profiling off)
 #define PROF_T0() uint64_t prof_t0_ = prof ? SDL_GetTicksNS() : 0
 #define PROF_ADD(v) do { if (prof) v += SDL_GetTicksNS() - prof_t0_; } while (0)
 static _Atomic int stat_compiles;
+static _Atomic int jobs_pending;  // queued + running jobs, independent of completed-build statistics
 static _Atomic uint64_t stat_translate_ns, stat_spirv_ns, stat_pipe_ns;  // CPU time translating / compiling programs
 static uint64_t stat_shader_wait_ns;  // draws waiting for their program / pipeline (wait_built)
 static _Atomic int new_pipes;  // pipelines created since the pipeline cache was last saved
@@ -420,8 +421,9 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
 }
 
 // ================================================================== worker threads (shader / pipeline builds)
-// First-use compiles run off the render thread; draws needing them are skipped until ready (as on Metal).
-// LARECOMP_SYNC_SHADERS=1 builds on first use, blocking (deterministic tests).
+// Builds run on workers, but every dependent operation must wait. A skipped atlas/cache write or compute
+// dispatch is not necessarily repeated by the game; dropping it can permanently hide text or stall a scene.
+// LARECOMP_SYNC_SHADERS=1 builds inline (deterministic tests).
 typedef struct Job { void (*fn)(void *); void *arg; struct Job *next; } Job;
 static Job *jobs_head, *jobs_tail;
 static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -441,6 +443,7 @@ static void *worker(void *a) {
         if (!jobs_head) jobs_tail = NULL;
         pthread_mutex_unlock(&jobs_lock);
         j->fn(j->arg);
+        atomic_fetch_sub(&jobs_pending, 1);
         free(j);
     }
     return NULL;
@@ -458,6 +461,7 @@ static bool sync_shaders(void) {
 static void run_job(void (*fn)(void *), void *arg) {
     if (sync_shaders()) { fn(arg); return; }
     static bool started;
+    static int worker_count;
     if (!started) {
         started = true;
         // Leave substantial CPU headroom for the recompiled game. The old
@@ -467,16 +471,44 @@ static void run_job(void (*fn)(void *), void *arg) {
         int n = cores / 3;
         if (n < 2) n = 2;
         if (n > 8) n = 8;
-        LOG("[shader] %d low-priority workers on %d logical CPUs\n", n, cores);
-        for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
+        for (int i = 0; i < n; i++) {
+            pthread_t t;
+            int error = pthread_create(&t, NULL, worker, NULL);
+            if (!error) { worker_count++; pthread_detach(t); }
+            else LOG("[shader] worker creation failed: %d\n", error);
+        }
+        LOG("[shader] %d low-priority workers on %d logical CPUs\n", worker_count, cores);
     }
+    if (!worker_count) { fn(arg); return; }  // no job may wait forever if the OS cannot start a worker
     Job *j = malloc(sizeof *j);
     j->fn = fn; j->arg = arg; j->next = NULL;
+    atomic_fetch_add(&jobs_pending, 1);
     pthread_mutex_lock(&jobs_lock);
     if (jobs_tail) jobs_tail->next = j; else jobs_head = j;
     jobs_tail = j;
     pthread_cond_signal(&jobs_cond);
     pthread_mutex_unlock(&jobs_lock);
+}
+
+// SDL events are pumped by device.c's separate UI thread. Never re-enter Vulkan presentation here: the current
+// command list and its render pass still belong to this thread. Sleep while the worker finishes, preserving order.
+static void wait_built(_Atomic int *state, const char *kind, uint64_t code0, uint64_t code1) {
+    if (atomic_load(state)) return;
+    uint64_t start = SDL_GetTicksNS(), report = start + 1000000000ull;
+    while (!atomic_load(state)) {
+        SDL_Delay(1);
+        uint64_t now = SDL_GetTicksNS();
+        if (now >= report) {
+            LOG("[shader-wait] %s %llx/%llx: %.1f s, jobs=%d (command preserved)\n", kind,
+                (unsigned long long)code0, (unsigned long long)code1, (now - start) / 1e9,
+                atomic_load(&jobs_pending));
+            report = now + 1000000000ull;
+        }
+    }
+    uint64_t elapsed = SDL_GetTicksNS() - start;
+    stat_shader_wait_ns += elapsed;
+    if (elapsed >= 1000000000ull)
+        LOG("[shader-wait] %s ready=%d after %.1f s\n", kind, atomic_load(state) == 1, elapsed / 1e9);
 }
 
 // ================================================================== state
@@ -563,9 +595,9 @@ void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
     if (last_t && now - last_t > 50000000) {
         uint64_t dt = now - last_t, ex = cum_exec - l_exec, wt = cum_wait - l_wait;
         LOG("[hitch] frame %llu: %.0f ms = backend exec %.1f (of which GPU waits %.1f) + present %.1f + other %.1f; %llu draws, "
-            "%llu submits, compiles %d pending\n", (unsigned long long)frame, dt / 1e6, ex / 1e6, wt / 1e6, present_ns / 1e6,
+            "%llu submits, shader jobs %d pending\n", (unsigned long long)frame, dt / 1e6, ex / 1e6, wt / 1e6, present_ns / 1e6,
             ((double)dt - ex - present_ns) / 1e6, (unsigned long long)(cum_draws - l_draws), (unsigned long long)(cum_submits - l_subs),
-            atomic_load(&stat_compiles));
+            atomic_load(&jobs_pending));
     }
     last_t = now; l_exec = cum_exec; l_wait = cum_wait; l_draws = cum_draws; l_subs = cum_submits;
 }
@@ -1863,6 +1895,7 @@ typedef struct {
     uint32_t map_count;
     VkDescriptorImageInfo write[MAXWELL_BINDLESS_IMAGES];
     VkDescriptorImageInfo atomic[MAXWELL_BINDLESS_IMAGES];
+    NvnTexture *write_tex[MAXWELL_BINDLESS_IMAGES], *atomic_tex[MAXWELL_BINDLESS_IMAGES];
 } SurfaceBindlessCache;
 
 static SurfaceBindlessCache surface_cache[8];
@@ -1926,6 +1959,7 @@ static SurfaceBindlessCache *surface_cache_get(NvnDescPool *pool) {
             c->map_ptr[i * 2 + 1] = UINT32_MAX;
         }
         for (int i = 0; i < MAXWELL_BINDLESS_IMAGES; i++) {
+            c->write_tex[i] = c->atomic_tex[i] = NULL;
             c->write[i] = (VkDescriptorImageInfo){VK_NULL_HANDLE, vk_dummy_storage_view(false), VK_IMAGE_LAYOUT_GENERAL};
             c->atomic[i] = (VkDescriptorImageInfo){VK_NULL_HANDLE, vk_dummy_storage_view(true), VK_IMAGE_LAYOUT_GENERAL};
         }
@@ -1951,6 +1985,7 @@ static SurfaceBindlessCache *surface_cache_get(NvnDescPool *pool) {
                     VkImageView v = vk_storage_write_view(e[best].tex, &e[best].view, e[best].has_view);
                     if (v) {
                         c->map_ptr[best * 2 + 0] = (uint32_t)nw;
+                        c->write_tex[nw] = e[best].tex;
                         c->write[nw++] = (VkDescriptorImageInfo){VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL};
                     }
                 }
@@ -1958,6 +1993,7 @@ static SurfaceBindlessCache *surface_cache_get(NvnDescPool *pool) {
                     VkImageView v = vk_storage_atomic_u32_view(e[best].tex, &e[best].view, e[best].has_view);
                     if (v) {
                         c->map_ptr[best * 2 + 1] = (uint32_t)na;
+                        c->atomic_tex[na] = e[best].tex;
                         c->atomic[na++] = (VkDescriptorImageInfo){VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL};
                     }
                 }
@@ -1970,7 +2006,29 @@ static SurfaceBindlessCache *surface_cache_get(NvnDescPool *pool) {
             LOG("[shader] bindless image map: pool=%p count=%u generation=%u write=%d atomic=%d\n",
                 (void *)pool, count, gen, nw, na);
     }
+    // CPU updates may change image contents without changing descriptor registration. Refresh only compatible
+    // views; vk_tex leaves existing GPU-owned data intact and notices explicit memory-pool invalidations.
+    for (int i = 0; i < MAXWELL_BINDLESS_IMAGES; i++) {
+        if (c->write_tex[i]) vk_tex(c->write_tex[i], false);
+        if (c->atomic_tex[i]) vk_tex(c->atomic_tex[i], false);
+    }
     return c;
+}
+
+static void surface_finish_writes(const ShaderInfo *si) {
+    if (!si || (!si->uses_surface_write && !si->uses_surface_atomic)) return;
+    for (int c = 0; c < 8; c++) {
+        SurfaceBindlessCache *s = &surface_cache[c];
+        if (s->pool != st.tpool || !s->map_buf) continue;
+        // A dynamic image handle can select any bound slot. Mark ownership only after an operation executes,
+        // never while probing the pool or waiting for compilation. No incompatible image is included here.
+        for (int i = 0; i < MAXWELL_BINDLESS_IMAGES; i++) {
+            if (si->uses_surface_write && s->write_tex[i]) renderer_mark_gpu_owned(s->write_tex[i]);
+            if ((si->uses_surface_atomic || si->uses_surface_write) && s->atomic_tex[i])
+                renderer_mark_gpu_owned(s->atomic_tex[i]);
+        }
+        break;
+    }
 }
 
 // Writes the descriptor set of one stage. gx..gz: compute group counts (driver constants).
@@ -2192,6 +2250,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     snap_reason = "compute"; snapshots_invalidate(NULL);
     if (!st.program || !gx || !gy || !gz) return;
     CsProg *cp = compute_program(st.program);
+    if (cp) wait_built(&cp->p.state, "compute", st.program->stages[5].code_addr, 0);
     if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
@@ -2203,6 +2262,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
     vkCmdDispatch(cb, gx, gy, gz);
+    surface_finish_writes(cp->si);
     stat_dispatches++;
     storage_finish_writes();
 }
@@ -2246,34 +2306,6 @@ static void draw(CmdRec *r, bool indexed) {
     draw_(r, indexed);
     PROF_ADD(prof_draw);
 }
-// A draw whose program or pipeline is still being built waits for it, up to a budget per frame, instead of being
-// skipped (objects popping in on entering an area). At 30 fps a frame has ~27 ms to spare (uncapped, the overworld
-// runs at ~160 fps), so 20 ms per frame hides the pop-in with a warm cache (~1 ms per program) without costing frames;
-// a cold cache (first visit) spends the budget and skips the rest as before. LARECOMP_SHADER_WAIT_MS=<ms> (0: never).
-static bool wait_built(_Atomic int *state) {
-    if (atomic_load(state) != 0) return true;
-    static int64_t budget = -1;
-    if (budget < 0) {
-        const char *e = getenv("LARECOMP_SHADER_WAIT_MS");
-        int ms = e ? atoi(e) : (SDL_GetNumLogicalCPUCores() <= 12 ? 4 : 8);
-        if (ms < 0) ms = 0;
-        budget = (int64_t)ms * 1000000ll;
-        LOG("[shader] per-frame compile wait budget: %d ms\n", ms);
-    }
-    if (sync_shaders()) return true;  // (built already)
-    extern uint64_t vk_frame_counter(void);
-    static uint64_t frame;
-    static int64_t spent;
-    if (vk_frame_counter() != frame) { frame = vk_frame_counter(); spent = 0; }
-    if (spent >= budget) return false;
-    uint64_t t0 = SDL_GetTicksNS();
-    while (atomic_load(state) == 0 && spent + (int64_t)(SDL_GetTicksNS() - t0) < budget) SDL_DelayNS(100000);
-    uint64_t dt = SDL_GetTicksNS() - t0;
-    spent += (int64_t)dt;
-    stat_shader_wait_ns += dt;
-    return atomic_load(state) != 0;
-}
-
 static uint64_t prof_tp_;
 static void draw_(CmdRec *r, bool indexed) {
     storage_nwriteback = 0;
@@ -2307,7 +2339,7 @@ static void draw_(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
-    if (pr) wait_built(&pr->state);
+    if (pr) wait_built(&pr->state, "program", pr->code[0], pr->code[1]);
     if (!pr || atomic_load(&pr->state) != 1) { SKIP(pr ? 1 + (atomic_load(&pr->state) > 1) : 3); return; }
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t last_fs, last_hash;
@@ -2430,7 +2462,7 @@ static void draw_(CmdRec *r, bool indexed) {
         pipe_tab[pslot].pipe = pp;
         run_job(build_pipeline, pp);
     }
-    wait_built(&pp->state);
+    wait_built(&pp->state, "pipeline", pr->code[0], pr->code[1]);
     if (atomic_load(&pp->state) != 1) { SKIP(5 + (atomic_load(&pp->state) > 1)); return; }
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe);
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
@@ -2666,6 +2698,8 @@ static void draw_(CmdRec *r, bool indexed) {
     // ---- draw
     if (!use_index) vkCmdDraw(cb, count, inst, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
+    surface_finish_writes(pr->vi);
+    surface_finish_writes(pr->fi);
     bool surface_write = pr->vi->uses_surface_write || pr->vi->uses_surface_atomic ||
                          pr->fi->uses_surface_write || pr->fi->uses_surface_atomic;
     stat_draws++;

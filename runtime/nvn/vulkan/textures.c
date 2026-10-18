@@ -809,26 +809,31 @@ static bool storage_2d_view_params(NvnTexture *t, TexBackend *b, const NvnTextur
 
 VkImageView vk_storage_write_view(NvnTexture *t, const NvnTextureView *v, bool has_view) {
     if (!t) return VK_NULL_HANDLE;
-    // Preserve current GPU contents; this descriptor is an output image, not a CPU upload request.
-    TexBackend *b = vk_tex(t, true);
+    // Probing descriptors must not turn an incompatible texture into GPU-owned storage. In particular, the
+    // bindless-map builder probes both float and uint views, including images this shader never accesses.
+    TexBackend *b = tex_backend(t);
     VkFormat fmt;
     uint32_t lv, ly;
     if (!storage_2d_view_params(t, b, v, has_view, &fmt, &lv, &ly) ||
         !storage_float_format(fmt) || !format_supports(fmt, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
         return VK_NULL_HANDLE;
-    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, fmt, lv, 1, ly, 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
+    VkImageView view = vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, fmt, lv, 1, ly, 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (view) vk_tex(t, false);  // initialize CPU-owned contents before a partial shader write
+    return view;
 }
 
 VkImageView vk_storage_atomic_u32_view(NvnTexture *t, const NvnTextureView *v, bool has_view) {
     if (!t) return VK_NULL_HANDLE;
-    TexBackend *b = vk_tex(t, true);
+    TexBackend *b = tex_backend(t);
     VkFormat fmt;
     uint32_t lv, ly;
     if (!storage_2d_view_params(t, b, v, has_view, &fmt, &lv, &ly) ||
         fmt != VK_FORMAT_R32_UINT ||
         !format_supports(fmt, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT))
         return VK_NULL_HANDLE;
-    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, fmt, lv, 1, ly, 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
+    VkImageView view = vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, fmt, lv, 1, ly, 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (view) vk_tex(t, false);  // atomic read/modify/write needs the actual initial value
+    return view;
 }
 
 VkImageView vk_dummy_storage_view(bool atomic_u32) {
