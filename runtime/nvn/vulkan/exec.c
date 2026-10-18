@@ -2803,7 +2803,12 @@ static void draw_(CmdRec *r, bool indexed) {
             memcpy(k.blend[i], st.blend[i], 8);
         }
     }
-    k.a2c = st.ms[0xC] != 0;
+    // NVN alpha-to-coverage is only meaningful for an enabled multisample
+    // rasterization target. Carrying the state bit into a 1-sample Vulkan
+    // pipeline turns ordinary translucent/material alpha into a 1-bit coverage
+    // mask on some AMD drivers, producing the dense stipple/checker pattern seen
+    // over Scarlet's cutscenes and character materials.
+    k.a2c = pass_samples > 1 && st.ms[0] && st.ms[0xC] != 0;
     k.topo_class = cls;
     k.poly_fill = st.poly[2] != 1;
     uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
