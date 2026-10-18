@@ -203,15 +203,32 @@ static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int
     t->entry = entry;
     t->prio = prio;
     t->core = core < 0 ? 0 : core;
-    t->id = next_thread_id++;
     t->cpu.x[0] = arg;
     t->cpu.sp = stack_top & ~15ull;
     t->cpu.excl_addr = ~0ull;
-    t->tlr = tls_next;
-    tls_next += 0x200;
-    t->cpu.tpidrro = t->tlr;
     t->cpu.thread = t;
+
     pthread_mutex_lock(&g_klock);
+    if (tls_next > TLS_BASE + TLS_SIZE - 0x200ull) {
+        pthread_mutex_unlock(&g_klock);
+        pthread_cond_destroy(&t->cond);
+        free(t);
+        FATAL("thread-local storage slots exhausted\n");
+    }
+    t->id = next_thread_id++;
+    t->tlr = tls_next;
+    uint64_t slot = (tls_next - TLS_BASE) / 0x200ull;
+    tls_next += 0x200;
+    // rtld normally prepares the writable thread pointer before constructors.
+    // This runtime replaces rtld, so a bare TPIDR_EL0=0 otherwise reaches
+    // Scarlet's malloc: MRS X10,TPIDR_EL0; LDR X9,[X10,#0x20].
+    // Give each thread private zero-initialized bootstrap storage. Do not alias
+    // it to the IPC buffer, inherit a parent's allocator cache, or touch it
+    // again at thread start: guest MSR writes remain authoritative.
+    memset((void *)(uintptr_t)t->tlr, 0, 0x200);
+    t->cpu.tpidr = USER_TLS_BASE + slot * USER_TLS_STRIDE;
+    memset((void *)(uintptr_t)t->cpu.tpidr, 0, USER_TLS_STRIDE);
+    t->cpu.tpidrro = t->tlr;
     t->anext = g_threads;
     g_threads = t;
     pthread_mutex_unlock(&g_klock);
@@ -237,6 +254,9 @@ KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio
 
 void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4) {
     t->cpu.x[0] = x0; t->cpu.x[1] = x1; t->cpu.x[2] = x2; t->cpu.x[3] = x3; t->cpu.x[4] = x4;
+    LOG("[kernel] main thread TLS: TPIDR_EL0=%llx TPIDRRO_EL0=%llx bootstrap=%#llx bytes\n",
+        (unsigned long long)t->cpu.tpidr, (unsigned long long)t->cpu.tpidrro,
+        (unsigned long long)USER_TLS_STRIDE);
     thread_start(t);  // the host main thread goes on to run the window event loop
 }
 
@@ -912,6 +932,7 @@ void kernel_init(void) {
     }
     // Reserve the heap, alias, stack, and TLS regions.
     region_add(TLS_BASE, TLS_SIZE, 0xC, 3);
+    region_add(USER_TLS_BASE, USER_TLS_SIZE, 0xC, 3);
     for (int i = 0; i < g_nmodules; i++) {
         Module *m = &g_modules[i];
         region_add(m->base + m->text_off, m->ro_off - m->text_off, 3, 5);
@@ -937,3 +958,4 @@ KSharedMem *kernel_create_shared_memory(uint64_t size, void (*on_map)(KSharedMem
     *handle = kernel_new_handle(&s->obj);
     return s;
 }
+

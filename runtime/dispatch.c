@@ -276,7 +276,8 @@ void rt_fatal_trace(void) {
     plat_print_backtrace();
     Cpu *c = kernel_current_cpu();
     if (c) {
-        fprintf(stderr, "guest: sp=%llx lr=%llx\n", c->sp, c->x[30]);
+        fprintf(stderr, "guest: sp=%llx lr=%llx tpidr=%llx tpidrro=%llx\n",
+                c->sp, c->x[30], c->tpidr, c->tpidrro);
         for (int i = 0; i < 31; i += 4)
             fprintf(stderr, "  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx\n", i, c->x[i], i + 1,
                     c->x[i + 1], i + 2, c->x[i + 2], i + 3, c->x[i + 3]);

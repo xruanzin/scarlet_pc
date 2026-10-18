@@ -22,6 +22,11 @@
 #define HLE_SIZE     0x0000100000ull
 #define TLS_BASE     0x7090000000ull
 #define TLS_SIZE     0x0000100000ull
+// Bootstrap writable TPIDR_EL0 storage, separate from Horizon's TPIDRRO_EL0
+// IPC/TLR slots. Keep the same capacity as the 0x200-byte TLR slot pool.
+#define USER_TLS_STRIDE 0x2000ull
+#define USER_TLS_BASE   (TLS_BASE + TLS_SIZE)
+#define USER_TLS_SIZE   ((TLS_SIZE / 0x200ull) * USER_TLS_STRIDE)
 #define HLE_HEAP     0x7092000000ull   // guest-visible memory owned by host code
 #define HLE_HEAP_SIZE 0x000E000000ull
 #define ALIAS_BASE   0x7100000000ull   // alias region (svcMapMemory targets)
@@ -86,3 +91,4 @@ uint64_t guest_sym(const char *name);     // cached loader_find_symbol, fatal if
 extern uint64_t g_program_id;  // the game's program (title) id, from main.npdm
 void *hle_alloc(uint64_t size);           // zeroed guest-visible memory (never freed)
 extern const char *g_romfs_dir;
+

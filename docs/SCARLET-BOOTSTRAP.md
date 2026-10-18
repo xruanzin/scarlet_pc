@@ -5,6 +5,9 @@ This branch is the first Scarlet-specific development layer on top of the Let's 
 For the SDK initialization failure `no function at 700657c59c`, see
 [the diagnosis, static resume fix and Windows rebuild commands](SCARLET-SDK-INDIRECT-BOOT.md).
 
+For the subsequent `malloc` access violation at `0x20`, see
+[the writable-thread-pointer fix and runtime-only rebuild](SCARLET-THREAD-TLS-BOOT.md).
+
 ## Important
 
 Do **not** put Pokémon Scarlet game files, Switch keys, generated game code or Nintendo assets in this repository.
