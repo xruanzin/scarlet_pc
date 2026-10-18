@@ -152,7 +152,7 @@ static uint64_t resolve(Module *m, uint32_t symidx) {
     if (s->shndx) return m->base + s->value;
     HostFn impl = hle_lookup_impl(name);
     if (impl) {
-        if (ENV("LARECOMP_LOG_BINDINGS"))
+        if (getenv("LARECOMP_LOG_BINDINGS"))
             LOG("[loader] HLE bind %s <- %s\n", m->name, name);
         return hle_register(name, impl);  // host implementation wins over the guest SDK's
     }
