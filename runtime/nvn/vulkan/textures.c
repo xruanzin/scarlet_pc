@@ -304,6 +304,11 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     }
     VkImageCreateFlags flags = 0;
     if (!depthfmt) flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;  // format views (NVN texture views, raw sRGB views)
+    // Scarlet builds its colour-grading LUT by rendering 32 instances into
+    // the 32 slices of a 32x32x32 3D texture, then samples that texture in the
+    // tone-mapping pass. Vulkan needs 2D-array-compatible 3D images for layered
+    // rendering into individual depth slices.
+    if (type == VK_IMAGE_TYPE_3D) flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
     if (type == VK_IMAGE_TYPE_2D && layers >= 6 && tw == th && samples == 1) flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = flags, .imageType = type, .format = vf,
                             .extent = {tw, th, depth}, .mipLevels = levels, .arrayLayers = layers,
@@ -846,8 +851,23 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     if (ly0 + nly > b->layers) nly = b->layers - ly0;
     if (render) {
         VkImageViewType type = b->base_type == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
-        if (b->base_type == VK_IMAGE_VIEW_TYPE_3D) return VK_NULL_HANDLE;  // (3D render targets: not used by the game)
-        return vk_image_view(b, type, fmt, lv0, 1, ly0, 1, IDENTITY, b->aspect);
+        uint32_t render_layers = 1;
+        if (b->base_type == VK_IMAGE_VIEW_TYPE_3D) {
+            // A 2D-array view of a 3D image exposes depth slices as framebuffer
+            // layers. If NVN supplied an explicit layer view, preserve it;
+            // otherwise expose the whole mip depth for gl_Layer routing.
+            uint32_t mip_depth = b->depth >> lv0;
+            if (!mip_depth) mip_depth = 1;
+            if (v && (v->setmask & 2)) {
+                if (ly0 >= mip_depth) ly0 = mip_depth - 1;
+                render_layers = nly ? nly : 1;
+                if (ly0 + render_layers > mip_depth) render_layers = mip_depth - ly0;
+            } else {
+                ly0 = 0;
+                render_layers = mip_depth;
+            }
+        }
+        return vk_image_view(b, type, fmt, lv0, 1, ly0, render_layers, IDENTITY, b->aspect);
     }
     VkImageAspectFlags aspect = b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect;
     VkComponentMapping sw = IDENTITY;
