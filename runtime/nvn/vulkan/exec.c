@@ -24,6 +24,9 @@ static uint64_t g_draws_total;  // (never reset: LARECOMP_COUNTER_LOG)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t stat_tf_merged, stat_tf_barriers, stat_raster_discard_sets, stat_raster_discard_on, stat_a2c_1x;
 static uint64_t stat_tf_dep_vbuf, stat_tf_dep_cbuf, stat_tf_dep_sbuf, stat_tf_dep_gmem, stat_tf_dep_op, stat_tf_dep_submit, stat_tf_dep_rt;
+static uint64_t stat_barrier_flags[256];
+static uint64_t forensic_barriers_since_draw;
+static uint32_t forensic_last_barrier_flags;
 static uint32_t stat_pass_end_line[4096];
 static bool tf_barrier_pending;
 static uint64_t tf_pending_addr[64], tf_pending_size[64];
@@ -925,6 +928,28 @@ const char *renderer_stats(void) {
         size_t n = strlen(stats_text);
         snprintf(stats_text + n, sizeof stats_text - n, ", a2c1x %llu",
                  (unsigned long long)stat_a2c_1x);
+    }
+    {
+        uint32_t bf[4] = {0}; uint64_t bc[4] = {0};
+        for (uint32_t fl = 0; fl < 256; fl++) {
+            uint64_t c = stat_barrier_flags[fl];
+            if (!c) continue;
+            for (int k = 0; k < 4; k++) if (c > bc[k]) {
+                for (int j = 3; j > k; j--) { bc[j] = bc[j - 1]; bf[j] = bf[j - 1]; }
+                bc[k] = c; bf[k] = fl; break;
+            }
+        }
+        if (bc[0]) {
+            size_t n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, " [barrier");
+            for (int k = 0; k < 4 && bc[k]; k++) {
+                n = strlen(stats_text);
+                snprintf(stats_text + n, sizeof stats_text - n, " %#x:%llu", bf[k], (unsigned long long)bc[k]);
+            }
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, "]");
+        }
+        memset(stat_barrier_flags, 0, sizeof stat_barrier_flags);
     }
     {
         uint32_t top_line[5] = {0}, top_count[5] = {0};
@@ -3890,7 +3915,7 @@ static void exec_list(uint64_t handle, int depth) {
             case CMD_COPY_BUFFER_TO_BUFFER: case CMD_COPY_BUFFER_TO_TEXTURE:
             case CMD_COPY_TEXTURE_TO_BUFFER: case CMD_COPY_TEXTURE_TO_TEXTURE:
             case CMD_DOWNSAMPLE: case CMD_UPDATE_UNIFORM_BUFFER:
-            case CMD_CLEAR_BUFFER: case CMD_BARRIER:
+            case CMD_CLEAR_BUFFER:
                 stat_tf_dep_op++;
                 tf_flush_pending_barrier();
                 break;
@@ -4183,6 +4208,33 @@ static void exec_list(uint64_t handle, int depth) {
             renderer_flush();
             memmove((void *)(uintptr_t)r->x[1], (void *)(uintptr_t)r->x[0], r->x[2]);
             break;
+        case CMD_BARRIER: {
+            uint32_t flags = (uint32_t)r->x[0];
+            stat_barrier_flags[flags & 0xFF]++;
+            forensic_barriers_since_draw++;
+            forensic_last_barrier_flags = flags;
+            /*
+             * NVN barrier bits are scoped: ORDER_FRAGMENTS(_TILED) and
+             * ORDER_INDIRECT_DATA do not make transform-feedback output a
+             * vertex/shader resource. The old code ended rendering and issued a
+             * full Vulkan barrier for every barrier opcode, which is why
+             * Scarlet had tfmerge == barrier for thousands of tiny TF passes.
+             *
+             * Keep TF pending across pure ordering barriers. Actual consumers
+             * are synchronized by the draw binding overlap checks, indirect
+             * draws already renderer_flush(), and copy/compute/update paths
+             * flush above. Shader/texture invalidation is conservatively kept
+             * because those consumers can be address-derived and not visible in
+             * the fixed NVN binding ranges.
+             */
+            const uint32_t INVALIDATE_TEXTURE = 0x10u;
+            const uint32_t INVALIDATE_SHADER  = 0x20u;
+            if (tf_barrier_pending && (flags & (INVALIDATE_TEXTURE | INVALIDATE_SHADER))) {
+                stat_tf_dep_op++;
+                tf_flush_pending_barrier();
+            }
+            break;
+        }
         default: break;
         }
         p += r->size;
