@@ -3260,7 +3260,85 @@ static void draw_(CmdRec *r, bool indexed) {
     }
 }
 
+static FILE *forensic_fp;
+static uint64_t forensic_frame = ~0ull, forensic_draw_no;
+static uint64_t forensic_saved_shader[2048];
+static uint32_t forensic_saved_shader_n;
+
+static void forensic_save_shader(uint64_t addr, const char *stage, const ShaderInfo *si) {
+    if (!addr || !si || !si->msl) return;
+    for (uint32_t i = 0; i < forensic_saved_shader_n; i++)
+        if (forensic_saved_shader[i] == (addr ^ (stage[0] == 'f' ? 1ull : 0ull))) return;
+    if (forensic_saved_shader_n < 2048)
+        forensic_saved_shader[forensic_saved_shader_n++] = addr ^ (stage[0] == 'f' ? 1ull : 0ull);
+    mkdir("build/forensics-shaders", 0755);
+    char path[256];
+    snprintf(path, sizeof path, "build/forensics-shaders/%llx_%s.glsl", (unsigned long long)addr, stage);
+    FILE *sf = fopen(path, "w");
+    if (sf) { fputs(si->msl, sf); fclose(sf); }
+}
+
+static void forensic_draw_record(Prog *pr, CmdRec *r, bool indexed) {
+    uint64_t frame = renderer_present_count();
+    if (frame != forensic_frame) {
+        if (forensic_fp) fclose(forensic_fp);
+        forensic_fp = NULL;
+        forensic_frame = frame;
+        forensic_draw_no = 0;
+        forensic_saved_shader_n = 0;
+        mkdir("build", 0755);
+        char path[256];
+        snprintf(path, sizeof path, "build/scarlet_forensics_%llu.txt", (unsigned long long)frame);
+        forensic_fp = fopen(path, "w");
+        if (forensic_fp) {
+            fprintf(forensic_fp,
+                "# Scarlet graphics forensics frame %llu\n"
+                "# barrier bits: 1 ORDER_PRIMITIVES, 2 ORDER_FRAGMENTS, 4 ORDER_FRAGMENTS_TILED, "
+                "8 ORDER_INDIRECT_DATA, 10 INVALIDATE_TEXTURE, 20 INVALIDATE_SHADER, "
+                "40 INVALIDATE_TEXTURE_DESCRIPTOR, 80 INVALIDATE_ZCULL\n"
+                "# columns: draw pass type mode count inst vs fs rt0 depth samples tf rdiscard a2c attrs "
+                "barriers_since_prev last_barrier textures...\n",
+                (unsigned long long)frame);
+        }
+    }
+    if (!forensic_fp) return;
+    uint64_t vs = st.program ? st.program->stages[0].code_addr : 0;
+    uint64_t fs = st.program ? st.program->stages[1].code_addr : 0;
+    uint64_t inst = indexed ? r->x[6] : r->x[4];
+    uint32_t rt_fmt = st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->format : 0;
+    uint32_t rt_w = st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->width : 0;
+    uint32_t rt_h = st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->height : 0;
+    uint32_t d_fmt = st.rt.depth ? st.rt.depth->format : 0;
+    fprintf(forensic_fp,
+        "%llu pass=%d %c mode=%llu count=%llu inst=%llu vs=%llx fs=%llx "
+        "rt0=%ux%u/f%#x depth=%#x samples=%u tf=%u discard=%u a2c=%u attrs=%#x "
+        "barriers=%llu last=%#x",
+        (unsigned long long)forensic_draw_no++, debug_pass_no, indexed ? 'E' : 'A',
+        (unsigned long long)r->x[0], (unsigned long long)r->x[2], (unsigned long long)inst,
+        (unsigned long long)vs, (unsigned long long)fs,
+        rt_w, rt_h, rt_fmt, d_fmt, pass_samples, st.tf_active ? 1u : 0u,
+        st.raster_discard ? 1u : 0u, st.ms[0xC] ? 1u : 0u, pr->vi ? pr->vi->attr_mask : 0,
+        (unsigned long long)forensic_barriers_since_draw, forensic_last_barrier_flags);
+    int nt = pr->fi ? pr->fi->ntex : 0;
+    if (nt > 12) nt = 12;
+    for (int i = 0; i < nt; i++) {
+        NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+        const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
+        if (!t) { fprintf(forensic_fp, " t%d=none", i); continue; }
+        fprintf(forensic_fp, " t%d=%llx/%ux%u/f%#x/target%u%s", i,
+                (unsigned long long)t->addr, t->width, t->height, t->format, t->target,
+                b && b->gpu_owned ? "/gpu" : "");
+    }
+    fputc('\n', forensic_fp);
+    if ((forensic_draw_no & 63) == 0) fflush(forensic_fp);
+    forensic_barriers_since_draw = 0;
+    forensic_last_barrier_flags = 0;
+    forensic_save_shader(vs, "vs", pr->vi);
+    forensic_save_shader(fs, "fs", pr->fi);
+}
+
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
+    forensic_draw_record(pr, r, indexed);
     LOG("[draw] %s inst %llu mode %llu count %llu prog vs=%llx fs=%llx | vs cb %#x fs cb %#x | rt %d", indexed ? "e" : "a",
         (unsigned long long)(indexed ? r->x[6] : r->x[4]), (unsigned long long)r->x[0], (unsigned long long)r->x[2],
         (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)st.program->stages[1].code_addr,
