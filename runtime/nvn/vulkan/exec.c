@@ -22,7 +22,12 @@
 
 static uint64_t g_draws_total;  // (never reset: LARECOMP_COUNTER_LOG)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
+static uint64_t stat_tf_merged, stat_tf_barriers;
 static uint32_t stat_pass_end_line[4096];
+static bool tf_barrier_pending;
+static uint64_t tf_pending_addr[64], tf_pending_size[64];
+static uint32_t tf_pending_n;
+static void tf_flush_pending_barrier(void);
 // Skipped draws by reason (logged with the stats): 0 no program bound, 1 program still compiling, 2 program failed,
 // 3 no program object, 4 primitive mode, 5 pipeline still building, 6 pipeline failed.
 static uint64_t stat_skip_why[8];
@@ -240,6 +245,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
         }
     }
     vk_end_pass();
+    tf_flush_pending_barrier();
     Sub *s = sub();
     if (!s->main_begun && !s->upload_begun && !wait && !signal) {
         if (submit_diag) {
@@ -718,6 +724,71 @@ static struct {
     uint32_t obj_draw;  // draws of that object so far in this run of it
 } st;
 
+static bool range_overlap_u64(uint64_t a, uint64_t as, uint64_t b, uint64_t bs) {
+    if (!a || !as || !b || !bs) return false;
+    return a < b + bs && b < a + as;
+}
+
+static void tf_pending_add(uint64_t addr, uint64_t size) {
+    if (!addr || !size) return;
+    for (uint32_t i = 0; i < tf_pending_n; i++) {
+        if (range_overlap_u64(addr, size, tf_pending_addr[i], tf_pending_size[i])) {
+            uint64_t lo = addr < tf_pending_addr[i] ? addr : tf_pending_addr[i];
+            uint64_t ae = addr + size, be = tf_pending_addr[i] + tf_pending_size[i];
+            uint64_t hi = ae > be ? ae : be;
+            tf_pending_addr[i] = lo;
+            tf_pending_size[i] = hi - lo;
+            tf_barrier_pending = true;
+            return;
+        }
+    }
+    if (tf_pending_n < 64) {
+        tf_pending_addr[tf_pending_n] = addr;
+        tf_pending_size[tf_pending_n] = size;
+        tf_pending_n++;
+    } else {
+        // Saturation is rare; one broad range is conservative and preserves correctness.
+        uint64_t lo = addr, hi = addr + size;
+        for (uint32_t i = 0; i < tf_pending_n; i++) {
+            if (tf_pending_addr[i] < lo) lo = tf_pending_addr[i];
+            uint64_t e = tf_pending_addr[i] + tf_pending_size[i];
+            if (e > hi) hi = e;
+        }
+        tf_pending_addr[0] = lo;
+        tf_pending_size[0] = hi - lo;
+        tf_pending_n = 1;
+    }
+    tf_barrier_pending = true;
+}
+
+static bool tf_pending_overlaps_range(Range r) {
+    for (uint32_t i = 0; i < tf_pending_n; i++)
+        if (range_overlap_u64(r.addr, r.size, tf_pending_addr[i], tf_pending_size[i])) return true;
+    return false;
+}
+
+static bool tf_pending_used_by_draw(void) {
+    for (int i = 0; i < 16; i++) if (tf_pending_overlaps_range(st.vbuf[i])) return true;
+    for (int stage = 0; stage < 6; stage++) {
+        for (int i = 0; i < 18; i++) if (tf_pending_overlaps_range(st.ubuf[stage][i])) return true;
+        for (int i = 0; i < 16; i++) if (tf_pending_overlaps_range(st.sbuf[stage][i])) return true;
+    }
+    return false;
+}
+
+static void tf_pending_clear(void) {
+    tf_barrier_pending = false;
+    tf_pending_n = 0;
+}
+
+static void tf_flush_pending_barrier(void) {
+    if (!tf_barrier_pending) return;
+    vk_end_pass();
+    vk_full_barrier(vk_cmd());
+    tf_pending_clear();
+    stat_tf_barriers++;
+}
+
 // frame interpolation (prototype, LARECOMP_INTERP=1): the hooks below; the rest at the end of this file
 static int ip_on = -1;
 static bool ip_replaying;     // running a recorded frame again for the in-between image
@@ -802,6 +873,11 @@ const char *renderer_stats(void) {
              atomic_exchange(&stat_compiles, 0), atomic_exchange(&stat_translate_ns, 0) / 1e6, atomic_exchange(&stat_spirv_ns, 0) / 1e6, atomic_exchange(&stat_pipe_ns, 0) / 1e6,
              stat_shader_wait_ns / 1e6,
              (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0);
+    if (stat_tf_merged || stat_tf_barriers) {
+        size_t n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n, ", tfmerge %llu/barrier %llu",
+                 (unsigned long long)stat_tf_merged, (unsigned long long)stat_tf_barriers);
+    }
     {
         uint32_t top_line[5] = {0}, top_count[5] = {0};
         for (uint32_t l = 1; l < 4096; l++) {
@@ -869,7 +945,7 @@ const char *renderer_stats(void) {
         prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = prof_tex_watch_skips = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
-    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
+    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = 0;
     return stats_text;
 }
 
@@ -951,6 +1027,7 @@ static void begin_pass(void) {
     st.rt_dirty = false;
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
+    if (tf_barrier_pending) { tf_pending_clear(); stat_tf_barriers++; }
     {
         NvnTexture *t0n = st.rt.ncolor ? st.rt.color[0] : NULL;
         dl_note("pass %d color %ux%u fmt %#x depth %p", st.rt.ncolor, t0n ? t0n->width : 0, t0n ? t0n->height : 0, t0n ? t0n->format : 0,
@@ -2727,6 +2804,9 @@ static void draw_(CmdRec *r, bool indexed) {
             }
         }
     }
+    if (tf_barrier_pending && (!st.tf_active || st.tf_resume || tf_pending_used_by_draw()))
+        tf_flush_pending_barrier();
+
     if (g_debug_frame) debug_draw(pr, r, indexed);
     else if ((pr->vi->attr_mask >> 11) & 1) {  // skinned draws (a11: bone indices)
         static int n;
@@ -3820,8 +3900,10 @@ static void exec_list(uint64_t handle, int depth) {
                 if (tf_api_ready())
                     tf_end(cb, 0, ncounter, ncounter ? &counter : NULL, ncounter ? &coff : NULL);
                 st.tf_vk_active = false;
-                vk_end_pass();
-                vk_full_barrier(vk_cmd());
+                for (int bi = 0; bi < 4; bi++) tf_pending_add(st.tfbuf[bi].addr, st.tfbuf[bi].size);
+                stat_tf_merged++;
+                // Keep the dynamic-rendering instance open across independent TF passes. A barrier is
+                // inserted lazily before a consumer, a resume counter read, a render-target change, or submission.
                 // [tf-check]: does the GPU really write sane vertex data into the guest buffers? Look at the first
                 // few TF passes (waits for the GPU once each). nan/huge/zero counts per buffer tell a working TF
                 // from one that writes nothing, garbage or the wrong layout.
