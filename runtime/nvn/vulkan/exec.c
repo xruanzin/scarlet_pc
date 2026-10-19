@@ -3832,6 +3832,22 @@ static void exec_list(uint64_t handle, int depth) {
         void *x = r->extra;
         if (r->op < CMD_COUNT) op_counts[r->op]++;
         if (ip_replaying && ip_skip_op(r->op)) { p += r->size; continue; }
+        // TF writes can remain inside one rendering instance across state-only
+        // commands and independent TF draws. Operations that can observe memory
+        // must retain the old full-barrier semantics.
+        if (tf_barrier_pending) {
+            switch (r->op) {
+            case CMD_DISPATCH: case CMD_DISPATCH_INDIRECT:
+            case CMD_COPY_BUFFER_TO_BUFFER: case CMD_COPY_BUFFER_TO_TEXTURE:
+            case CMD_COPY_TEXTURE_TO_BUFFER: case CMD_COPY_TEXTURE_TO_TEXTURE:
+            case CMD_DOWNSAMPLE: case CMD_UPDATE_UNIFORM_BUFFER:
+            case CMD_CLEAR_BUFFER: case CMD_BARRIER:
+                tf_flush_pending_barrier();
+                break;
+            default:
+                break;
+            }
+        }
         switch (r->op) {
         case CMD_END:
             nvn_cmdstream_unpin(pin_handle);
