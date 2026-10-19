@@ -718,6 +718,7 @@ static struct {
     float blend_color[4];
     uint32_t stencil_ref[2], stencil_mask[2], stencil_vmask[2];
     bool prim_restart;
+    bool raster_discard;
     uint32_t restart_index;
     uint64_t copy_row_stride, copy_image_stride;
     uint64_t obj;       // frame interpolation: the game object the current draws belong to (CMD_OBJECT), 0 = none
@@ -1750,7 +1751,7 @@ typedef struct {
     uint32_t attr_mask;
     uint32_t stride[17], divisor[17], used_streams;
     uint8_t blend[8][8];
-    uint8_t blend_on, a2c, topo_class, poly_fill;
+    uint8_t blend_on, a2c, topo_class, poly_fill, raster_discard;
     uint32_t write_mask[8];
 } PipeKey;
 
@@ -1810,7 +1811,7 @@ static void build_pipeline(void *arg) {
                                                  .topology = topo_class_base(k->topo_class)};
     VkPipelineViewportStateCreateInfo vs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
     VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-                                                 .rasterizerDiscardEnable = k->prog->vkey.xfb,
+                                                 .rasterizerDiscardEnable = k->raster_discard || k->prog->vkey.xfb,
                                                  .polygonMode = k->poly_fill ? VK_POLYGON_MODE_FILL : VK_POLYGON_MODE_LINE, .lineWidth = 1};
     VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
                                                .rasterizationSamples = (VkSampleCountFlagBits)k->samples, .alphaToCoverageEnable = k->a2c};
@@ -2913,6 +2914,7 @@ static void draw_(CmdRec *r, bool indexed) {
         }
     }
     k.a2c = st.ms[0xC] != 0;
+    k.raster_discard = st.raster_discard;
     k.topo_class = cls;
     k.poly_fill = st.poly[2] != 1;
     uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
@@ -3990,6 +3992,9 @@ static void exec_list(uint64_t handle, int depth) {
         }
         case CMD_SET_POLYGON_OFFSET: memcpy(st.poly_offset, r->f, sizeof st.poly_offset); break;
         case CMD_SET_PRIMITIVE_RESTART: st.prim_restart = r->x[0] != 0; st.restart_index = (uint32_t)r->x[1]; break;
+        case CMD_SET_RASTERIZER_DISCARD:
+            st.raster_discard = r->x[0] != 0;
+            break;
         case CMD_SET_COPY_STRIDES: st.copy_row_stride = r->x[0]; st.copy_image_stride = r->x[1]; break;
         case CMD_CLEAR_COLOR: {
             snap_reason = "clear-color"; snapshots_invalidate(NULL);
