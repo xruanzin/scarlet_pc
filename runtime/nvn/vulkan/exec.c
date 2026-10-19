@@ -3322,18 +3322,63 @@ static void forensic_draw_record(Prog *pr, CmdRec *r, bool indexed) {
     if (st.vbuf[0].addr)
         fprintf(forensic_fp, " v0=%llx+%llu/stride%u", (unsigned long long)st.vbuf[0].addr,
                 (unsigned long long)st.vbuf[0].size, st.nstream > 0 ? st.stream[0][0] : 0);
+    if (st.tf_active) {
+        for (int ti = 0; ti < 4; ti++) if (st.tfbuf[ti].addr)
+            fprintf(forensic_fp, " tf%d=%llx+%llu", ti, (unsigned long long)st.tfbuf[ti].addr,
+                    (unsigned long long)st.tfbuf[ti].size);
+    }
     if (pr->vi) {
         fprintf(forensic_fp, " vcb=%#x", pr->vi->cbuf_dynamic);
-        for (int ai = 11; ai <= 12; ai++) if (pr->vi->attr_mask & (1u << ai)) {
+
+        // Bone indices/weights are Scarlet a12/a13. Record the real stream and
+        // raw values so one capture can distinguish bad input data from bad
+        // palette binding/translation.
+        for (int ai = 11; ai <= 13; ai++) if (pr->vi->attr_mask & (1u << ai)) {
             uint32_t av = ai < st.nattrib ? st.attrib[ai] : 0;
-            fprintf(forensic_fp, " a%d=f%#x/s%u/+%u", ai, av & 0xff, (av >> 8) & 0x1f, av >> 13);
+            uint32_t stream = (av >> 8) & 0x1f, off = av >> 13;
+            fprintf(forensic_fp, " a%d=f%#x/s%u/+%u", ai, av & 0xff, stream, off);
+            if (stream < 16 && st.vbuf[stream].addr) {
+                fprintf(forensic_fp, "@%llx+%llu/stride%u", (unsigned long long)st.vbuf[stream].addr,
+                        (unsigned long long)st.vbuf[stream].size,
+                        stream < (uint32_t)st.nstream ? st.stream[stream][0] : 0);
+            }
         }
+
+        // Shader CB k maps to NVN uniform slot k-3. The previous forensic text
+        // printed st.ubuf[k] directly, which mislabeled the palette.
         int dumped_cb = 0;
-        for (int ci = 0; ci < 18 && dumped_cb < 6; ci++) {
-            if (!(pr->vi->cbuf_mask & (1u << ci)) || !st.ubuf[0][ci].addr) continue;
-            fprintf(forensic_fp, " cb%d=%llx+%llu", ci, (unsigned long long)st.ubuf[0][ci].addr,
-                    (unsigned long long)st.ubuf[0][ci].size);
+        for (int k = 0; k < 18 && dumped_cb < 8; k++) {
+            if (!(pr->vi->cbuf_mask & (1u << k))) continue;
+            if (k == 0) { fprintf(forensic_fp, " CB0=driver"); dumped_cb++; continue; }
+            if (k == 1) {
+                NvnShaderStage *ss = st.program ? &st.program->stages[0] : NULL;
+                fprintf(forensic_fp, " CB1=code+%u/%u", ss ? ss->const_offset : 0, ss ? ss->const_size : 0);
+                dumped_cb++; continue;
+            }
+            if (k < 3) continue;
+            int ui = k - 3;
+            Range cr = ui >= 0 && ui < 18 ? st.ubuf[0][ui] : (Range){0,0};
+            fprintf(forensic_fp, " CB%d=%llx+%llu%s", k, (unsigned long long)cr.addr,
+                    (unsigned long long)cr.size, (pr->vi->cbuf_dynamic & (1u << k)) ? "/dyn" : "");
             dumped_cb++;
+        }
+
+        // For skinning TF draws, dump the first four raw index/weight tuples.
+        if (st.tf_active && (pr->vi->attr_mask & (1u << 12)) && (pr->vi->attr_mask & (1u << 13))) {
+            for (int vi = 0; vi < 4; vi++) {
+                fprintf(forensic_fp, " skin%d", vi);
+                for (int ai = 12; ai <= 13; ai++) {
+                    uint32_t av = ai < st.nattrib ? st.attrib[ai] : 0;
+                    uint32_t stream = (av >> 8) & 0x1f, off = av >> 13;
+                    uint32_t stride = stream < (uint32_t)st.nstream ? st.stream[stream][0] : 0;
+                    if (stream >= 16 || !st.vbuf[stream].addr || !stride) { fprintf(forensic_fp, "/a%d=NA", ai); continue; }
+                    uint64_t at = st.vbuf[stream].addr + (uint64_t)vi * stride + off;
+                    if (at + 16 > st.vbuf[stream].addr + st.vbuf[stream].size) { fprintf(forensic_fp, "/a%d=OOB", ai); continue; }
+                    const uint8_t *q = (const uint8_t *)(uintptr_t)at;
+                    fprintf(forensic_fp, "/a%d=%02x%02x%02x%02x_%02x%02x%02x%02x", ai,
+                            q[0],q[1],q[2],q[3],q[4],q[5],q[6],q[7]);
+                }
+            }
         }
     }
     int nt = pr->fi ? pr->fi->ntex : 0;
