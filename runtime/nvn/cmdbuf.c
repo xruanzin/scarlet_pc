@@ -75,16 +75,44 @@ typedef struct {
 static HostSeg *g_hostseg;
 static int g_nhostseg, g_caphostseg;
 static int32_t g_free32 = -1;
+// Segment backing is never individually freed, so an append-only exact-pointer
+// hash gives safe O(1) lookup without dereferencing an untrusted guest jump.
+#define HOSTSEG_HASH_SIZE 65536u
+static uint64_t g_hostseg_hash_key[HOSTSEG_HASH_SIZE];
+static int32_t g_hostseg_hash_val[HOSTSEG_HASH_SIZE]; // index + 1, zero = empty
 static pthread_mutex_t g_hostseg_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_take_count;
 static uint64_t g_hostseg_bytes;
 
+static uint32_t hostseg_hash_slot(uint64_t mem) {
+    uint64_t x = mem >> 4;
+    x ^= x >> 33; x *= 0xff51afd7ed558ccdull;
+    x ^= x >> 33;
+    return (uint32_t)x & (HOSTSEG_HASH_SIZE - 1u);
+}
+static void hostseg_hash_insert_locked(uint64_t mem, int idx) {
+    uint32_t h = hostseg_hash_slot(mem);
+    for (uint32_t n = 0; n < HOSTSEG_HASH_SIZE; n++, h = (h + 1u) & (HOSTSEG_HASH_SIZE - 1u)) {
+        if (!g_hostseg_hash_val[h] || g_hostseg_hash_key[h] == mem) {
+            g_hostseg_hash_key[h] = mem;
+            g_hostseg_hash_val[h] = idx + 1;
+            return;
+        }
+    }
+    FATAL("nvn: host segment pointer hash exhausted\n");
+}
 static int hostseg_index_from_mem(uint64_t mem) {
     if (!mem) return -1;
-    const HostSegPrefix *h = (const HostSegPrefix *)(uintptr_t)(mem - sizeof(HostSegPrefix));
-    if (h->magic != HOSTSEG_MAGIC || h->index >= (uint32_t)g_nhostseg) return -1;
-    int idx = (int)h->index;
-    return g_hostseg[idx].mem == (uint8_t *)(uintptr_t)mem ? idx : -1;
+    uint32_t h = hostseg_hash_slot(mem);
+    for (uint32_t n = 0; n < HOSTSEG_HASH_SIZE; n++, h = (h + 1u) & (HOSTSEG_HASH_SIZE - 1u)) {
+        int32_t v = g_hostseg_hash_val[h];
+        if (!v) return -1;
+        if (g_hostseg_hash_key[h] == mem) {
+            int idx = v - 1;
+            return idx >= 0 && idx < g_nhostseg && g_hostseg[idx].mem == (uint8_t *)(uintptr_t)mem ? idx : -1;
+        }
+    }
+    return -1;
 }
 
 static void hostseg_free32_push_locked(int idx) {
@@ -301,6 +329,7 @@ static uint64_t hostseg_take(NvnCmdBuf *cb, uint32_t need, uint32_t *actual_size
                     .origin_lo = cb->host_origin_lo, .origin_hi = cb->host_origin_hi,
                     .chain_next = -1, .free_next = -1
                 };
+                hostseg_hash_insert_locked((uint64_t)(uintptr_t)mem, idx);
                 pick = idx;
                 g_hostseg_bytes += want;
                 *actual_size = want;
@@ -557,6 +586,7 @@ NVN(nvnCommandBufferBeginRecording) {
     memset(cb->diag_programs, 0, sizeof cb->diag_programs);
     cb->diag_tf_active = false;
     cb->host_origin_lo = cb->host_origin_hi = 0;
+    cb->host_chain_head = cb->host_chain_tail = -1;
 
     // Request the next ring chunk before marking the buffer recording. That
     // lets nvnCommandBufferAddCommandMemory safely recycle an old guest range
