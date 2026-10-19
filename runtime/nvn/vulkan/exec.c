@@ -2103,6 +2103,21 @@ static void snapshots_invalidate(NvnTexture *t) {
     for (int i = 0; i < 8; i++) if ((!t || snap_tex[i] == t) && snap_ok[i]) { snap_ok[i] = false; snap_why[i] = snap_reason; }
 }
 
+// Snapshots include both depth and stencil: material IDs may change even when
+// the depth plane is read-only (the old depth-only predicate missed this).
+static bool depth_stencil_writes(void) {
+    if (!st.rt.depth) return false;
+    if (st.ds[0] && st.ds[1]) return true;
+    if (!st.ds[3] || !renderer_format_has_stencil(st.rt.depth->format)) return false;
+    uint32_t ops = st.ds[5] | st.ds[6] << 8 | st.ds[7] << 16;
+    for (int f = 0; f < 2; f++) {
+        if (!(st.stencil_mask[f] & 0xFF)) continue;
+        for (int i = 0; i < 3; i++)
+            if (stencil_op((ops >> (12 * f + 4 * i)) & 0xF) != VK_STENCIL_OP_KEEP) return true;
+    }
+    return false;
+}
+
 typedef struct { NvnTexture *key; TexBackend copy; } Snap;
 static Snap snaps[16];
 static int nsnaps;
@@ -2177,7 +2192,7 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
         VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = src->format,
                                 .extent = {src->width, src->height, 1}, .mipLevels = 1, .arrayLayers = 1,
                                 .samples = (VkSampleCountFlagBits)src->samples, .tiling = VK_IMAGE_TILING_OPTIMAL,
-                                .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
+                                .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &d->image, &d->mem, NULL));
         d->format = src->format; d->width = src->width; d->height = src->height; d->depth = 1; d->layers = 1; d->levels = 1;
@@ -2209,6 +2224,25 @@ static void debug_save_depth(TexBackend *b, const char *path) {
     LOG("[vk] saved %s (%ux%u depth %.6f..%.6f)\n", path, b->width, b->height, lo, hi);
 }
 
+// Preserve exact stencil bytes, not a normalized visualization: lighting uses
+// bits 3..5 to distinguish emission from the hair/tangent material path.
+static void debug_save_stencil(TexBackend *b, const char *path) {
+    if (!b || !b->image || !(b->aspect & VK_IMAGE_ASPECT_STENCIL_BIT)) return;
+    uint64_t n = (uint64_t)b->width * b->height;
+    VkSpan out = vk_readback(n);
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1},
+                           .imageExtent = {b->width, b->height, 1}};
+    vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
+    renderer_flush();
+    FILE *fp = fopen(path, "wb");
+    if (!fp) return;
+    fprintf(fp, "P5 %u %u 255\n", b->width, b->height);
+    fwrite(out.ptr, 1, n, fp);
+    fclose(fp);
+}
+
 static void resolve_feedback(Prog *pr) {
     nfeedback = 0;
     static int off = -1;
@@ -2226,11 +2260,10 @@ static void resolve_feedback(Prog *pr) {
             if (nosnap < 0) nosnap = getenv("LARECOMP_NO_SNAPSHOT_REUSE") != NULL;
             int si = -1;
             for (int k = 0; k < 8; k++) if (snap_tex[k] == t) si = k;
-            bool self_write = t == st.rt.depth && st.ds[0] && st.ds[1];
             TexBackend *src = vk_tex(t, true);
             Snap *existing = NULL;
             for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t && snaps[k].copy.image) existing = &snaps[k];
-            if (!nosnap && si >= 0 && (snap_ok[si] || self_write) && existing) {
+            if (!nosnap && si >= 0 && snap_ok[si] && existing) {
                 feedback_tex[nfeedback] = t;
                 feedback_set_views(nfeedback++, &existing->copy);
                 continue;
@@ -2255,6 +2288,20 @@ static void resolve_feedback(Prog *pr) {
                 snprintf(path, sizeof path, "build/fbdepth_%03d_snap.pgm", nd++);
                 debug_save_depth(dst, path);
                 cb = vk_cmd();
+            }
+            if (g_debug_frame && (src->aspect & VK_IMAGE_ASPECT_STENCIL_BIT)) {
+                static uint64_t saved_frame = ~0ull;
+                static unsigned saved;
+                uint64_t frame = renderer_present_count();
+                if (frame != saved_frame) { saved_frame = frame; saved = 0; }
+                if (saved < 8) {
+                    char path[128];
+                    snprintf(path, sizeof path, "build/fbdepth_stencil_%llu_%u_src.pgm", (unsigned long long)frame, saved);
+                    debug_save_stencil(src, path);
+                    snprintf(path, sizeof path, "build/fbdepth_stencil_%llu_%u_snap.pgm", (unsigned long long)frame, saved++);
+                    debug_save_stencil(dst, path);
+                    cb = vk_cmd();
+                }
             }
             feedback_tex[nfeedback] = t;
             feedback_set_views(nfeedback++, dst);
@@ -3160,8 +3207,8 @@ static void draw_(CmdRec *r, bool indexed) {
     // Scarlet path.
     if (!vertex_only_xfb) {
         resolve_feedback(pr);
-        snap_reason = "draw-depthwrite";
-        if (st.rt.depth && st.ds[0] && st.ds[1]) snapshots_invalidate(st.rt.depth);
+        snap_reason = "draw-depth-stencil-write";
+        if (depth_stencil_writes()) snapshots_invalidate(st.rt.depth);
         snap_reason = "draw-colorwrite";
         for (int i = 0; i < st.rt.ncolor; i++)
             if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
@@ -3618,6 +3665,9 @@ static void forensic_draw_record(Prog *pr, CmdRec *r, bool indexed) {
         if (rv->setmask & 1) fprintf(forensic_fp, "/lv%u+%u", rv->base_level, rv->num_levels);
         if (rv->setmask & 2) fprintf(forensic_fp, "/ly%u+%u", rv->min_layer, rv->num_layers);
     }
+    fprintf(forensic_fp, " ds=%02x%02x%02x/st%u/ops%02x%02x%02x/ref%02x,%02x/mask%02x,%02x",
+            st.ds[0], st.ds[1], st.ds[2], st.ds[3], st.ds[5], st.ds[6], st.ds[7],
+            st.stencil_ref[0], st.stencil_ref[1], st.stencil_mask[0], st.stencil_mask[1]);
     for (int i = 1; i < st.rt.ncolor; i++) {
         const NvnTexture *t = st.rt.color[i];
         if (!t) continue;
