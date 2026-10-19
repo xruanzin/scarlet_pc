@@ -1,7 +1,8 @@
 param(
     [int]$Jobs = 4,
     [switch]$Setup,
-    [switch]$ForceRuntime
+    [switch]$ForceRuntime,
+    [switch]$IncrementalRuntime
 )
 
 $ErrorActionPreference = "Stop"
@@ -73,11 +74,20 @@ Write-Host "[scarlet-build] Compilando runtime + codigo gerado com -j$Jobs..." -
 Write-Host "[scarlet-build] Repo MSYS2: $RepoPosix"
 Write-Host "[scarlet-build] Log: $Log"
 
-if ($ForceRuntime) {
+# Runtime rebuilds are cheap compared with lasgame.dll and must never reuse
+# stale Vulkan/NVN objects after a Git update.  Previous versions could write
+# .runtime_build_head even when make rebuilt nothing, falsely marking an old EXE
+# as current.  Default to a clean runtime rebuild; opt into incremental runtime
+# builds only with -IncrementalRuntime.
+if (-not $IncrementalRuntime -or $ForceRuntime) {
     $RtDir = Join-Path $RepoRoot "build\rt"
     if (Test-Path -LiteralPath $RtDir) {
-        Write-Host "[scarlet-build] Forcando recompilacao completa do runtime..." -ForegroundColor Yellow
+        Write-Host "[scarlet-build] Recompilando runtime do zero (lasgame permanece incremental)..." -ForegroundColor Yellow
         Remove-Item -LiteralPath $RtDir -Recurse -Force
+    }
+    $OldExe = Join-Path $RepoRoot "build\ScarletRecomp.exe"
+    if (Test-Path -LiteralPath $OldExe) {
+        Remove-Item -LiteralPath $OldExe -Force
     }
 }
 
