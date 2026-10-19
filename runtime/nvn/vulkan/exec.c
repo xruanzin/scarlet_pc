@@ -3196,6 +3196,46 @@ static void draw_(CmdRec *r, bool indexed) {
             }
         }
     }
+    // Targeted Scarlet material trace. Character materials in the academy
+    // consistently bind BC7-sRGB albedo together with BC5/BC7/BC4 auxiliary
+    // maps. Their image-view swizzles are correct, so capture the fragment
+    // program and the first words of the actually-used fragment constant
+    // buffers to locate a bad tint/material parameter rather than changing
+    // texture formats globally.
+    if (getenv("LARECOMP_LOG_MATERIAL_DRAWS")) {
+        NvnTexture *albedo = NULL;
+        int albedo_slot = -1;
+        for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
+            NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+            if (t && t->format == 0x4E && t->width <= 512 && t->height <= 512) {
+                albedo = t; albedo_slot = i; break;
+            }
+        }
+        if (albedo) {
+            static unsigned material_draw_logs;
+            if (material_draw_logs++ < 512) {
+                LOG("[material-draw] fs=%llx hash=%016llx albedo=t%d id=%llu addr=%llx %ux%u",
+                    (unsigned long long)st.program->stages[1].code_addr,
+                    (unsigned long long)fs_hash, albedo_slot,
+                    (unsigned long long)albedo->debug_id,
+                    (unsigned long long)albedo->addr, albedo->width, albedo->height);
+                uint32_t mask = pr->fi->cbuf_mask;
+                for (int bi = 0; bi < 18; bi++) {
+                    if (!(mask & (1u << bi))) continue;
+                    Range rb = st.ubuf[1][bi];
+                    if (!rb.addr || rb.size < 16) {
+                        LOG(" cb%d=none", bi);
+                        continue;
+                    }
+                    const uint32_t *p = (const uint32_t *)(uintptr_t)rb.addr;
+                    LOG(" cb%d@%llx=%08x,%08x,%08x,%08x", bi,
+                        (unsigned long long)rb.addr, p[0], p[1], p[2], p[3]);
+                }
+                LOG("\n");
+            }
+        }
+    }
+
     if (tf_barrier_pending && (!st.tf_active || st.tf_resume || tf_pending_used_by_draw(pr->vi, pr->fi)))
         tf_flush_pending_barrier();
 
