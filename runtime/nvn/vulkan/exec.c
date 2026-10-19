@@ -259,9 +259,13 @@ void vk_gpuprof_report(void) {
 // upload0, main0, upload1, main1, ...
 static bool qbatch_finish_current(bool force_main) {
     vk_end_pass();
-    if (tf_barrier_pending) stat_tf_dep_submit++;
-    tf_flush_pending_barrier();
 
+    // Do not force a transform-feedback memory barrier merely because one
+    // command buffer/list ends. Commands submitted to the same Vulkan queue
+    // remain ordered across submissions, and tf_pending_used_by_draw()/the
+    // explicit copy/compute/RT paths insert the visibility barrier at the first
+    // real consumer. Flushing here created one barrier per queue batch even when
+    // the captured stream was never read before being overwritten again.
     Sub *s = sub();
     if (!s->main_begun && !s->upload_begun && !force_main) return false;
 
