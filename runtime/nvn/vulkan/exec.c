@@ -3194,7 +3194,7 @@ static void draw_(CmdRec *r, bool indexed) {
     fkey.hair_isotropic = hair_lighting_variant(fs_hash);
     if (fkey.hair_isotropic) {
         static bool reported;
-        if (!reported) { reported = true; LOG("[vk] Scarlet isotropic hair compatibility lighting enabled\n"); }
+        if (!reported) { reported = true; LOG("[vk] Scarlet isotropic hair compatibility lighting enabled (material IDs 3/4)\n"); }
     }
     vkey.layer_varying = fkey.layer_varying = lut_slice_active;
     vkey.bindless_storage = fkey.bindless_storage = g_vk.bindless_storage_slots;
