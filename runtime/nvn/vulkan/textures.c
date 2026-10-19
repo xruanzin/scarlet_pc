@@ -1036,6 +1036,24 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
                     sw.r, sw.g, sw.b, sw.a, t->label);
             }
         }
+
+        // Broader material-view trace: the BC7-only probe can legitimately stay
+        // silent when Scarlet's character base colour is another compressed or
+        // uncompressed format.  This records sampled colour textures without
+        // changing rendering, so we can identify the real albedo path first.
+        if (getenv("LARECOMP_LOG_MATERIAL_VIEWS")) {
+            static int material_view_logs;
+            if (material_view_logs++ < 8192) {
+                const uint8_t *srcsw = v && (v->setmask & 8) ? v->swizzle : t->swizzle;
+                LOG("[material-view] id=%llu addr=%llx %ux%u fmt=%#x viewfmt=%#x viewmask=%#x "
+                    "srcsw=%u,%u,%u,%u vksw=%u,%u,%u,%u type=%d label=\"%s\"\n",
+                    (unsigned long long)t->debug_id, (unsigned long long)t->addr,
+                    t->width, t->height, t->format,
+                    v && (v->setmask & 4) ? v->format : t->format, v ? v->setmask : 0,
+                    srcsw[0], srcsw[1], srcsw[2], srcsw[3],
+                    sw.r, sw.g, sw.b, sw.a, (int)want_textype, t->label);
+            }
+        }
     }
     VkImageViewType want = view_type_for(want_textype);
     VkImageViewType have = b->base_type;
