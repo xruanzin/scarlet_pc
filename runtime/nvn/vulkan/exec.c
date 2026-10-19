@@ -92,9 +92,12 @@ static int queue_batch_limit(void) {
     static int n = -1;
     if (n < 0) {
         const char *e = getenv("LARECOMP_QUEUE_BATCH");
-        n = e ? atoi(e) : 2;
+        n = e ? atoi(e) : 4;
         if (n < 1) n = 1;
-        if (n > 2) n = 2;  // conservative on the AMD Windows driver
+        if (n > 4) n = 4;
+        // Four distinct command buffers per submit is still conservative (we never merge guest lists into one CB)
+        // but halves queue-submit pressure versus the old default of two. This matters on Scarlet's 1000+ logical
+        // lists/frame and is safe with the AMD workaround because upload/main ordering remains explicit.
     }
     return n;
 }
