@@ -61,7 +61,14 @@ try {
     Push-Location -LiteralPath $RepoRoot
     $LocationPushed = $true
     # Normal runs use the stable compiler mode, even after experiments in this PowerShell session.
+    # Shader translation/compilation stays enabled asynchronously; optimizer remains off because -O caused
+    # large dispatcher shaders to regress on startup. Timeout is non-fatal in the runtime: affected draws are
+    # skipped temporarily until their shader/pipeline finishes instead of crashing the game.
     $env:LARECOMP_VK_OPT = "0"
+    $env:LARECOMP_SHADER_WAIT_MS = "12000"
+    Remove-Item Env:LARECOMP_SHADER_TIMEOUT_EXIT -ErrorAction SilentlyContinue
+    Remove-Item Env:LARECOMP_SYNC_SHADERS -ErrorAction SilentlyContinue
+    Remove-Item Env:LARECOMP_TF_CHECK -ErrorAction SilentlyContinue
     if ($GraphicsDiagnostics) {
         $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
         $GraphicsDir = Join-Path $RepoRoot "build\scarlet-diagnostics-$Stamp"
