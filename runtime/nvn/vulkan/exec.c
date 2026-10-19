@@ -24,8 +24,6 @@ static uint64_t g_draws_total;  // (never reset: LARECOMP_COUNTER_LOG)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t stat_tf_merged, stat_tf_barriers, stat_raster_discard_sets, stat_raster_discard_on;
 static uint64_t stat_tf_dep_vbuf, stat_tf_dep_cbuf, stat_tf_dep_sbuf, stat_tf_dep_gmem, stat_tf_dep_op, stat_tf_dep_submit, stat_tf_dep_rt;
-static uint64_t stat_batch_deferred, stat_batch_order_splits;
-static _Thread_local int backend_batch_depth;
 static uint32_t stat_pass_end_line[4096];
 static bool tf_barrier_pending;
 static uint64_t tf_pending_addr[64], tf_pending_size[64];
@@ -148,18 +146,7 @@ VkCommandBuffer vk_cmd(void) {
     return s->main;
 }
 
-void renderer_submit(void);
-
 VkCommandBuffer vk_upload_cmd(void) {
-    // In batched NVN submissions uploads must stay in guest order.  The upload
-    // command buffer is submitted before the main buffer, so if earlier draws
-    // are already recorded we must close that chunk before recording a later
-    // upload.  This is the ordering fence that the previous unsafe batching
-    // experiment was missing.
-    if (backend_batch_depth && sub()->main_begun) {
-        stat_batch_order_splits++;
-        renderer_submit();
-    }
     Sub *s = sub();
     begin_cb(&s->upload, &s->upload_begun);
     return s->upload;
@@ -934,11 +921,6 @@ const char *renderer_stats(void) {
         snprintf(stats_text + n, sizeof stats_text - n, ", rdiscard %llu/%llu",
                  (unsigned long long)stat_raster_discard_on, (unsigned long long)stat_raster_discard_sets);
     }
-    if (stat_batch_deferred || stat_batch_order_splits) {
-        size_t n = strlen(stats_text);
-        snprintf(stats_text + n, sizeof stats_text - n, ", batch defer %llu/split %llu",
-                 (unsigned long long)stat_batch_deferred, (unsigned long long)stat_batch_order_splits);
-    }
     {
         uint32_t top_line[5] = {0}, top_count[5] = {0};
         for (uint32_t l = 1; l < 4096; l++) {
@@ -1006,7 +988,7 @@ const char *renderer_stats(void) {
         prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = prof_tex_watch_skips = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
-    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = stat_raster_discard_sets = stat_raster_discard_on = stat_batch_deferred = stat_batch_order_splits = 0;
+    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = stat_raster_discard_sets = stat_raster_discard_on = 0;
     stat_tf_dep_vbuf = stat_tf_dep_cbuf = stat_tf_dep_sbuf = stat_tf_dep_gmem = stat_tf_dep_op = stat_tf_dep_submit = stat_tf_dep_rt = 0;
     return stats_text;
 }
@@ -4261,17 +4243,6 @@ void vk_big_lock(void) {
 }
 void vk_big_unlock(void) { pthread_mutex_unlock(&g_vk_big); }
 
-void backend_batch_begin(void) { backend_batch_depth++; }
-
-void backend_batch_end(void) {
-    if (backend_batch_depth <= 0) return;
-    if (--backend_batch_depth == 0) {
-        vk_big_lock();
-        renderer_submit();
-        vk_big_unlock();
-    }
-}
-
 void backend_execute(uint64_t handle) {
     vk_big_lock();
     bool thread_diag = vk_exec_diag_enter(handle);
@@ -4283,7 +4254,6 @@ void backend_execute(uint64_t handle) {
     static int sync_submit = -1;
     if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
     if (sync_submit) renderer_flush();
-    else if (backend_batch_depth) stat_batch_deferred++;
     else renderer_submit();
     vk_exec_diag_leave(thread_diag);
     vk_big_unlock();
