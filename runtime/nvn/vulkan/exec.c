@@ -3655,6 +3655,18 @@ static void forensic_draw_record(Prog *pr, CmdRec *r, bool indexed) {
             if (tv->setmask & 2) fprintf(forensic_fp, "/ly%u+%u", tv->min_layer, tv->num_layers);
         }
         if (entry && nvn_texture_samples_stencil(t, &entry->view, entry->has_view)) fprintf(forensic_fp, "/stencil");
+        if (b && getenv("LARECOMP_FORENSICS_DEPTH") && renderer_format_is_depth(t->format)) {
+            static NvnTexture *saved_depth_tex[8];
+            static uint32_t saved_depth_n;
+            bool seen = false;
+            for (uint32_t di = 0; di < saved_depth_n; di++) if (saved_depth_tex[di] == t) seen = true;
+            if (!seen && saved_depth_n < 8) {
+                char dp[128];
+                saved_depth_tex[saved_depth_n] = t;
+                snprintf(dp, sizeof dp, "build/fbdepth_sample_%03u.pgm", saved_depth_n++);
+                debug_save_depth((TexBackend *)b, dp);
+            }
+        }
     }
     int nvt = pr->vi ? pr->vi->ntex : 0;
     if (nvt > 12) nvt = 12;
