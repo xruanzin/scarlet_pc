@@ -92,6 +92,14 @@ foreach ($Path in @($Exe, $GameDll, $Id)) {
     }
 }
 
+# Record exactly which repository revision produced the native runtime.
+# File timestamps are not reliable after git checkout/pull, because Git may
+# restore source mtimes older than an already-built EXE.
+$Head = (& git -C $RepoRoot rev-parse HEAD 2>$null)
+if ($LASTEXITCODE -eq 0 -and $Head) {
+    Set-Content -LiteralPath (Join-Path $RepoRoot "build\.runtime_build_head") -Value $Head.Trim() -Encoding ASCII
+}
+
 Write-Host ""
 Write-Host "[scarlet-build] BUILD CONCLUIDO" -ForegroundColor Green
 
