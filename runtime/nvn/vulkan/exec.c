@@ -22,6 +22,7 @@
 
 static uint64_t g_draws_total;  // (never reset: LARECOMP_COUNTER_LOG)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies, stat_a2c_1x;
+static uint32_t stat_pass_end_line[4096];
 // Skipped draws by reason (logged with the stats): 0 no program bound, 1 program still compiling, 2 program failed,
 // 3 no program object, 4 primitive mode, 5 pipeline still building, 6 pipeline failed.
 static uint64_t stat_skip_why[8];
@@ -943,7 +944,7 @@ static int debug_pass_no;
 // hundreds of rendering instances per frame; keeping just the source line that
 // ended each pass lets us remove the dominant break without the much heavier
 // LARECOMP_VK_PROF timestamp instrumentation.
-static uint32_t stat_pass_end_line[4096];
+
 
 static void vk_end_pass_at(int line);
 void vk_end_pass(void) { vk_end_pass_at(0); }
