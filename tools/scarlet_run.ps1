@@ -1,6 +1,7 @@
 param(
     [string]$GameRoot = "D:\Pokemon Scarlet\Extracted\Base",
     [switch]$Profile,
+    [switch]$Performance,
     [switch]$LiveLog,
     [switch]$GraphicsDiagnostics,
     [ValidateSet("Vulkan","DirectX")][string]$Backend = "Vulkan",
@@ -65,6 +66,16 @@ $env:Path = "$MsysBin;C:\msys64\usr\bin;$env:Path"
 $env:LARECOMP_NO_LAUNCHER = "1"
 $env:LARECOMP_LOG_HEAPS = "1"
 $env:LARECOMP_LOG_BINDINGS = ""
+if ($Performance) {
+    # Vega-class integrated GPUs benefit more from reducing the scalable color
+    # targets than from lowering texture quality.  0.50 = 960x540 guest color
+    # buffers at 16:9; depth/stencil stays full-size for correctness.  Skip the
+    # extra three host-side SMAA passes; the configured upscaler (FSR1 when
+    # selected) can still upscale to the window.
+    $env:LARECOMP_SCALE = "0.50"
+    $env:LARECOMP_NO_SMAA = "1"
+    Write-Host "[scarlet-run] Performance mode: 960x540 scalable targets, host SMAA bypassed." -ForegroundColor Green
+}
 if ($MaterialViews) {
     $env:LARECOMP_LOG_MATERIAL_VIEWS = "1"
     Write-Host "[scarlet-run] Material-view tracing enabled." -ForegroundColor Cyan
