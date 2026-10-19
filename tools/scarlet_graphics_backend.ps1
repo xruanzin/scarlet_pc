@@ -1,4 +1,13 @@
 # Portable backend selection. No registry/system driver installation.
+function Test-ScarletElevated {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return $false }
+    $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
+        return $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } finally { $Identity.Dispose() }
+}
+
 function Get-ScarletDirectXDriver {
     param([Parameter(Mandatory=$true)][string]$Directory)
     $Root = (Resolve-Path -LiteralPath $Directory -ErrorAction Stop).Path
@@ -33,17 +42,22 @@ function Invoke-ScarletGraphicsBackend {
     )
     $Names = @('PATH','VK_DRIVER_FILES','VK_ICD_FILENAMES','VK_ADD_DRIVER_FILES',
         'VK_LOADER_DRIVERS_SELECT','VK_LOADER_DRIVERS_DISABLE','MESA_VK_VERSION_OVERRIDE',
-        'LARECOMP_GRAPHICS_BACKEND','LARECOMP_GPU')
+        'LARECOMP_GRAPHICS_BACKEND','LARECOMP_GPU','VK_LOADER_DEBUG')
     $Previous = @{}
     foreach ($Name in $Names) { $Previous[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process') }
     try {
         $Driver = $null
         if ($Backend -eq 'DirectX') {
-            try { $Driver = Get-ScarletDirectXDriver -Directory $DirectXDirectory }
+            try {
+                if (Test-ScarletElevated) {
+                    throw 'Abra o PowerShell normalmente, sem Executar como administrador: o loader ignora a selecao portatil do Dozen em processos elevados.'
+                }
+                $Driver = Get-ScarletDirectXDriver -Directory $DirectXDirectory
+            }
             catch {
+                "[graphics-backend] DirectX preflight failed: $_" | Set-Content -LiteralPath "$Log.directx.failed.log"
                 if ($NoFallback) { throw }
                 Write-Host "[scarlet-run] DirectX indisponivel: $_ Voltando ao Vulkan." -ForegroundColor Yellow
-                "[graphics-backend] DirectX preflight failed: $_" | Set-Content -LiteralPath "$Log.directx.failed.log"
                 $Backend = 'Vulkan'
             }
         }
@@ -51,6 +65,7 @@ function Invoke-ScarletGraphicsBackend {
             [Environment]::SetEnvironmentVariable($Name, $null, 'Process')
         }
         if ($Backend -eq 'DirectX') {
+            $env:VK_LOADER_DEBUG = 'error,warn,driver'
             $env:VK_DRIVER_FILES = $Driver.Manifest
             $env:VK_ICD_FILENAMES = $Driver.Manifest
             $env:PATH = $Driver.Directory + [IO.Path]::PathSeparator + $Previous['PATH']
@@ -69,6 +84,7 @@ function Invoke-ScarletGraphicsBackend {
             Write-Host '[scarlet-run] DirectX falhou na inicializacao; reiniciando uma vez em Vulkan.' -ForegroundColor Yellow
             foreach ($Name in @('VK_DRIVER_FILES','VK_ICD_FILENAMES')) { Remove-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue }
             $env:PATH = $Previous['PATH']
+            [Environment]::SetEnvironmentVariable('VK_LOADER_DEBUG',$Previous['VK_LOADER_DEBUG'],'Process')
             [Environment]::SetEnvironmentVariable('LARECOMP_GPU',$Previous['LARECOMP_GPU'],'Process')
             $env:LARECOMP_GRAPHICS_BACKEND = 'vulkan'
             $Code = [int](& $Run $Log)

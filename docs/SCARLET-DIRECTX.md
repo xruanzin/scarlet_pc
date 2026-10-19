@@ -59,3 +59,19 @@ Validation: PowerShell parser checks; synthetic x64 driver fixture tests for
 selection, missing package, strict mode, one initialization retry, no retry after
 ready, exception restoration and clearing inherited ICD selectors on Vulkan.
 The modified device unit compiles. Windows Dozen/AMD GPU execution is untested.
+
+## Driver selection diagnostics
+
+Use an ordinary, non-administrator PowerShell. The Khronos loader ignores
+VK_DRIVER_FILES / VK_ICD_FILENAMES with elevated privileges:
+https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderDriverInterface.md
+The launcher now detects elevation before a DirectX attempt and explains the
+restriction (or visibly falls back). It does not bypass the loader policy.
+
+DirectX attempts enable loader warnings/errors/driver diagnostics. The runtime
+logs the requested ICD and enumerated driver IDs/names, and distinguishes a
+missing eligible Dozen device from the absence of native Vulkan 1.3 support.
+These changes diagnose loading; they do not establish that a particular Dozen
+build exposes all features needed for Scarlet. The reported AMD-only attempt
+is consistent with a failed/ignored ICD override; elevation is one possible
+cause, not established by that earlier log alone.

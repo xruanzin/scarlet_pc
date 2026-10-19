@@ -39,6 +39,9 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
 
 // LARECOMP_VK_VALIDATION=1: Khronos validation layer (MSYS2 package vulkan-validation-layers)
 static void create_instance(void) {
+    const char *requested = getenv("LARECOMP_GRAPHICS_BACKEND");
+    const char *icd = getenv("VK_DRIVER_FILES");
+    LOG("[graphics-backend] requested=%s ICD=%s\n", requested ? requested : "default", icd ? icd : "system");
     Uint32 n_sdl = 0;
     const char *const *sdl_ext = SDL_Vulkan_GetInstanceExtensions(&n_sdl);
     const char *ext[16];
@@ -98,6 +101,8 @@ static void pick_device(void) {
             VkPhysicalDeviceDriverProperties driver = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
             VkPhysicalDeviceProperties2 props = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &driver};
             vkGetPhysicalDeviceProperties2(pd[i], &props);
+            LOG("[graphics-backend] gpu %u driver=%u name=%s info=%s\n", i,
+                (unsigned)driver.driverID, driver.driverName, driver.driverInfo);
             bool dozen = driver.driverID == VK_DRIVER_ID_MESA_DOZEN;
             if (!strcmp(requested, "directx-dozen") && (!dozen || p.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU)) continue;
             if (!strcmp(requested, "vulkan") && dozen) continue;
@@ -106,7 +111,12 @@ static void pick_device(void) {
         if ((int)i == want) score = 100;
         if (score > best_score) { best_score = score; best = (int)i; }
     }
-    if (best < 0) FATAL("no Vulkan 1.3 device\n");
+    if (best < 0) {
+        const char *requested = getenv("LARECOMP_GRAPHICS_BACKEND");
+        if (requested && !strcmp(requested, "directx-dozen"))
+            FATAL("DirectX/Dozen unavailable: no hardware Mesa Dozen device with Vulkan 1.3; native vendor Vulkan devices are intentionally excluded. Check loader diagnostics above.\n");
+        FATAL("no eligible native Vulkan 1.3 device\n");
+    }
     g_vk.phys = pd[best];
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);

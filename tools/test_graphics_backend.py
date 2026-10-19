@@ -20,6 +20,7 @@ $env:VK_DRIVER_FILES='original-driver'
 $env:VK_ICD_FILENAMES='original-legacy'
 $env:LARECOMP_GRAPHICS_BACKEND='original-mode'
 $env:LARECOMP_GPU='9'
+$env:VK_LOADER_DEBUG='original-debug'
 $OriginalPath=$env:PATH
 $global:Attempts=0
 $Run={ param($Out)
@@ -41,6 +42,7 @@ $Run={param($Out)
     if ($global:Attempts -eq 1) { 'no Vulkan 1.3 device' | Set-Content -LiteralPath $Out; return 7 }
     Check ($env:LARECOMP_GRAPHICS_BACKEND -eq 'vulkan' -and -not $env:VK_DRIVER_FILES) 'fallback not native'
     Check ($env:PATH -eq $OriginalPath) 'fallback PATH'
+    Check ($env:VK_LOADER_DEBUG -eq 'original-debug') 'fallback debug leak'
     '[graphics-backend] ready=vulkan' | Set-Content -LiteralPath $Out
     return 0
 }
@@ -69,6 +71,14 @@ $Code=Invoke-ScarletGraphicsBackend DirectX $Missing $Log -Run {
 Check ($Code -eq 0) 'missing package fallback failed'
 try { $null=Invoke-ScarletGraphicsBackend DirectX $Missing $Log -NoFallback -Run { throw 'should not run' }; throw 'accepted missing driver' }
 catch { Check ($_.ToString() -notmatch 'accepted missing driver|should not run') 'strict missing driver executed' }
+function Test-ScarletElevated { return $true }
+$global:Attempts=0
+$Code=Invoke-ScarletGraphicsBackend DirectX $Fixture $Log -Run {
+ param($Out); $global:Attempts++; Check ($env:LARECOMP_GRAPHICS_BACKEND -eq 'vulkan') 'elevated DirectX launched'; return 0
+}
+Check ($Code -eq 0 -and $global:Attempts -eq 1) 'elevated fallback failed'
+Check ((Get-Content -LiteralPath "$Log.directx.failed.log" -Raw) -match 'administrador') 'missing elevated explanation'
+function Test-ScarletElevated { return $false }
 $Dll=Join-Path $Fixture 'vulkan_dzn.dll'
 $Bytes=[IO.File]::ReadAllBytes($Dll); $Bytes[68]=0x4c; $Bytes[69]=0x01
 [IO.File]::WriteAllBytes($Dll,$Bytes)
