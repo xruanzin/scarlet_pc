@@ -50,6 +50,18 @@ if ($passes) {
     $passes | ForEach-Object { Copy-Item $_.FullName (Join-Path $passDir $_.Name) }
 }
 
+# LARECOMP_FORENSICS_DEPTH=1 writes depth/snapshot PGM files next to the pass
+# captures. Package only files from this F9 capture, using the same timestamp
+# window as pass_*.png, so DoF/depth regressions can be diagnosed from one ZIP.
+$depths = Get-ChildItem $build -Filter "fbdepth_*.pgm" -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.LastWriteTime -ge $cutoff -and $_.LastWriteTime -le $forensics.LastWriteTime.AddSeconds(3) } |
+    Sort-Object Name
+if ($depths) {
+    $depthDir = Join-Path $tmp "depth"
+    New-Item -ItemType Directory -Force -Path $depthDir | Out-Null
+    $depths | ForEach-Object { Copy-Item $_.FullName (Join-Path $depthDir $_.Name) }
+}
+
 $gpuProfile = Join-Path $build "scarlet_gpuprof_latest.txt"
 if (Test-Path $gpuProfile) {
     Copy-Item $gpuProfile (Join-Path $tmp "scarlet_gpuprof_latest.txt")
