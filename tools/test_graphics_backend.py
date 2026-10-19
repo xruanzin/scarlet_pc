@@ -21,6 +21,7 @@ $env:VK_ICD_FILENAMES='original-legacy'
 $env:LARECOMP_GRAPHICS_BACKEND='original-mode'
 $env:LARECOMP_GPU='9'
 $env:VK_LOADER_DEBUG='original-debug'
+Remove-Item Env:LARECOMP_VK_ALLOW_13 -ErrorAction SilentlyContinue
 $OriginalPath=$env:PATH
 $global:Attempts=0
 $Run={ param($Out)
@@ -43,11 +44,13 @@ $Run={param($Out)
     Check ($env:LARECOMP_GRAPHICS_BACKEND -eq 'vulkan' -and -not $env:VK_DRIVER_FILES) 'fallback not native'
     Check ($env:PATH -eq $OriginalPath) 'fallback PATH'
     Check ($env:VK_LOADER_DEBUG -eq 'original-debug') 'fallback debug leak'
+    Check ($env:LARECOMP_VK_ALLOW_13 -eq '1') 'fallback did not allow the native AMD 1.3 driver'
     '[graphics-backend] ready=vulkan' | Set-Content -LiteralPath $Out
     return 0
 }
 $Code=Invoke-ScarletGraphicsBackend DirectX $Fixture $Log -Run $Run
 Check ($Code -eq 0 -and $global:Attempts -eq 2) 'no fallback'
+Check (-not $env:LARECOMP_VK_ALLOW_13) 'compatibility flag leaked'
 Check ((Get-Content -LiteralPath "$Log.directx.failed.log" -Raw) -match 'no Vulkan') 'lost failure log'
 $global:Attempts=0
 $Code=Invoke-ScarletGraphicsBackend DirectX $Fixture $Log -NoFallback -Run $Run

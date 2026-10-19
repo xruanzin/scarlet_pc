@@ -16,6 +16,8 @@
 #include <vk_mem_alloc.h>  // (Debian / Ubuntu libvulkan-memory-allocator-dev)
 #endif
 
+#include "compat.h"
+
 #include "../nvn.h"
 #include "../maxwell/shader.h"
 
@@ -31,6 +33,7 @@ typedef struct {
     VkDevice dev;
     VkQueue queue;
     uint32_t qfam;
+    uint32_t api_version; // actual negotiated application/device API, not a version override
     VmaAllocator vma;
     VkPhysicalDeviceProperties props;
     VkPipelineCache pcache;

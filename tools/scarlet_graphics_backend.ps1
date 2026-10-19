@@ -42,11 +42,12 @@ function Invoke-ScarletGraphicsBackend {
     )
     $Names = @('PATH','VK_DRIVER_FILES','VK_ICD_FILENAMES','VK_ADD_DRIVER_FILES',
         'VK_LOADER_DRIVERS_SELECT','VK_LOADER_DRIVERS_DISABLE','MESA_VK_VERSION_OVERRIDE',
-        'LARECOMP_GRAPHICS_BACKEND','LARECOMP_GPU','VK_LOADER_DEBUG')
+        'LARECOMP_GRAPHICS_BACKEND','LARECOMP_GPU','VK_LOADER_DEBUG','LARECOMP_VK_ALLOW_13')
     $Previous = @{}
     foreach ($Name in $Names) { $Previous[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process') }
     try {
         $Driver = $null
+        $UseCompatibilityFallback = $false
         if ($Backend -eq 'DirectX') {
             try {
                 if (Test-ScarletElevated) {
@@ -59,6 +60,7 @@ function Invoke-ScarletGraphicsBackend {
                 if ($NoFallback) { throw }
                 Write-Host "[scarlet-run] DirectX indisponivel: $_ Voltando ao Vulkan." -ForegroundColor Yellow
                 $Backend = 'Vulkan'
+                $UseCompatibilityFallback = $true
             }
         }
         foreach ($Name in @('VK_DRIVER_FILES','VK_ICD_FILENAMES','VK_ADD_DRIVER_FILES','VK_LOADER_DRIVERS_SELECT','VK_LOADER_DRIVERS_DISABLE','MESA_VK_VERSION_OVERRIDE')) {
@@ -74,6 +76,7 @@ function Invoke-ScarletGraphicsBackend {
             Write-Host '[scarlet-run] DirectX 12 experimental via Mesa Dozen (traducao de Vulkan).'
         } else {
             $env:LARECOMP_GRAPHICS_BACKEND = 'vulkan'
+            if ($UseCompatibilityFallback) { $env:LARECOMP_VK_ALLOW_13 = '1' }
             Write-Host '[scarlet-run] Vulkan nativo.'
         }
         $Code = [int](& $Run $Log)
@@ -87,6 +90,7 @@ function Invoke-ScarletGraphicsBackend {
             [Environment]::SetEnvironmentVariable('VK_LOADER_DEBUG',$Previous['VK_LOADER_DEBUG'],'Process')
             [Environment]::SetEnvironmentVariable('LARECOMP_GPU',$Previous['LARECOMP_GPU'],'Process')
             $env:LARECOMP_GRAPHICS_BACKEND = 'vulkan'
+            $env:LARECOMP_VK_ALLOW_13 = '1' # safe fallback on the user's native 1.3 AMD driver
             $Code = [int](& $Run $Log)
         }
         return $Code

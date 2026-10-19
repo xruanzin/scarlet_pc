@@ -155,6 +155,7 @@ static uint32_t *no_contraction(uint32_t *spv, size_t *nwords) {
 // SSA expansion on register dispatchers. LARECOMP_VK_OPT=1 remains an explicit experimental override.
 uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t *nwords) {
     uint64_t h = src_hash(src, stage);
+    if (g_vk.api_version && g_vk.api_version < VK_API_VERSION_1_3) h ^= 0xd021200000000001ull; // segregate SPIR-V target caches
     static int nocache = -1;
     if (nocache < 0) nocache = getenv("LARECOMP_VK_NO_SPIRV_CACHE") != NULL;
     uint32_t *out = nocache ? NULL : cache_load(h, nwords);
@@ -163,7 +164,8 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
     static __thread shaderc_compiler_t comp;
     if (!comp) comp = shaderc_compiler_initialize();
     shaderc_compile_options_t o = shaderc_compile_options_initialize();
-    shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
+    shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan,
+        g_vk.api_version && g_vk.api_version < VK_API_VERSION_1_3 ? shaderc_env_version_vulkan_1_2 : shaderc_env_version_vulkan_1_3);
     shaderc_compile_options_set_optimization_level(o, optimization_level(stage));
     shaderc_compilation_result_t r = shaderc_compile_into_spv(comp, src, strlen(src), kind_of(stage), name, "main", o);
     shaderc_compile_options_release(o);

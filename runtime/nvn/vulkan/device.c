@@ -37,6 +37,31 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
     return VK_FALSE;
 }
 
+#define VK_COMPAT_DEFINE(name, suffix) PFN_##name lvk_##name;
+VK_COMPAT_COMMANDS(VK_COMPAT_DEFINE)
+#undef VK_COMPAT_DEFINE
+
+static bool load_compat_commands(VkDevice dev, uint32_t api, PFN_vkGetDeviceProcAddr get) {
+    bool core = api >= VK_API_VERSION_1_3;
+#define VK_COMPAT_LOAD(name, suffix) \
+    lvk_##name = (PFN_##name)get(dev, core ? #name : #name suffix); \
+    if (!lvk_##name) { LOG("[vk] missing command: %s\n", core ? #name : #name suffix); return false; }
+    VK_COMPAT_COMMANDS(VK_COMPAT_LOAD)
+#undef VK_COMPAT_LOAD
+    return true;
+}
+
+// Preserve the native 1.4 policy/explicit 1.3 fallback while negotiating
+// Dozen independently: asking its 1.2 driver for a 1.4 device is not useful.
+static uint32_t instance_api_for(uint32_t loader, bool dozen, bool allow13) {
+    if (dozen) return loader >= VK_API_VERSION_1_2 ? VK_API_VERSION_1_2 : 0;
+    if (loader >= VK_API_VERSION_1_4) return VK_API_VERSION_1_4;
+    return allow13 && loader >= VK_API_VERSION_1_3 ? VK_API_VERSION_1_3 : 0;
+}
+static uint32_t minimum_device_api(bool dozen, bool allow13) {
+    return dozen ? VK_API_VERSION_1_2 : allow13 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_4;
+}
+
 // LARECOMP_VK_VALIDATION=1: Khronos validation layer (MSYS2 package vulkan-validation-layers)
 static void create_instance(void) {
     const char *requested = getenv("LARECOMP_GRAPHICS_BACKEND");
@@ -53,24 +78,16 @@ static void create_instance(void) {
     uint32_t loader_api = VK_API_VERSION_1_0;
     PFN_vkEnumerateInstanceVersion enumerate_instance_version =
         (PFN_vkEnumerateInstanceVersion)vkGetInstanceProcAddr(NULL, "vkEnumerateInstanceVersion");
-    if (enumerate_instance_version)
-        enumerate_instance_version(&loader_api);
-    LOG("[vk] loader maximum API: %u.%u.%u\n",
-        VK_API_VERSION_MAJOR(loader_api), VK_API_VERSION_MINOR(loader_api), VK_API_VERSION_PATCH(loader_api));
-
-    bool allow13 = getenv("LARECOMP_VK_ALLOW_13") != NULL;
-    uint32_t requested_api = VK_API_VERSION_1_4;
-    if (loader_api < VK_API_VERSION_1_4) {
-        if (!allow13)
-            FATAL("Vulkan 1.4 loader required (loader exposes %u.%u.%u). "
-                  "Update the Vulkan loader/driver, or set LARECOMP_VK_ALLOW_13=1 for compatibility fallback.\n",
-                  VK_API_VERSION_MAJOR(loader_api), VK_API_VERSION_MINOR(loader_api), VK_API_VERSION_PATCH(loader_api));
-        requested_api = VK_API_VERSION_1_3;
-        LOG("[vk] Vulkan 1.4 unavailable in loader; compatibility fallback to 1.3 enabled\n");
-    }
-
+    if (enumerate_instance_version) enumerate_instance_version(&loader_api);
+    LOG("[vk] loader maximum API: %u.%u.%u\n", VK_API_VERSION_MAJOR(loader_api),
+        VK_API_VERSION_MINOR(loader_api), VK_API_VERSION_PATCH(loader_api));
+    bool dozen = requested && !strcmp(requested, "directx-dozen");
+    g_vk.api_version = instance_api_for(loader_api, dozen, getenv("LARECOMP_VK_ALLOW_13") != NULL);
+    if (!g_vk.api_version)
+        FATAL("Vulkan %s loader required (loader exposes %u.%u). Native Vulkan 1.3 fallback needs LARECOMP_VK_ALLOW_13=1.\n",
+            dozen ? "1.2" : "1.4", VK_API_VERSION_MAJOR(loader_api), VK_API_VERSION_MINOR(loader_api));
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
-                             .pEngineName = "LARecomp", .apiVersion = requested_api};
+                             .pEngineName = "LARecomp", .apiVersion = g_vk.api_version};
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
                                .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext,
                                .enabledLayerCount = validate ? 1 : 0, .ppEnabledLayerNames = layers};
@@ -82,11 +99,9 @@ static void create_instance(void) {
         validate = false;
         r = vkCreateInstance(&ci, NULL, &g_vk.inst);
     }
-    if (r != VK_SUCCESS)
-        FATAL("vkCreateInstance: %d (Vulkan %u.%u requested)\n", r,
-              VK_API_VERSION_MAJOR(app.apiVersion), VK_API_VERSION_MINOR(app.apiVersion));
-    LOG("[vk] instance API selected: Vulkan %u.%u\n",
-        VK_API_VERSION_MAJOR(app.apiVersion), VK_API_VERSION_MINOR(app.apiVersion));
+    if (r != VK_SUCCESS) FATAL("vkCreateInstance: %d (Vulkan %u.%u requested)\n", r,
+        VK_API_VERSION_MAJOR(g_vk.api_version), VK_API_VERSION_MINOR(g_vk.api_version));
+    LOG("[vk] instance API selected: Vulkan %u.%u\n", VK_API_VERSION_MAJOR(g_vk.api_version), VK_API_VERSION_MINOR(g_vk.api_version));
     if (validate) {
         PFN_vkCreateDebugUtilsMessengerEXT f =
             (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.inst, "vkCreateDebugUtilsMessengerEXT");
@@ -105,8 +120,7 @@ static bool has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
     return false;
 }
 
-// Discrete GPU first (LARECOMP_GPU=<index> picks one). Vulkan 1.4 is required by default;
-// LARECOMP_VK_ALLOW_13=1 permits the old 1.3 compatibility path.
+// Discrete GPU first (LARECOMP_GPU=<index> picks one), negotiated API and a present queue.
 static void pick_device(void) {
     uint32_t n = 0;
     vkEnumeratePhysicalDevices(g_vk.inst, &n, NULL);
@@ -119,15 +133,12 @@ static void pick_device(void) {
         vkGetPhysicalDeviceProperties(pd[i], &p);
         LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
             VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
-        bool allow13 = getenv("LARECOMP_VK_ALLOW_13") != NULL;
-        uint32_t min_api = allow13 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_4;
+        const char *requested = getenv("LARECOMP_GRAPHICS_BACKEND");
+        uint32_t min_api = minimum_device_api(requested && !strcmp(requested,"directx-dozen"), getenv("LARECOMP_VK_ALLOW_13") != NULL);
         if (p.apiVersion < min_api) {
-            LOG("[vk] gpu %u rejected: requires Vulkan %u.%u%s\n", i,
-                VK_API_VERSION_MAJOR(min_api), VK_API_VERSION_MINOR(min_api),
-                allow13 ? " compatibility minimum" : "");
+            LOG("[vk] gpu %u rejected: requires Vulkan %u.%u\n", i, VK_API_VERSION_MAJOR(min_api), VK_API_VERSION_MINOR(min_api));
             continue;
         }
-        const char *requested = getenv("LARECOMP_GRAPHICS_BACKEND");
         if (requested) {
             VkPhysicalDeviceDriverProperties driver = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
             VkPhysicalDeviceProperties2 props = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &driver};
@@ -145,15 +156,15 @@ static void pick_device(void) {
     if (best < 0) {
         const char *requested = getenv("LARECOMP_GRAPHICS_BACKEND");
         if (requested && !strcmp(requested, "directx-dozen"))
-            FATAL("DirectX/Dozen unavailable: no hardware Mesa Dozen device with Vulkan 1.3; native vendor Vulkan devices are intentionally excluded. Check loader diagnostics above.\n");
-        if (getenv("LARECOMP_VK_ALLOW_13"))
-            FATAL("no eligible native Vulkan 1.3+ device\n");
-        FATAL("no eligible native Vulkan 1.4 device. Update the GPU driver/ICD, "
-              "or set LARECOMP_VK_ALLOW_13=1 for compatibility fallback.\n");
+            FATAL("DirectX/Dozen unavailable: no hardware Mesa Dozen device with Vulkan 1.2; native vendor Vulkan devices are intentionally excluded. Check loader diagnostics above.\n");
+        FATAL("no eligible native Vulkan %s device; set LARECOMP_VK_ALLOW_13=1 for Vulkan 1.3 compatibility\n",
+            getenv("LARECOMP_VK_ALLOW_13") ? "1.3+" : "1.4");
     }
     g_vk.phys = pd[best];
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
+    if (g_vk.api_version >= VK_API_VERSION_1_4 && g_vk.props.apiVersion < VK_API_VERSION_1_4)
+        g_vk.api_version = VK_API_VERSION_1_3; // selected under the explicit compatibility policy
     const char *backend = getenv("LARECOMP_GRAPHICS_BACKEND");
     if (backend && !strcmp(backend, "directx-dozen")) {
         VkPhysicalDeviceDriverProperties driver = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
@@ -177,11 +188,9 @@ static void pick_device(void) {
     free(qp);
     if (g_vk.qfam == UINT32_MAX) FATAL("no graphics+present queue\n");
     LOG("[vk] using %s\n", g_vk.props.deviceName);
-    LOG("[vk] physical device API: Vulkan %u.%u.%u\n",
-        VK_API_VERSION_MAJOR(g_vk.props.apiVersion), VK_API_VERSION_MINOR(g_vk.props.apiVersion),
-        VK_API_VERSION_PATCH(g_vk.props.apiVersion));
-    LOG("[vk] selected backend API: Vulkan %s\n",
-        g_vk.props.apiVersion >= VK_API_VERSION_1_4 ? "1.4" : "1.3 compatibility");
+    LOG("[vk] physical device API: Vulkan %u.%u.%u\n", VK_API_VERSION_MAJOR(g_vk.props.apiVersion),
+        VK_API_VERSION_MINOR(g_vk.props.apiVersion), VK_API_VERSION_PATCH(g_vk.props.apiVersion));
+    LOG("[vk] selected backend API: Vulkan %u.%u\n", VK_API_VERSION_MAJOR(g_vk.api_version), VK_API_VERSION_MINOR(g_vk.api_version));
 }
 
 static bool g_fault_ext;
@@ -210,26 +219,57 @@ void vk_device_fault_report(void) {
             (unsigned long long)vend[i].vendorFaultData);
 }
 
+static const char *pipeline_cache_path(void) {
+    return g_vk.api_version < VK_API_VERSION_1_3 ? "cache/vk_pipelines_dzn12.bin" : "cache/vk_pipelines.bin";
+}
+
 static void create_device(void) {
     uint32_t ne = 0;
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[9];
+    const char *ext[16];
+    bool compat12 = g_vk.api_version < VK_API_VERSION_1_3;
     uint32_t n_ext = 0;
     ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    if (compat12) {
+        const char *required[] = {VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+            VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME, VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME};
+        for (unsigned i = 0; i < sizeof required / sizeof required[0]; i++) {
+            if (!has_ext(ep, ne, required[i])) FATAL("Dozen Vulkan 1.2 missing required extension: %s\n", required[i]);
+            ext[n_ext++] = required[i];
+        }
+    }
     g_vk.custom_border = has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
+    if (compat12 && g_vk.custom_border) {
+        VkPhysicalDeviceCustomBorderColorFeaturesEXT cb = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT};
+        VkPhysicalDeviceFeatures2 features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &cb};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &features);
+        g_vk.custom_border = cb.customBorderColors && cb.customBorderColorWithoutFormat;
+    }
     if (g_vk.custom_border) ext[n_ext++] = VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME;
     g_vk.divisor = has_ext(ep, ne, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
+    if (compat12 && g_vk.divisor) {
+        VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT divisor = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT};
+        VkPhysicalDeviceFeatures2 features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &divisor};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &features);
+        g_vk.divisor = divisor.vertexAttributeInstanceRateDivisor;
+    }
     if (g_vk.divisor) ext[n_ext++] = VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
     g_vk.host_import = has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);  // guest heap as a GPU buffer (exec.c)
     if (g_vk.host_import) ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
+    if (compat12 && fault) {
+        VkPhysicalDeviceFaultFeaturesEXT fault_features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+        VkPhysicalDeviceFeatures2 features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &fault_features};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &features);
+        fault = fault_features.deviceFault;
+    }
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     g_fault_ext = fault;
 
-    // Probe only. Transform feedback is still deliberately not enabled until
-    // Scarlet's exact stream-output layout has been captured and translated.
+    // Enable transform feedback only when the driver supports the translated
+    // multi-stream output layout.
     bool tf_ext = has_ext(ep, ne, VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME);
     VkPhysicalDeviceTransformFeedbackFeaturesEXT tf_feat = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT};
@@ -252,9 +292,31 @@ static void create_device(void) {
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
-    VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT ed2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT};
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT ed1 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT, .pNext = &ed2};
+    VkPhysicalDeviceSynchronization2FeaturesKHR sync = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR, .pNext = &ed1};
+    VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR, .pNext = &sync};
+    VkPhysicalDeviceVulkan11Features have11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+        .pNext = compat12 ? &dynamic : NULL};
+    VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &have11};
     VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have12};
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+    if (compat12) {
+#define REQUIRE_FEATURE(value) if (!(value)) FATAL("Dozen Vulkan 1.2 missing required feature: %s\n", #value)
+        REQUIRE_FEATURE(dynamic.dynamicRendering);
+        REQUIRE_FEATURE(sync.synchronization2);
+        REQUIRE_FEATURE(ed1.extendedDynamicState);
+        REQUIRE_FEATURE(ed2.extendedDynamicState2);
+        REQUIRE_FEATURE(have12.timelineSemaphore);
+        REQUIRE_FEATURE(have.features.shaderInt64);
+        REQUIRE_FEATURE(have.features.independentBlend);
+        REQUIRE_FEATURE(have.features.textureCompressionBC);
+#undef REQUIRE_FEATURE
+        // Only the advertised base feature is requested; optional logic-op and
+        // patch-control-point modes are not used by this renderer.
+        ed2.extendedDynamicState2LogicOp = VK_FALSE;
+        ed2.extendedDynamicState2PatchControlPoints = VK_FALSE;
+    }
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT div = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT,
         .vertexAttributeInstanceRateDivisor = VK_TRUE, .vertexAttributeInstanceRateZeroDivisor = VK_FALSE};
@@ -270,15 +332,23 @@ static void create_device(void) {
                                             .maintenance4 = VK_TRUE,
                                             .pNext = tf ? (void *)&tf_feat :
                                                      g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL};
+    if (compat12) ed2.pNext = f13.pNext; // append the same optional TF/border/divisor tail
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                             .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
                                             .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
                                             .scalarBlockLayout = VK_TRUE,
                                             .descriptorIndexing = have12.descriptorIndexing,
                                             .shaderStorageImageArrayNonUniformIndexing = have12.shaderStorageImageArrayNonUniformIndexing,
-                                            .pNext = &f13};
+                                            .pNext = compat12 ? (void *)&dynamic : (void *)&f13};
+    if (compat12) {
+        f12.shaderInt8 = have12.shaderInt8;
+        f12.samplerMirrorClampToEdge = have12.samplerMirrorClampToEdge;
+        f12.uniformAndStorageBuffer8BitAccess = have12.uniformAndStorageBuffer8BitAccess;
+        f12.storageBuffer8BitAccess = have12.storageBuffer8BitAccess;
+        f12.scalarBlockLayout = have12.scalarBlockLayout;
+    }
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-                                            .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
+                                            .storageBuffer16BitAccess = compat12 ? have11.storageBuffer16BitAccess : VK_TRUE, .pNext = &f12};
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = fault ? (void *)&ff : (void *)&f11};
@@ -323,9 +393,15 @@ static void create_device(void) {
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
+    if (!load_compat_commands(g_vk.dev, g_vk.api_version, vkGetDeviceProcAddr)) FATAL("required Vulkan commands unavailable\n");
+    LOG("[graphics-backend] negotiated Vulkan %u.%u (%s commands)\n", VK_API_VERSION_MAJOR(g_vk.api_version),
+        VK_API_VERSION_MINOR(g_vk.api_version), compat12 ? "KHR/EXT" : "core");
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
 
-    uint32_t vma_api = g_vk.props.apiVersion >= VK_API_VERSION_1_4 ? VK_API_VERSION_1_4 : VK_API_VERSION_1_3;
+    uint32_t vma_api = g_vk.api_version;
+#if VMA_VULKAN_VERSION < 1004000
+    if (vma_api > VK_API_VERSION_1_3) vma_api = VK_API_VERSION_1_3;
+#endif
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
                                  .vulkanApiVersion = vma_api};
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
@@ -341,7 +417,7 @@ static void create_device(void) {
     // pipeline cache: cache/vk_pipelines.bin (written by vk_pipeline_cache_save)
     size_t sz = 0;
     void *data = NULL;
-    FILE *fp = fopen("cache/vk_pipelines.bin", "rb");
+    FILE *fp = fopen(pipeline_cache_path(), "rb");
     if (fp) {
         fseek(fp, 0, SEEK_END);
         sz = (size_t)ftell(fp);
@@ -367,11 +443,13 @@ void vk_pipeline_cache_save(void) {  // (exit and exec.c's periodic save: one wr
     void *data = malloc(sz);
     if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, data) == VK_SUCCESS) {
         mkdir("cache", 0755);
-        FILE *f = fopen("cache/vk_pipelines.bin.tmp", "wb");
+        char tmp[128];
+        snprintf(tmp, sizeof tmp, "%s.tmp", pipeline_cache_path());
+        FILE *f = fopen(tmp, "wb");
         if (f) {
             bool ok = fwrite(data, 1, sz, f) == sz;
             fclose(f);
-            if (ok) { remove("cache/vk_pipelines.bin"); rename("cache/vk_pipelines.bin.tmp", "cache/vk_pipelines.bin"); }
+            if (ok) { remove(pipeline_cache_path()); rename(tmp, pipeline_cache_path()); }
         }
     }
     free(data);    pthread_mutex_unlock(&lock);

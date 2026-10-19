@@ -23,9 +23,13 @@ HARNESS = r'''
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <string.h>
 #include "nvn/vulkan/shaders.h"
+VkG g_vk = {.api_version = VK_API_VERSION_1_3};
 void rt_fatal_trace(void) { abort(); }
 int main(int argc, char **argv) {
+    const char *api = getenv("SCARLET_TEST_SHADER_API");
+    g_vk.api_version = api && !strcmp(api,"12") ? VK_API_VERSION_1_2 : VK_API_VERSION_1_3;
     assert(argc == 4); FILE *f = fopen(argv[1], "rb"); assert(f);
     fseek(f, 0, SEEK_END); long n = ftell(f); rewind(f); assert(n >= 0);
     char *src = calloc((size_t)n + 1, 1); assert(fread(src, 1, (size_t)n, f) == (size_t)n); fclose(f);
@@ -96,12 +100,13 @@ class ShaderCompilationTests(unittest.TestCase):
                        '-Wl,--gc-sections', '-pthread', '-lm', '-o', str(cls.exe)],
                        check=True, capture_output=True, text=True)
 
-    def compile(self, source, stage, *, mode=None, name='shader', cwd=None, check=True):
+    def compile(self, source, stage, *, mode=None, name='shader', cwd=None, check=True, api=13):
         work = cwd or self.path
         shader = work / (name + '.glsl')
         output = work / (name + '.spv')
         shader.write_text(source)
         env = dict(os.environ)
+        env['SCARLET_TEST_SHADER_API'] = str(api)
         env.pop('LARECOMP_VK_OPT', None)
         env.pop('LARECOMP_VK_NO_SPIRV_CACHE', None)
         if mode is not None:
@@ -112,9 +117,20 @@ class ShaderCompilationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr[:2000])
             validator = os.environ.get('SPIRV_VAL') or shutil.which('spirv-val')
             if validator:
-                r = subprocess.run([validator, '--target-env', 'vulkan1.3', str(output)], capture_output=True, text=True)
+                r = subprocess.run([validator, '--target-env', 'vulkan1.' + ('2' if api == 12 else '3'), str(output)], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
         return output, result
+
+    def test_vulkan12_compute_and_cache_target_separation(self):
+        work=self.path/'api-targets';work.mkdir()
+        source='#version 460\nlayout(local_size_x_id=0,local_size_y_id=1,local_size_z_id=2) in;\nlayout(set=0,binding=0,std430) buffer Data { uint values[]; };\nvoid main(){values[gl_GlobalInvocationID.x]=gl_WorkGroupSize.x;}\n'
+        native,_=self.compile(source,5,name='native',cwd=work,api=13)
+        compat,_=self.compile(source,5,name='compat',cwd=work,api=12)
+        version=struct.unpack_from('<I',compat.read_bytes(),4)[0]
+        self.assertLessEqual(version,0x00010500)
+        self.assertEqual(len(list((work/'cache/spirv').glob('*.spv'))),2)
+        cached,_=self.compile(source,5,name='compat-cached',cwd=work,api=12)
+        self.assertEqual(cached.read_bytes(),compat.read_bytes())
 
     def test_large_dispatcher_avoids_ssa_expansion_and_stale_optimized_cache(self):
         work = self.path / 'stress'

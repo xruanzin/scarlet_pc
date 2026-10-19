@@ -30,6 +30,7 @@ pass the extracted directory to `scarlet_run.ps1 -Backend DirectX -DirectXDirect
 Return to the original native Vulkan driver:
 
 ```powershell
+$env:LARECOMP_VK_ALLOW_13 = "1" # for the Vega 7 driver reporting Vulkan 1.3
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\scarlet_run.ps1 -Backend Vulkan
 ```
 
@@ -41,8 +42,10 @@ Mesa directory. The game EXE and save locations are the same.
 
 The runtime checks the actual selected driver ID: DirectX requires hardware
 Mesa Dozen; explicit Vulkan excludes Dozen. No API-version override or feature
-spoofing is used. The port requires Vulkan 1.3 and additional device features;
-a Dozen build/hardware combination that lacks them will fail initialization.
+spoofing is used. The native path follows the concurrent branch change: Vulkan 1.4 by default,
+with LARECOMP_VK_ALLOW_13=1 permitting native Vulkan 1.3 compatibility. The Dozen path negotiates Vulkan 1.2 plus
+KHR/EXT equivalents and checks required features; a combination missing them
+will fail initialization with the actual extension or feature name.
 That is a limitation of this integration, not proof of working D3D12 gameplay.
 
 ## Failure handling
@@ -75,3 +78,50 @@ These changes diagnose loading; they do not establish that a particular Dozen
 build exposes all features needed for Scarlet. The reported AMD-only attempt
 is consistent with a failed/ignored ICD override; elevation is one possible
 cause, not established by that earlier log alone.
+
+## Vulkan 1.2 negotiation
+
+The DirectX path now requests Vulkan 1.2 at instance creation and accepts a
+hardware Dozen 1.2 device. It requires and enables:
+
+- VK_KHR_dynamic_rendering
+- VK_KHR_synchronization2
+- VK_EXT_extended_dynamic_state
+- VK_EXT_extended_dynamic_state2
+
+It queries and validates their feature bits, timeline semaphores, shaderInt64,
+independentBlend and BC texture support before device creation. It does not
+request a Vulkan13Features structure in this path. Optional 8/16-bit/scalar
+features are enabled only when reported; optional border/divisor/fault
+extensions are disabled when their needed feature bits are unavailable.
+
+Fourteen promoted commands are resolved using KHR/EXT entry points on 1.2 and
+core names on native 1.3. Structures/constants retain their standard aliased
+values. References:
+https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_dynamic_rendering.html
+https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_synchronization2.html
+
+Shaderc targets Vulkan 1.2 for Dozen (including compute specialization constants),
+VMA and ImGui receive the negotiated API, and the SPIR-V target cache is separated.
+Dozen pipeline caches use cache/vk_pipelines_dzn12.bin, preserving native Vulkan's
+cache/vk_pipelines.bin. Vulkan remains selectable and the startup fallback remains.
+
+Validation includes the actual production device-creation function against a
+mock ICD: 1.2 extension and 1.3 core paths, missing extension/feature/command,
+and optional extensions without usable features. Real shaderc compiles compute
+for Vulkan 1.2, with spirv-val validation and a two-target disk-cache regression.
+Native vertex invariance and transform-feedback shader tests pass. Modified
+Vulkan C/C++ units compile. No Windows/Dozen GPU game validation is available;
+this removes the unconditional 1.3 version gate, not all possible driver limits.
+
+The native 1.4/default and explicit 1.3 compatibility policy from commit 6581110
+is preserved. Dozen's 1.2 policy is independent of it. If the instance supports
+1.4 but the selected native device is 1.3 under the explicit fallback, the
+application/device consumers use effective API 1.3. Unit tests cover this
+version-selection policy alongside the Dozen path.
+
+Automatic startup fallback permits native Vulkan 1.3 for that retry and restores
+LARECOMP_VK_ALLOW_13 afterwards. This preserves the safe return on the Vega 7
+while keeping the branch's explicit native Vulkan default policy. Older VMA
+headers receive at most allocator API 1.3 on the native 1.4 path, without changing
+the negotiated instance/device version or overriding driver capabilities.
