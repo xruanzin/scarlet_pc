@@ -2082,6 +2082,7 @@ static NvnTexture *feedback_tex[4];
 static VkImageView feedback_view[4][2]; // depth/color and stencil views of the same snapshot
 static int nfeedback;
 static uint64_t g_cur_fs_hash;
+uint64_t renderer_present_count(void);
 static uint64_t fragment_code_hash(uint64_t fs) {
     static uint64_t previous, hash;
     if (fs != previous) {
