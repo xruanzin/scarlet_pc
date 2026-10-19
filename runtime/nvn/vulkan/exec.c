@@ -21,7 +21,7 @@
 #include "../../settings.h"
 
 static uint64_t g_draws_total;  // (never reset: LARECOMP_COUNTER_LOG)
-static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies, stat_a2c_1x;
+static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint32_t stat_pass_end_line[4096];
 // Skipped draws by reason (logged with the stats): 0 no program bound, 1 program still compiling, 2 program failed,
 // 3 no program object, 4 primitive mode, 5 pipeline still building, 6 pipeline failed.
@@ -664,26 +664,6 @@ typedef struct {
     uint8_t has_dview;
 } RtState;
 
-static bool rt_view_equal(const NvnTextureView *a, bool ha, const NvnTextureView *b, bool hb) {
-    uint32_t ma = ha ? a->setmask & 7u : 0u;  // level/layer/format affect attachment views; swizzle does not
-    uint32_t mb = hb ? b->setmask & 7u : 0u;
-    if (ma != mb) return false;
-    if ((ma & 1u) && (a->base_level != b->base_level || a->num_levels != b->num_levels)) return false;
-    if ((ma & 2u) && (a->min_layer != b->min_layer || a->num_layers != b->num_layers)) return false;
-    if ((ma & 4u) && a->format != b->format) return false;
-    return true;
-}
-
-static bool rt_state_equal(const RtState *a, const RtState *b) {
-    if (a->ncolor != b->ncolor || a->depth != b->depth) return false;
-    for (int i = 0; i < a->ncolor; i++) {
-        if (a->color[i] != b->color[i]) return false;
-        if (a->color[i] && !rt_view_equal(&a->cview[i], a->has_cview[i] != 0, &b->cview[i], b->has_cview[i] != 0)) return false;
-    }
-    if (!a->depth) return true;
-    return rt_view_equal(&a->dview, a->has_dview != 0, &b->dview, b->has_dview != 0);
-}
-
 typedef struct { uint64_t addr, size; } Range;
 
 // Extension commands are not exported by vulkan-1.lib on Windows. Resolve them
@@ -732,7 +712,6 @@ static struct {
     float blend_color[4];
     uint32_t stencil_ref[2], stencil_mask[2], stencil_vmask[2];
     bool prim_restart;
-    bool raster_discard;
     uint32_t restart_index;
     uint64_t copy_row_stride, copy_image_stride;
     uint64_t obj;       // frame interpolation: the game object the current draws belong to (CMD_OBJECT), 0 = none
@@ -823,10 +802,6 @@ const char *renderer_stats(void) {
              atomic_exchange(&stat_compiles, 0), atomic_exchange(&stat_translate_ns, 0) / 1e6, atomic_exchange(&stat_spirv_ns, 0) / 1e6, atomic_exchange(&stat_pipe_ns, 0) / 1e6,
              stat_shader_wait_ns / 1e6,
              (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0);
-    if (stat_a2c_1x) {
-        size_t n = strlen(stats_text);
-        snprintf(stats_text + n, sizeof stats_text - n, ", a2c1x %llu", (unsigned long long)stat_a2c_1x);
-    }
     {
         uint32_t top_line[5] = {0}, top_count[5] = {0};
         for (uint32_t l = 1; l < 4096; l++) {
@@ -894,7 +869,7 @@ const char *renderer_stats(void) {
         prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = prof_tex_watch_skips = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
-    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_a2c_1x = 0;
+    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
     return stats_text;
 }
 
@@ -1698,7 +1673,7 @@ typedef struct {
     uint32_t attr_mask;
     uint32_t stride[17], divisor[17], used_streams;
     uint8_t blend[8][8];
-    uint8_t blend_on, a2c, topo_class, poly_fill, raster_discard;
+    uint8_t blend_on, a2c, topo_class, poly_fill;
     uint32_t write_mask[8];
 } PipeKey;
 
@@ -1758,7 +1733,7 @@ static void build_pipeline(void *arg) {
                                                  .topology = topo_class_base(k->topo_class)};
     VkPipelineViewportStateCreateInfo vs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
     VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-                                                 .rasterizerDiscardEnable = k->raster_discard || k->prog->vkey.xfb,
+                                                 .rasterizerDiscardEnable = k->prog->vkey.xfb,
                                                  .polygonMode = k->poly_fill ? VK_POLYGON_MODE_FILL : VK_POLYGON_MODE_LINE, .lineWidth = 1};
     VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
                                                .rasterizationSamples = (VkSampleCountFlagBits)k->samples, .alphaToCoverageEnable = k->a2c};
@@ -2857,19 +2832,7 @@ static void draw_(CmdRec *r, bool indexed) {
             memcpy(k.blend[i], st.blend[i], 8);
         }
     }
-    // NVN alpha-to-coverage is only meaningful for an enabled multisample
-    // rasterization target. Carrying the state bit into a 1-sample Vulkan
-    // pipeline turns ordinary translucent/material alpha into a 1-bit coverage
-    // mask on some AMD drivers, producing the dense stipple/checker pattern seen
-    // over Scarlet's cutscenes and character materials.
-    if (st.ms[0xC] && pass_samples == 1) {
-        stat_a2c_1x++;
-        static int told_a2c_1x;
-        if (!told_a2c_1x++)
-            LOG("[vk] suppressing NVN alpha-to-coverage on 1-sample target (prevents Scarlet stipple)\n");
-    }
-    k.a2c = pass_samples > 1 && st.ms[0] && st.ms[0xC] != 0;
-    k.raster_discard = st.raster_discard;
+    k.a2c = st.ms[0xC] != 0;
     k.topo_class = cls;
     k.poly_fill = st.poly[2] != 1;
     uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
@@ -3920,7 +3883,7 @@ static void exec_list(uint64_t handle, int depth) {
             st.rt.has_dview = rt->has_dview;
             static int always = -1;
             if (always < 0) always = getenv("LARECOMP_VK_PASS_RESTART") != NULL;
-            if (always || !rt_state_equal(&prev, &st.rt)) st.rt_dirty = true;
+            if (always || memcmp(&prev, &st.rt, sizeof prev)) st.rt_dirty = true;
             break;
         }
         case CMD_SET_VIEWPORTS:
@@ -3945,7 +3908,6 @@ static void exec_list(uint64_t handle, int depth) {
         }
         case CMD_SET_POLYGON_OFFSET: memcpy(st.poly_offset, r->f, sizeof st.poly_offset); break;
         case CMD_SET_PRIMITIVE_RESTART: st.prim_restart = r->x[0] != 0; st.restart_index = (uint32_t)r->x[1]; break;
-        case CMD_SET_RASTERIZER_DISCARD: st.raster_discard = r->x[1] != 0; break;
         case CMD_SET_COPY_STRIDES: st.copy_row_stride = r->x[0]; st.copy_image_stride = r->x[1]; break;
         case CMD_CLEAR_COLOR: {
             snap_reason = "clear-color"; snapshots_invalidate(NULL);
@@ -4132,7 +4094,7 @@ void vk_big_lock(void) {
 }
 void vk_big_unlock(void) { pthread_mutex_unlock(&g_vk_big); }
 
-static void backend_execute_common(uint64_t handle, bool submit_after) {
+void backend_execute(uint64_t handle) {
     vk_big_lock();
     bool thread_diag = vk_exec_diag_enter(handle);
     PROF_T0();
@@ -4143,13 +4105,10 @@ static void backend_execute_common(uint64_t handle, bool submit_after) {
     static int sync_submit = -1;
     if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
     if (sync_submit) renderer_flush();
-    else if (submit_after) renderer_submit();
+    else renderer_submit();
     vk_exec_diag_leave(thread_diag);
     vk_big_unlock();
 }
-
-void backend_execute_deferred(uint64_t handle) { backend_execute_common(handle, false); }
-void backend_execute(uint64_t handle) { backend_execute_common(handle, true); }
 
 // ================================================================== frame interpolation (prototype)
 // LARECOMP_INTERP=1: 60 fps from the game's 30 by drawing an in-between frame (docs/PESQUISA-60FPS.md). The game's
