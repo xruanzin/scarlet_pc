@@ -2095,6 +2095,12 @@ static bool sharp_dof_variant(uint64_t hash) {
     // Same composite fingerprint in the academy, classroom and statue captures.
     return e && atoi(e) != 0 && hash == 0xfbff97881854688eull;
 }
+static bool hair_lighting_variant(uint64_t hash) {
+    const char *e = getenv("LARECOMP_HAIR_ISOTROPIC");
+    // Deferred lighting in both academy captures; never select a material draw.
+    return e && atoi(e) != 0 && hash == 0xaa68a5939321c84aull;
+}
+
 static NvnTexture *snap_tex[8];
 static bool snap_ok[8];
 static const char *snap_why[8];
@@ -3117,6 +3123,11 @@ static void draw_(CmdRec *r, bool indexed) {
     vkey.glsl = fkey.glsl = 1;
     uint64_t fs_hash = fragment_code_hash(st.program->stages[1].code_addr);
     fkey.sharp_scene = sharp_dof_variant(fs_hash);
+    fkey.hair_isotropic = hair_lighting_variant(fs_hash);
+    if (fkey.hair_isotropic) {
+        static bool reported;
+        if (!reported) { reported = true; LOG("[vk] Scarlet isotropic hair compatibility lighting enabled\n"); }
+    }
     vkey.layer_varying = fkey.layer_varying = lut_slice_active;
     vkey.bindless_storage = fkey.bindless_storage = g_vk.bindless_storage_slots;
     vkey.storage_buffers = fkey.storage_buffers = storage_buffer_count();
