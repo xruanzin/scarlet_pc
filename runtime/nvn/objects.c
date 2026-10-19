@@ -280,11 +280,13 @@ NVN(nvnBufferInvalidateMappedRange) { (void)c; }
 // ================================================================== textures
 // TextureBuilder: device@0 flags@8 target@0xC width@0x10 height@0x14 depth@0x18 levels@0x1C
 //   format@0x20 samples@0x24 swizzle@0x28 dsmode@0x2C stride@0x30 pool@0x38 offset@0x40
-//   packaged@0x48 layout@0x50 glname@0x58
+//   packaged@0x48 layout@0x50 glname@0x58 packaged-layout-present@0x60 (host-private)
 #define TB(T, off) G(T, A(0), off)
 NVN(nvnTextureBuilderSetDevice) { TB(uint64_t, 0) = A(1); }
 NVN(nvnTextureBuilderSetDefaults) {
-    memset(AP(0) + 8, 0, 0x58);
+    // NVNtextureBuilder is 0x80 bytes. Clear the host-private tail as well so
+    // packaged-layout-present never survives a reused builder.
+    memset(AP(0) + 8, 0, 0x78);
     TB(uint32_t, 0xC) = 1;  // 2D
     TB(uint32_t, 0x10) = TB(uint32_t, 0x14) = TB(uint32_t, 0x18) = 1;
     TB(uint32_t, 0x1C) = 1;
@@ -311,7 +313,10 @@ NVN(nvnTextureBuilderSetDepthStencilMode) { TB(uint32_t, 0x2C) = (uint32_t)A(1);
 NVN(nvnTextureBuilderSetStride) { TB(uint64_t, 0x30) = A(1); }
 NVN(nvnTextureBuilderSetStorage) { TB(uint64_t, 0x38) = A(1); TB(uint64_t, 0x40) = A(2); }
 NVN(nvnTextureBuilderSetPackagedTextureData) { TB(uint64_t, 0x48) = A(1); }
-NVN(nvnTextureBuilderSetPackagedTextureLayout) { TB(uint64_t, 0x50) = A(1) ? *(uint64_t *)AP(1) : 0; }
+NVN(nvnTextureBuilderSetPackagedTextureLayout) {
+    TB(uint64_t, 0x50) = A(1) ? *(uint64_t *)AP(1) : 0;
+    TB(uint8_t, 0x60) = A(1) ? 1 : 0;
+}
 NVN(nvnTextureBuilderSetGLTextureName) { TB(uint32_t, 0x58) = (uint32_t)A(1); }
 NVN(nvnTextureBuilderGetDevice) { RET(TB(uint64_t, 0)); }
 NVN(nvnTextureBuilderGetFlags) { RET(TB(uint32_t, 8)); }
@@ -353,13 +358,20 @@ static void builder_layout(uint64_t b, TexLayout *t) {
     if (!t->layers) t->layers = 1;
     t->levels = G(uint32_t, b, 0x1C) ? G(uint32_t, b, 0x1C) : 1;
     tegra_layout_init(t);
-    // Packaged textures (BNTX) were swizzled offline with their own block height, which can differ
-    // from the driver default: NVNpackagedTextureLayout's low word is log2(GOBs per block).
+    // BNTX/NVN packagedTextureLayout is a bitfield, not a bare block-height
+    // integer. Bits 0..2 are blockHeightLog2; higher bits carry packaged/sparse
+    // layout flags. The old code accepted the layout only when the *entire*
+    // low word was <= 5, so values such as 0x11/0x21 silently fell back to a
+    // guessed block height and BC7/BC6H textures were deswizzled with the wrong
+    // GOB geometry (the coloured/stippled surfaces seen in Scarlet).
     uint64_t pl = G(uint64_t, b, 0x50);
-    if (pl && (uint32_t)pl <= 5) t->block_height_log2 = (uint32_t)pl;
-    if (pl && getenv("LARECOMP_LOG_PACKAGED")) {
+    bool have_pl = G(uint8_t, b, 0x60) != 0;
+    if (have_pl) t->block_height_log2 = (uint32_t)pl & 7u;
+    if (have_pl && getenv("LARECOMP_LOG_PACKAGED")) {
         static int n;
-        if (n++ < 4000) LOG("[nvn] packaged layout %016llx fmt %#x %ux%u lv %u -> default bh %u\n", pl, G(uint32_t, b, 0x20), t->width, t->height, t->levels, t->block_height_log2);
+        if (n++ < 4000) LOG("[nvn] packaged layout %016llx fmt %#x %ux%u lv %u -> bh %u flags %#x\n",
+                            pl, G(uint32_t, b, 0x20), t->width, t->height, t->levels,
+                            t->block_height_log2, ((uint32_t)pl & ~7u));
     }
 }
 
