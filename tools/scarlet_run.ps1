@@ -13,16 +13,15 @@ $GameDll = Join-Path $RepoRoot "build\lasgame.dll"
 $ExeFs = Join-Path $GameRoot "exefs"
 $RomFs = Join-Path $GameRoot "romfs"
 
-# git pull updates source files, not the already-built EXE. Rebuild incrementally
-# whenever renderer/runtime sources are newer than ScarletRecomp.exe, otherwise
-# graphics fixes can appear to have no effect even though the branch is current.
+# git pull updates source files, not the already-built EXE. Compare the exact
+# Git revision that produced the runtime; timestamps are unreliable after checkout.
 if (Test-Path -LiteralPath $Exe -PathType Leaf -and -not $env:LARECOMP_SKIP_AUTO_BUILD) {
-    $ExeTime = (Get-Item -LiteralPath $Exe).LastWriteTimeUtc
-    $NewerSource = Get-ChildItem -LiteralPath (Join-Path $RepoRoot "runtime") -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -in @('.c','.h','.cpp','.m') -and $_.LastWriteTimeUtc -gt $ExeTime } |
-        Select-Object -First 1
-    if ($NewerSource) {
-        Write-Host "[scarlet-run] Runtime alterado desde o ultimo EXE; fazendo build incremental..." -ForegroundColor Yellow
+    $Head = (& git -C $RepoRoot rev-parse HEAD 2>$null)
+    $Marker = Join-Path $RepoRoot "build\.runtime_build_head"
+    $BuiltHead = if (Test-Path -LiteralPath $Marker) { (Get-Content -LiteralPath $Marker -Raw).Trim() } else { "" }
+    if ($LASTEXITCODE -ne 0 -or -not $Head) { $Head = "" }
+    if (-not $BuiltHead -or $BuiltHead -ne $Head.Trim()) {
+        Write-Host "[scarlet-run] EXE nao corresponde ao HEAD atual; fazendo build incremental..." -ForegroundColor Yellow
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "scarlet_build_windows.ps1")
         if ($LASTEXITCODE -ne 0) {
             throw "Build incremental falhou (exit $LASTEXITCODE). Envie scarlet_build.log."
