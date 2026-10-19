@@ -215,11 +215,17 @@ void vk_gpuprof_report(void) {
     if (vkGetQueryPoolResults(g_vk.dev, gp_qp, 0, (uint32_t)gp_n, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
         double per = g_vk.props.limits.timestampPeriod / 1e6, total = (t[gp_n - 1] - t[0]) * per;
         LOG("[gpuprof] %d marks, %.2f ms first to last (rows: the work after each mark, until the next)\n", gp_n, total);
+        mkdir("build", 0755);
+        FILE *pf = fopen("build/scarlet_gpuprof_latest.txt", "w");
+        if (pf) fprintf(pf, "# %d marks, %.3f ms first-to-last\n", gp_n, total);
         for (int i = 0; i + 1 < gp_n; i++) {
             double ms = (t[i + 1] - t[i]) * per;
             LOG("[gpuprof] %6.3f ms %5.1f%%  %s%s", ms, 100 * ms / (total > 0 ? total : 1), gp_label[i], gp_draws[i] ? "" : "\n");
             if (gp_draws[i]) LOG(", %u draws\n", gp_draws[i]);
+            if (pf) fprintf(pf, "%6.3f ms %5.1f%%  %s%s%u\n", ms, 100 * ms / (total > 0 ? total : 1),
+                            gp_label[i], gp_draws[i] ? " draws=" : "", gp_draws[i]);
         }
+        if (pf) fclose(pf);
     }
     gp_n = 0;
 }
