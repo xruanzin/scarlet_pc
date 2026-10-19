@@ -4265,7 +4265,11 @@ void backend_batch_begin(void) { backend_batch_depth++; }
 
 void backend_batch_end(void) {
     if (backend_batch_depth <= 0) return;
-    if (--backend_batch_depth == 0) renderer_submit();
+    if (--backend_batch_depth == 0) {
+        vk_big_lock();
+        renderer_submit();
+        vk_big_unlock();
+    }
 }
 
 void backend_execute(uint64_t handle) {
