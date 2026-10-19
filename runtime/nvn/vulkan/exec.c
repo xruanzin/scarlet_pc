@@ -4221,11 +4221,14 @@ static void exec_list(uint64_t handle, int depth) {
                 stat_tf_merged++;
                 // Keep the dynamic-rendering instance open across independent TF passes. A barrier is
                 // inserted lazily before a consumer, a resume counter read, a render-target change, or submission.
-                // [tf-check]: does the GPU really write sane vertex data into the guest buffers? Look at the first
-                // few TF passes (waits for the GPU once each). nan/huge/zero counts per buffer tell a working TF
-                // from one that writes nothing, garbage or the wrong layout.
+                //
+                // The old unconditional [tf-check] path flushed and waited for the whole GPU on the first 12 TF
+                // passes. That was useful while bringing stream output up, but it stalls Scarlet exactly when the
+                // character/world geometry begins using TF. Keep the expensive readback strictly diagnostic.
                 static int tf_checks;
-                if (tf_checks < 12) {
+                static int tf_check_enabled = -1;
+                if (tf_check_enabled < 0) tf_check_enabled = getenv("LARECOMP_TF_CHECK") != NULL;
+                if (tf_check_enabled && tf_checks < 12) {
                     tf_checks++;
                     uint64_t sq = vk_pending_seq();
                     renderer_flush();
