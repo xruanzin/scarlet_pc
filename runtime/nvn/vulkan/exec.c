@@ -2913,7 +2913,7 @@ static void draw_(CmdRec *r, bool indexed) {
             vkey.xfb_comp[2] = 1;  // v2.x   -> buffer 2, stride 4
             static _Atomic int tf_layout_logged;
             if (!atomic_exchange(&tf_layout_logged, 1))
-                LOG("[vk] Scarlet TF layout: control 10101/103 -> v0.xyz, v1.x, v2.x (12:4:4)\n");
+                LOG("[vk] Scarlet TF layout: control 10101/103 -> v0.xyz, v1.x, v2.x (12:4:4, packed streams raw-u32)\n");
         } else {
             static _Atomic unsigned tf_unknown_logs;
             if (atomic_fetch_add(&tf_unknown_logs, 1) < 8)
