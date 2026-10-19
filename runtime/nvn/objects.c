@@ -345,19 +345,12 @@ static void builder_layout(uint64_t b, TexLayout *t) {
     // A zero layout is valid for blockHeightLog2=0. Packaged texture data
     // being present distinguishes that from an ordinary builder using defaults.
     bool have_pl = pl != 0 || G(uint64_t, b, 0x48) != 0;
-    if (have_pl) {
-        uint32_t bh = (uint32_t)pl & 7u;
-        // NVN/Tegra blockHeightLog2 is defined only for 1,2,4,8,16,32 GOBs (0..5).
-        // Packaged-layout flag bits can leak into the low field on titles that use newer BNTX metadata; never let
-        // an invalid 6/7 reach tegra_deswizzle, where it changes offsets and turns BC4/5/7 material data into noise.
-        if (bh <= 5) t->block_height_log2 = bh;
-    }
-    if (have_pl && G(uint32_t, b, 0x20) >= 0x4D && G(uint32_t, b, 0x20) <= 0x50 && ((uint32_t)pl & ~7u)) {
-        static int told_bc_layout;
-        if (told_bc_layout++ < 12)
-            LOG("[tex-layout] compressed f%#x %ux%u packaged=%#x -> blockHeightLog2=%u\n",
-                G(uint32_t, b, 0x20), t->width, t->height, (uint32_t)pl, t->block_height_log2);
-    }
+    // Match the proven NVN path used by the reference recomp: only the complete
+    // compact packaged-layout value is a blockHeightLog2. Do not mask arbitrary
+    // BNTX metadata down to three bits, or compressed textures can be deswizzled
+    // with the wrong GOB height.
+    if (have_pl && (uint32_t)pl <= 5u)
+        t->block_height_log2 = (uint32_t)pl;
     if (have_pl && getenv("LARECOMP_LOG_PACKAGED")) {
         static int n;
         if (n++ < 4000) LOG("[nvn] packaged layout %016llx fmt %#x %ux%u lv %u -> bh %u flags %#x\n",
