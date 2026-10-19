@@ -23,6 +23,8 @@
 static uint64_t g_draws_total;  // (never reset: LARECOMP_COUNTER_LOG)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t stat_tf_merged, stat_tf_barriers, stat_raster_discard_sets, stat_raster_discard_on, stat_a2c_1x;
+static uint64_t stat_batch_deferred, stat_batch_chunks, stat_batch_upload_splits;
+static _Thread_local int backend_batch_depth;
 static uint64_t stat_tf_dep_vbuf, stat_tf_dep_cbuf, stat_tf_dep_sbuf, stat_tf_dep_gmem, stat_tf_dep_op, stat_tf_dep_submit, stat_tf_dep_rt;
 static uint64_t stat_barrier_flags[256];
 static uint64_t forensic_barriers_since_draw;
@@ -150,6 +152,14 @@ VkCommandBuffer vk_cmd(void) {
 }
 
 VkCommandBuffer vk_upload_cmd(void) {
+    // Upload command buffers are submitted before the main command buffer.
+    // If a later NVN list uploads after earlier draws while batching is active,
+    // submit the earlier draws first or the upload would be reordered ahead of
+    // them (the exact bug that caused the all-black build).
+    if (backend_batch_depth && sub()->main_begun) {
+        stat_batch_upload_splits++;
+        renderer_submit();
+    }
     Sub *s = sub();
     begin_cb(&s->upload, &s->upload_begun);
     return s->upload;
@@ -935,6 +945,12 @@ const char *renderer_stats(void) {
         snprintf(stats_text + n, sizeof stats_text - n, ", a2c1x %llu",
                  (unsigned long long)stat_a2c_1x);
     }
+    if (stat_batch_deferred || stat_batch_chunks || stat_batch_upload_splits) {
+        size_t n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n, ", batch defer %llu/chunk %llu/upload-split %llu",
+                 (unsigned long long)stat_batch_deferred, (unsigned long long)stat_batch_chunks,
+                 (unsigned long long)stat_batch_upload_splits);
+    }
     {
         uint32_t bf[4] = {0}; uint64_t bc[4] = {0};
         for (uint32_t fl = 0; fl < 256; fl++) {
@@ -1024,7 +1040,7 @@ const char *renderer_stats(void) {
         prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = prof_tex_watch_skips = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
-    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = stat_raster_discard_sets = stat_raster_discard_on = stat_a2c_1x = 0;
+    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = stat_raster_discard_sets = stat_raster_discard_on = stat_a2c_1x = stat_batch_deferred = stat_batch_chunks = stat_batch_upload_splits = 0;
     stat_tf_dep_vbuf = stat_tf_dep_cbuf = stat_tf_dep_sbuf = stat_tf_dep_gmem = stat_tf_dep_op = stat_tf_dep_submit = stat_tf_dep_rt = 0;
     return stats_text;
 }
@@ -2053,7 +2069,7 @@ static void resolve_feedback(Prog *pr) {
             VkImageCopy rg = {.srcSubresource = {src->aspect, 0, 0, 1}, .dstSubresource = {src->aspect, 0, 0, 1},
                               .extent = {src->width, src->height, 1}};
             vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
-            if (g_debug_frame && (src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
+            if (g_debug_frame && getenv("LARECOMP_FORENSICS_DEPTH") && (src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
                 static int nd;
                 char path[128];
                 snprintf(path, sizeof path, "build/fbdepth_%03d_src.pgm", nd);
@@ -3398,7 +3414,7 @@ static void forensic_draw_record(Prog *pr, CmdRec *r, bool indexed) {
                 b && b->gpu_owned ? "/gpu" : "");
     }
     fputc('\n', forensic_fp);
-    if ((forensic_draw_no & 63) == 0) fflush(forensic_fp);
+    fflush(forensic_fp);  // process exits with _exit on some paths; never lose the tail of the forensic frame
     forensic_barriers_since_draw = 0;
     forensic_last_barrier_flags = 0;
     forensic_save_shader(vs, "vs", pr->vi);
@@ -4447,6 +4463,26 @@ void vk_big_lock(void) {
 }
 void vk_big_unlock(void) { pthread_mutex_unlock(&g_vk_big); }
 
+void backend_batch_begin(void) { backend_batch_depth++; }
+
+void backend_batch_flush(void) {
+    if (backend_batch_depth <= 0) return;
+    vk_big_lock();
+    renderer_submit();
+    stat_batch_chunks++;
+    vk_big_unlock();
+}
+
+void backend_batch_end(void) {
+    if (backend_batch_depth <= 0) return;
+    if (--backend_batch_depth == 0) {
+        vk_big_lock();
+        renderer_submit();
+        stat_batch_chunks++;
+        vk_big_unlock();
+    }
+}
+
 void backend_execute(uint64_t handle) {
     vk_big_lock();
     bool thread_diag = vk_exec_diag_enter(handle);
@@ -4458,6 +4494,7 @@ void backend_execute(uint64_t handle) {
     static int sync_submit = -1;
     if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
     if (sync_submit) renderer_flush();
+    else if (backend_batch_depth) stat_batch_deferred++;
     else renderer_submit();
     vk_exec_diag_leave(thread_diag);
     vk_big_unlock();
