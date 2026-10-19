@@ -1018,6 +1018,24 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
             if (!bc7_swap_logged++)
                 LOG("[vk] diagnostic: BC7 sRGB sampled R/B swap enabled\n");
         }
+
+        // Targeted material forensics.  A global BC7 R/B swap proved that some
+        // Scarlet character albedos become correct while unrelated BC7 assets
+        // become wrong, so record the exact source/view swizzle and identity of
+        // every sampled BC7 texture instead of applying another global colour fix.
+        if ((t->format == 0x4D || t->format == 0x4E) && getenv("LARECOMP_LOG_BC7_VIEWS")) {
+            static int bc7_view_logs;
+            if (bc7_view_logs++ < 4096) {
+                const uint8_t *srcsw = v && (v->setmask & 8) ? v->swizzle : t->swizzle;
+                LOG("[bc7-view] id=%llu addr=%llx %ux%u fmt=%#x srgb=%u viewfmt=%#x viewmask=%#x "
+                    "srcsw=%u,%u,%u,%u vksw=%u,%u,%u,%u label=\"%s\"\n",
+                    (unsigned long long)t->debug_id, (unsigned long long)t->addr,
+                    t->width, t->height, t->format, t->format == 0x4E,
+                    v && (v->setmask & 4) ? v->format : t->format, v ? v->setmask : 0,
+                    srcsw[0], srcsw[1], srcsw[2], srcsw[3],
+                    sw.r, sw.g, sw.b, sw.a, t->label);
+            }
+        }
     }
     VkImageViewType want = view_type_for(want_textype);
     VkImageViewType have = b->base_type;
