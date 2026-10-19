@@ -134,25 +134,7 @@ NVN(nvnQueueSubmitCommands) {
 
     for (int i = 0; i < n; i++) resolved[i] = nvn_cmdstream_pin(handles[i]);
 
-    // Do not turn Scarlet's large NVN batches into one giant Vulkan command
-    // buffer: AMDVLK crashed on the 78/120-list cases.  Keep the guest order,
-    // but amortize vkQueueSubmit2 over a small bounded group.  Uploads can force
-    // an earlier split inside vk_upload_cmd(), so CPU/GPU resource order stays
-    // identical to the old per-list path.
-    static int batch_lists = -1;
-    if (batch_lists < 0) {
-        const char *e = getenv("LARECOMP_BATCH_LISTS");
-        batch_lists = e ? atoi(e) : 4;
-        if (batch_lists < 1) batch_lists = 1;
-        if (batch_lists > 8) batch_lists = 8; // hard safety ceiling on AMD
-    }
-    backend_batch_begin();
-    for (int i = 0; i < n; i++) {
-        backend_execute(resolved[i]);
-        if (batch_lists > 1 && ((i + 1) % batch_lists) == 0 && i + 1 < n)
-            backend_batch_flush();
-    }
-    backend_batch_end();
+    for (int i = 0; i < n; i++) backend_execute(resolved[i]);
 
     for (int i = n - 1; i >= 0; i--) nvn_cmdstream_unpin(handles[i]);
 
