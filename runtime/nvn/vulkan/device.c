@@ -8,6 +8,13 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include "../../paths.h"
 #include "../../settings.h"
@@ -657,18 +664,31 @@ void backend_present(NvnTexture *t) {
     static long debug_at = -1;
     if (debug_at < 0) { const char *e = getenv("LARECOMP_DEBUG_FRAME"); debug_at = e ? atol(e) : 0; }
 
-    // Reliable forensic hotkey: poll SDL keyboard state directly from the
-    // presentation loop instead of depending on the guest/input event path.
-    // Some Scarlet UI states consume F-keys before g_debug_frame_request sees
-    // them, which left F9 apparently working but produced no forensic file.
+    // Reliable forensic hotkey. On Windows use GetAsyncKeyState directly:
+    // this does not depend on SDL's event pump or on whether Scarlet consumed
+    // the F-key in its own input path. Non-Windows hosts keep the SDL fallback.
     static bool f9_prev;
+#ifdef _WIN32
+    bool f9_now = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+#else
     const bool *keys = SDL_GetKeyboardState(NULL);
     bool f9_now = keys && keys[SDL_SCANCODE_F9];
+#endif
     if (f9_now && !f9_prev) {
         debug_at = (long)total_frames + 1;
         LOG("[forensics] F9 captured; forensic frame scheduled at %ld\n", debug_at);
     }
     f9_prev = f9_now;
+
+    // Input-independent escape hatch: creating build/forensics.request while
+    // the game is running schedules exactly one capture. This is useful on
+    // keyboards/laptops where F9 is intercepted by firmware or the shell.
+    struct stat forensic_req_st;
+    if (stat("build/forensics.request", &forensic_req_st) == 0) {
+        unlink("build/forensics.request");
+        debug_at = (long)total_frames + 1;
+        LOG("[forensics] trigger file detected; forensic frame scheduled at %ld\n", debug_at);
+    }
 
     extern volatile int g_debug_frame_request;
     if (g_debug_frame_request) {
