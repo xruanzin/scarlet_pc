@@ -92,13 +92,13 @@ static int queue_batch_limit(void) {
     static int n = -1;
     if (n < 0) {
         const char *e = getenv("LARECOMP_QUEUE_BATCH");
-        n = e ? atoi(e) : 8;
+        n = e ? atoi(e) : 16;
         if (n < 1) n = 1;
-        if (n > 8) n = 8;
-        // Keep guest lists as distinct command buffers, but amortize the queue submission
-        // itself across eight lists. Scarlet regularly records 2000+ logical lists in
-        // ~2 seconds; the previous cap of four left 600+ vkQueueSubmit2 calls in that
-        // interval on the Ryzen 4600G. Ordering inside the submit is unchanged.
+        if (n > 16) n = 16;
+        // Keep guest lists as distinct command buffers, but amortize queue submission
+        // across sixteen lists. Scarlet still records thousands of logical lists in a
+        // short window; batching 8 cut submit count roughly in half on the Ryzen 4600G,
+        // so extend that same ordered batching without changing guest command order.
     }
     return n;
 }
