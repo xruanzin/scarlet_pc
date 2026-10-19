@@ -50,8 +50,27 @@ static void create_instance(void) {
     bool validate = getenv("LARECOMP_VK_VALIDATION") != NULL;
     if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
+    uint32_t loader_api = VK_API_VERSION_1_0;
+    PFN_vkEnumerateInstanceVersion enumerate_instance_version =
+        (PFN_vkEnumerateInstanceVersion)vkGetInstanceProcAddr(NULL, "vkEnumerateInstanceVersion");
+    if (enumerate_instance_version)
+        enumerate_instance_version(&loader_api);
+    LOG("[vk] loader maximum API: %u.%u.%u\n",
+        VK_API_VERSION_MAJOR(loader_api), VK_API_VERSION_MINOR(loader_api), VK_API_VERSION_PATCH(loader_api));
+
+    bool allow13 = getenv("LARECOMP_VK_ALLOW_13") != NULL;
+    uint32_t requested_api = VK_API_VERSION_1_4;
+    if (loader_api < VK_API_VERSION_1_4) {
+        if (!allow13)
+            FATAL("Vulkan 1.4 loader required (loader exposes %u.%u.%u). "
+                  "Update the Vulkan loader/driver, or set LARECOMP_VK_ALLOW_13=1 for compatibility fallback.\n",
+                  VK_API_VERSION_MAJOR(loader_api), VK_API_VERSION_MINOR(loader_api), VK_API_VERSION_PATCH(loader_api));
+        requested_api = VK_API_VERSION_1_3;
+        LOG("[vk] Vulkan 1.4 unavailable in loader; compatibility fallback to 1.3 enabled\n");
+    }
+
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
-                             .pEngineName = "LARecomp", .apiVersion = VK_API_VERSION_1_3};
+                             .pEngineName = "LARecomp", .apiVersion = requested_api};
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
                                .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext,
                                .enabledLayerCount = validate ? 1 : 0, .ppEnabledLayerNames = layers};
@@ -63,7 +82,11 @@ static void create_instance(void) {
         validate = false;
         r = vkCreateInstance(&ci, NULL, &g_vk.inst);
     }
-    if (r != VK_SUCCESS) FATAL("vkCreateInstance: %d (is a Vulkan 1.3 driver installed?)\n", r);
+    if (r != VK_SUCCESS)
+        FATAL("vkCreateInstance: %d (Vulkan %u.%u requested)\n", r,
+              VK_API_VERSION_MAJOR(app.apiVersion), VK_API_VERSION_MINOR(app.apiVersion));
+    LOG("[vk] instance API selected: Vulkan %u.%u\n",
+        VK_API_VERSION_MAJOR(app.apiVersion), VK_API_VERSION_MINOR(app.apiVersion));
     if (validate) {
         PFN_vkCreateDebugUtilsMessengerEXT f =
             (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.inst, "vkCreateDebugUtilsMessengerEXT");
@@ -82,7 +105,8 @@ static bool has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
     return false;
 }
 
-// Discrete GPU first (LARECOMP_GPU=<index> picks one), needs Vulkan 1.3 and a queue that can present.
+// Discrete GPU first (LARECOMP_GPU=<index> picks one). Vulkan 1.4 is required by default;
+// LARECOMP_VK_ALLOW_13=1 permits the old 1.3 compatibility path.
 static void pick_device(void) {
     uint32_t n = 0;
     vkEnumeratePhysicalDevices(g_vk.inst, &n, NULL);
@@ -95,7 +119,14 @@ static void pick_device(void) {
         vkGetPhysicalDeviceProperties(pd[i], &p);
         LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
             VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
-        if (p.apiVersion < VK_API_VERSION_1_3) continue;
+        bool allow13 = getenv("LARECOMP_VK_ALLOW_13") != NULL;
+        uint32_t min_api = allow13 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_4;
+        if (p.apiVersion < min_api) {
+            LOG("[vk] gpu %u rejected: requires Vulkan %u.%u%s\n", i,
+                VK_API_VERSION_MAJOR(min_api), VK_API_VERSION_MINOR(min_api),
+                allow13 ? " compatibility minimum" : "");
+            continue;
+        }
         const char *requested = getenv("LARECOMP_GRAPHICS_BACKEND");
         if (requested) {
             VkPhysicalDeviceDriverProperties driver = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
@@ -115,7 +146,10 @@ static void pick_device(void) {
         const char *requested = getenv("LARECOMP_GRAPHICS_BACKEND");
         if (requested && !strcmp(requested, "directx-dozen"))
             FATAL("DirectX/Dozen unavailable: no hardware Mesa Dozen device with Vulkan 1.3; native vendor Vulkan devices are intentionally excluded. Check loader diagnostics above.\n");
-        FATAL("no eligible native Vulkan 1.3 device\n");
+        if (getenv("LARECOMP_VK_ALLOW_13"))
+            FATAL("no eligible native Vulkan 1.3+ device\n");
+        FATAL("no eligible native Vulkan 1.4 device. Update the GPU driver/ICD, "
+              "or set LARECOMP_VK_ALLOW_13=1 for compatibility fallback.\n");
     }
     g_vk.phys = pd[best];
     free(pd);
@@ -143,6 +177,11 @@ static void pick_device(void) {
     free(qp);
     if (g_vk.qfam == UINT32_MAX) FATAL("no graphics+present queue\n");
     LOG("[vk] using %s\n", g_vk.props.deviceName);
+    LOG("[vk] physical device API: Vulkan %u.%u.%u\n",
+        VK_API_VERSION_MAJOR(g_vk.props.apiVersion), VK_API_VERSION_MINOR(g_vk.props.apiVersion),
+        VK_API_VERSION_PATCH(g_vk.props.apiVersion));
+    LOG("[vk] selected backend API: Vulkan %s\n",
+        g_vk.props.apiVersion >= VK_API_VERSION_1_4 ? "1.4" : "1.3 compatibility");
 }
 
 static bool g_fault_ext;
@@ -286,8 +325,9 @@ static void create_device(void) {
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
 
+    uint32_t vma_api = g_vk.props.apiVersion >= VK_API_VERSION_1_4 ? VK_API_VERSION_1_4 : VK_API_VERSION_1_3;
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
-                                 .vulkanApiVersion = VK_API_VERSION_1_3};
+                                 .vulkanApiVersion = vma_api};
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
 
     VkSemaphoreTypeCreateInfo st = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
