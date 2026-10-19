@@ -262,8 +262,9 @@ NVN(nvnBufferInvalidateMappedRange) { (void)c; }
 // ================================================================== textures
 // TextureBuilder: device@0 flags@8 target@0xC width@0x10 height@0x14 depth@0x18 levels@0x1C
 //   format@0x20 samples@0x24 swizzle@0x28 dsmode@0x2C stride@0x30 pool@0x38 offset@0x40
-//   packaged@0x48 layout@0x50 glname@0x58
+//   packaged@0x48 layout@0x50 glname@0x58 layout-present@0x5C (96 bytes total)
 #define TB(T, off) G(T, A(0), off)
+#define TB_LAYOUT_PRESENT 0x504C4159u
 NVN(nvnTextureBuilderSetDevice) { TB(uint64_t, 0) = A(1); }
 NVN(nvnTextureBuilderSetDefaults) {
     memset(AP(0) + 8, 0, 0x58);
@@ -293,7 +294,12 @@ NVN(nvnTextureBuilderSetDepthStencilMode) { TB(uint32_t, 0x2C) = (uint32_t)A(1);
 NVN(nvnTextureBuilderSetStride) { TB(uint64_t, 0x30) = A(1); }
 NVN(nvnTextureBuilderSetStorage) { TB(uint64_t, 0x38) = A(1); TB(uint64_t, 0x40) = A(2); }
 NVN(nvnTextureBuilderSetPackagedTextureData) { TB(uint64_t, 0x48) = A(1); }
-NVN(nvnTextureBuilderSetPackagedTextureLayout) { TB(uint64_t, 0x50) = A(1) ? *(uint64_t *)AP(1) : 0; }
+NVN(nvnTextureBuilderSetPackagedTextureLayout) {
+    TB(uint64_t, 0x50) = A(1) ? *(uint64_t *)AP(1) : 0;
+    // 0 is a valid explicit blockHeightLog2. Keep presence in the unused final
+    // word, inside the real 0x60-byte builder; copies preserve this state too.
+    TB(uint32_t, 0x5C) = A(1) ? TB_LAYOUT_PRESENT : 0;
+}
 NVN(nvnTextureBuilderSetGLTextureName) { TB(uint32_t, 0x58) = (uint32_t)A(1); }
 NVN(nvnTextureBuilderGetDevice) { RET(TB(uint64_t, 0)); }
 NVN(nvnTextureBuilderGetFlags) { RET(TB(uint32_t, 8)); }
@@ -336,12 +342,11 @@ static void builder_layout(uint64_t b, TexLayout *t) {
     t->levels = G(uint32_t, b, 0x1C) ? G(uint32_t, b, 0x1C) : 1;
     tegra_layout_init(t);
     // Packaged BNTX textures can provide an explicit Tegra block height.
-    // A zero value means "no packaged-layout override" here; keep the normal
-    // height-derived Tegra layout. Forcing zero to blockHeightLog2=0 corrupts
-    // textures whose real block height is 2/4/8/16 GOBs.
+    // Defaults/null mean no override; an explicitly supplied zero means one
+    // GOB per block. Testing the payload alone conflates these different cases.
     uint64_t pl = G(uint64_t, b, 0x50);
-    bool have_pl = pl != 0;
-    if (pl && (uint32_t)pl <= 5u)
+    bool have_pl = G(uint32_t, b, 0x5C) == TB_LAYOUT_PRESENT || pl != 0;
+    if (have_pl && (uint32_t)pl <= 5u)
         t->block_height_log2 = (uint32_t)pl;
     if (have_pl && getenv("LARECOMP_LOG_PACKAGED")) {
         static int n;

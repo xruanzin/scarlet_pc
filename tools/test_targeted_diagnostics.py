@@ -129,15 +129,16 @@ LIFETIME = r'''
 #include "nvn/objects.c"
 #include "nvn/diagnostics.c"
 int main(void) {
-    _Alignas(8) uint8_t code[0x80] = {0}, control[0x704] = {0};
+    _Alignas(8) uint8_t code[0x80] = {0}, control[20][0x704] = {{0}};
     *(uint32_t *)code = 0x12345678;
     *(uint32_t *)(code + 0x30) = 1u << 10; // vertex
-    uint64_t data[3] = {(uintptr_t)code, (uintptr_t)control, 0};
+    uint64_t data[3] = {(uintptr_t)code, (uintptr_t)control[0], 0};
     uint64_t guest_program = 0;
     Cpu c = {.x = {(uintptr_t)&guest_program}};
     hle_nvnProgramInitialize(&c);
     NvnProgram *p = (NvnProgram *)(uintptr_t)guest_program;
     for (int i = 0; i < 20; i++) {
+        data[1] = (uintptr_t)control[i]; // distinct inputs exercise replacement without inventory dedup
         c.x[0] = (uintptr_t)&guest_program; c.x[1] = 1; c.x[2] = (uintptr_t)data;
         if (i % 2) hle_nvnProgramSetShadersExt(&c);
         else hle_nvnProgramSetShaders(&c);
