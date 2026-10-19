@@ -927,6 +927,23 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
         VkFormat vf = fmt_of(v->format).vf;
         if (vk_format(t->format) == b->format) fmt = vf;  // (fallback images keep their own format)
     }
+    /*
+     * Scarlet's final tone-map shader writes an already sRGB-encoded value
+     * (the shader contains the 12.92 / 1.055 / 1/2.4 transfer curve) into an
+     * RGBA8_SRGB texture.  Treating the attachment itself as SRGB in Vulkan
+     * applies the fixed-function encode a second time, producing the washed-out
+     * pink/blue image seen in the cutscenes.  NVN keeps the storage texture
+     * tagged sRGB for later sampling, but this render-target use is raw.
+     *
+     * Use the linear-compatible attachment view unless the guest supplied an
+     * explicit format view.  Sampling still uses the original sRGB view, so the
+     * following composite decodes exactly once.  The environment switch keeps
+     * the old behaviour available for A/B testing.
+     */
+    if (render && (!v || !(v->setmask & 4)) && !getenv("LARECOMP_VK_SRGB_ATTACH")) {
+        if (fmt == VK_FORMAT_R8G8B8A8_SRGB) fmt = VK_FORMAT_R8G8B8A8_UNORM;
+        else if (fmt == VK_FORMAT_B8G8R8A8_SRGB) fmt = VK_FORMAT_B8G8R8A8_UNORM;
+    }
     uint32_t lv0 = v && (v->setmask & 1) ? v->base_level : 0;
     uint32_t nlv = v && (v->setmask & 1) && v->num_levels ? v->num_levels : b->levels - (lv0 < b->levels ? lv0 : 0);
     if (lv0 >= b->levels) lv0 = b->levels - 1;
