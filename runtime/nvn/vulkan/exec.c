@@ -23,6 +23,7 @@
 static uint64_t g_draws_total;  // (never reset: LARECOMP_COUNTER_LOG)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t stat_tf_merged, stat_tf_barriers, stat_raster_discard_sets, stat_raster_discard_on;
+static uint64_t stat_tf_dep_vbuf, stat_tf_dep_cbuf, stat_tf_dep_sbuf, stat_tf_dep_gmem, stat_tf_dep_op, stat_tf_dep_submit, stat_tf_dep_rt;
 static uint64_t stat_batch_deferred, stat_batch_order_splits;
 static _Thread_local int backend_batch_depth;
 static uint32_t stat_pass_end_line[4096];
@@ -258,6 +259,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
         }
     }
     vk_end_pass();
+    if (tf_barrier_pending) stat_tf_dep_submit++;
     tf_flush_pending_barrier();
     Sub *s = sub();
     if (!s->main_begun && !s->upload_begun && !wait && !signal) {
@@ -797,14 +799,14 @@ static bool tf_pending_used_by_draw(const ShaderInfo *vi, const ShaderInfo *fi) 
         }
     }
     for (int stream = 0; stream < 16; stream++)
-        if ((used_streams & (1u << stream)) && tf_pending_overlaps_range(st.vbuf[stream])) return true;
+        if ((used_streams & (1u << stream)) && tf_pending_overlaps_range(st.vbuf[stream])) { stat_tf_dep_vbuf++; return true; }
 
     const ShaderInfo *si[2] = {vi, fi};
     for (int stage = 0; stage < 2; stage++) {
         if (!si[stage]) continue;
         uint32_t cm = si[stage]->cbuf_mask;
         for (int i = 0; i < 18; i++)
-            if ((cm & (1u << i)) && tf_pending_overlaps_range(st.ubuf[stage][i])) return true;
+            if ((cm & (1u << i)) && tf_pending_overlaps_range(st.ubuf[stage][i])) { stat_tf_dep_cbuf++; return true; }
 
         // storage_buffers means the translated shader may resolve LDG/STG via
         // the bound NVN storage ranges; check those ranges.  Native imported
@@ -812,9 +814,9 @@ static bool tf_pending_used_by_draw(const ShaderInfo *vi, const ShaderInfo *fi) 
         // computed dynamically by the guest shader.
         if (si[stage]->storage_buffers) {
             for (int i = 0; i < 16; i++)
-                if (tf_pending_overlaps_range(st.sbuf[stage][i])) return true;
+                if (tf_pending_overlaps_range(st.sbuf[stage][i])) { stat_tf_dep_sbuf++; return true; }
         }
-        if (si[stage]->uses_gmem) return true;
+        if (si[stage]->uses_gmem) { stat_tf_dep_gmem++; return true; }
     }
     return false;
 }
@@ -920,6 +922,12 @@ const char *renderer_stats(void) {
         size_t n = strlen(stats_text);
         snprintf(stats_text + n, sizeof stats_text - n, ", tfmerge %llu/barrier %llu",
                  (unsigned long long)stat_tf_merged, (unsigned long long)stat_tf_barriers);
+        n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n, " dep[v%llu c%llu s%llu g%llu o%llu q%llu rt%llu]",
+                 (unsigned long long)stat_tf_dep_vbuf, (unsigned long long)stat_tf_dep_cbuf,
+                 (unsigned long long)stat_tf_dep_sbuf, (unsigned long long)stat_tf_dep_gmem,
+                 (unsigned long long)stat_tf_dep_op, (unsigned long long)stat_tf_dep_submit,
+                 (unsigned long long)stat_tf_dep_rt);
     }
     if (stat_raster_discard_sets) {
         size_t n = strlen(stats_text);
@@ -999,6 +1007,7 @@ const char *renderer_stats(void) {
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
     stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = stat_raster_discard_sets = stat_raster_discard_on = stat_batch_deferred = stat_batch_order_splits = 0;
+    stat_tf_dep_vbuf = stat_tf_dep_cbuf = stat_tf_dep_sbuf = stat_tf_dep_gmem = stat_tf_dep_op = stat_tf_dep_submit = stat_tf_dep_rt = 0;
     return stats_text;
 }
 
@@ -1080,7 +1089,7 @@ static void begin_pass(void) {
     st.rt_dirty = false;
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
-    if (tf_barrier_pending) { tf_pending_clear(); stat_tf_barriers++; }
+    if (tf_barrier_pending) { stat_tf_dep_rt++; tf_pending_clear(); stat_tf_barriers++; }
     {
         NvnTexture *t0n = st.rt.ncolor ? st.rt.color[0] : NULL;
         dl_note("pass %d color %ux%u fmt %#x depth %p", st.rt.ncolor, t0n ? t0n->width : 0, t0n ? t0n->height : 0, t0n ? t0n->format : 0,
@@ -3894,6 +3903,7 @@ static void exec_list(uint64_t handle, int depth) {
             case CMD_COPY_TEXTURE_TO_BUFFER: case CMD_COPY_TEXTURE_TO_TEXTURE:
             case CMD_DOWNSAMPLE: case CMD_UPDATE_UNIFORM_BUFFER:
             case CMD_CLEAR_BUFFER: case CMD_BARRIER:
+                stat_tf_dep_op++;
                 tf_flush_pending_barrier();
                 break;
             default:
