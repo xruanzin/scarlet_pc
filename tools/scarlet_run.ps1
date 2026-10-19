@@ -5,7 +5,9 @@ param(
     [switch]$GraphicsDiagnostics,
     [ValidateSet("Vulkan","DirectX")][string]$Backend = "Vulkan",
     [string]$DirectXDirectory = "",
-    [switch]$NoBackendFallback
+    [switch]$NoBackendFallback,
+    [switch]$RenderDoc,
+    [string]$RenderDocCommand = "C:\Program Files\RenderDoc\renderdoccmd.exe"
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,11 +85,24 @@ Write-Host ""
 # PowerShell sees it, so the runtime can log normally without being aborted.
 $Q = [char]34
 $BaseCmdLine = $Q + $Exe + $Q + " " + $Q + $GameRoot + $Q + " --play"
+if ($RenderDoc) {
+    if ($Backend -ne 'Vulkan') { throw 'Para esta captura de cores, use -Backend Vulkan.' }
+    if (-not (Test-Path -LiteralPath $RenderDocCommand -PathType Leaf)) {
+        throw 'RenderDoc nao encontrado. Instale o RenderDoc x64 de https://renderdoc.org ou informe -RenderDocCommand.'
+    }
+    $RenderDocCommand = (Resolve-Path -LiteralPath $RenderDocCommand).Path
+    $CaptureDirectory = Join-Path $RepoRoot ('build\rdc\' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
+    $null = New-Item -ItemType Directory -Force -Path $CaptureDirectory
+    $CaptureTemplate = Join-Path $CaptureDirectory 'scarlet'
+    $BaseCmdLine = $Q + $RenderDocCommand + $Q + ' capture --wait-for-exit --working-dir ' + $Q + $RepoRoot + $Q +
+        ' --capture-file ' + $Q + $CaptureTemplate + $Q + ' ' + $BaseCmdLine
+    Write-Host "[scarlet-run] RenderDoc: aperte F12 uma vez com o cabelo afetado visivel. Capturas: $CaptureDirectory" -ForegroundColor Cyan
+}
 $PreviousVkProf = $env:LARECOMP_VK_PROF
 $PreviousVkOpt = $env:LARECOMP_VK_OPT
 $LocationPushed = $false
 $PreviousDiagnosticEnv = @{}
-foreach ($Name in @('LARECOMP_HLE_PROF', 'LARECOMP_TF_DIAG_DIR')) {
+foreach ($Name in @('LARECOMP_HLE_PROF', 'LARECOMP_TF_DIAG_DIR', 'LARECOMP_RENDERDOC_AT', 'LARECOMP_RENDERDOC_FRAMES')) {
     $PreviousDiagnosticEnv[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
 }
 $GraphicsDir = $null
@@ -99,6 +114,9 @@ try {
     # Shader translation/compilation stays enabled asynchronously; optimizer remains off because -O caused
     # large dispatcher shaders to regress on startup. Timeout is non-fatal in the runtime: affected draws are
     # skipped temporarily until their shader/pipeline finishes instead of crashing the game.
+    if ($RenderDoc) {
+        Remove-Item Env:LARECOMP_RENDERDOC_AT, Env:LARECOMP_RENDERDOC_FRAMES -ErrorAction SilentlyContinue
+    }
     $env:LARECOMP_VK_OPT = "0"
     $env:LARECOMP_SHADER_WAIT_MS = "12000"
 
@@ -167,6 +185,16 @@ finally {
     }
     else {
         $env:LARECOMP_VK_PROF = $PreviousVkProf
+    }
+}
+
+if ($RenderDoc) {
+    $Captures = @(Get-ChildItem -LiteralPath $CaptureDirectory -Filter '*.rdc' -File -ErrorAction SilentlyContinue)
+    if ($Captures.Count) {
+        Write-Host '[scarlet-run] Capturas RenderDoc para enviar:' -ForegroundColor Cyan
+        $Captures | ForEach-Object { Write-Host $_.FullName }
+    } else {
+        Write-Host "[scarlet-run] Nenhuma captura .rdc encontrada em $CaptureDirectory. Use F12 com a cena visivel e aguarde terminar." -ForegroundColor Yellow
     }
 }
 

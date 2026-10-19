@@ -42,8 +42,8 @@ Mesa directory. The game EXE and save locations are the same.
 
 The runtime checks the actual selected driver ID: DirectX requires hardware
 Mesa Dozen; explicit Vulkan excludes Dozen. No API-version override or feature
-spoofing is used. The native path follows the concurrent branch change: Vulkan 1.4 by default,
-with LARECOMP_VK_ALLOW_13=1 permitting native Vulkan 1.3 compatibility. The Dozen path negotiates Vulkan 1.2 plus
+spoofing is used. Native Vulkan now uses 1.3 as requested, independently of loader 1.4 support.
+DirectX still negotiates 1.2. The Dozen path negotiates Vulkan 1.2 plus
 KHR/EXT equivalents and checks required features; a combination missing them
 will fail initialization with the actual extension or feature name.
 That is a limitation of this integration, not proof of working D3D12 gameplay.
@@ -114,14 +114,11 @@ Native vertex invariance and transform-feedback shader tests pass. Modified
 Vulkan C/C++ units compile. No Windows/Dozen GPU game validation is available;
 this removes the unconditional 1.3 version gate, not all possible driver limits.
 
-The native 1.4/default and explicit 1.3 compatibility policy from commit 6581110
-is preserved. Dozen's 1.2 policy is independent of it. If the instance supports
-1.4 but the selected native device is 1.3 under the explicit fallback, the
-application/device consumers use effective API 1.3. Unit tests cover this
-version-selection policy alongside the Dozen path.
+The native policy was restored to Vulkan 1.3 by commit dccd831. DirectX/Dozen
+continues to negotiate 1.2 separately. The native API policy tests now match that
+choice even when the loader advertises 1.4.
 
-Automatic startup fallback permits native Vulkan 1.3 for that retry and restores
-LARECOMP_VK_ALLOW_13 afterwards. This preserves the safe return on the Vega 7
-while keeping the branch's explicit native Vulkan default policy. Older VMA
-headers receive at most allocator API 1.3 on the native 1.4 path, without changing
-the negotiated instance/device version or overriding driver capabilities.
+The hair investigation uses native Vulkan 1.3 by default in scarlet_run.ps1.
+See SCARLET-HAIR-CAPTURE.md for the new -RenderDoc frame-capture launch option.
+Standalone EXE invocation also uses Vulkan 1.3; LARECOMP_VK_ALLOW_13 is no
+longer required to select it.

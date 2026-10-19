@@ -88,11 +88,12 @@ void vk_device_fault_report(void) {assert(!"unexpected device loss");}
 int main(int argc,char **argv) {
     assert(instance_api_for(VK_API_VERSION_1_4,true,false)==VK_API_VERSION_1_2);
     assert(instance_api_for(VK_API_VERSION_1_2,true,false)==VK_API_VERSION_1_2);
-    assert(instance_api_for(VK_API_VERSION_1_3,false,false)==0);
+    assert(instance_api_for(VK_API_VERSION_1_3,false,false)==VK_API_VERSION_1_3);
     assert(instance_api_for(VK_API_VERSION_1_3,false,true)==VK_API_VERSION_1_3);
-    assert(instance_api_for(VK_API_VERSION_1_4,false,false)==VK_API_VERSION_1_4);
+    assert(instance_api_for(VK_API_VERSION_1_4,false,false)==VK_API_VERSION_1_3);
+    assert(instance_api_for(VK_API_VERSION_1_4,false,true)==VK_API_VERSION_1_3);
     assert(minimum_device_api(true,false)==VK_API_VERSION_1_2);
-    assert(minimum_device_api(false,false)==VK_API_VERSION_1_4);
+    assert(minimum_device_api(false,false)==VK_API_VERSION_1_3);
     assert(minimum_device_api(false,true)==VK_API_VERSION_1_3);
     mode=atoi(argv[1]);g_vk.api_version=atoi(argv[2])==12?VK_API_VERSION_1_2:atoi(argv[2])==14?VK_API_VERSION_1_4:VK_API_VERSION_1_3;
     create_device();
