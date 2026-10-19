@@ -504,10 +504,18 @@ static const char *tex_type_name(int t) {
     }
 }
 
+static bool stencil_tex(const Ctx *c, int slot) {
+    const ShaderTexture *t = &c->info->tex[slot];
+    if (!c->glsl || !c->key || t->shadow || t->bindless || t->handle_offset < 0x20) return false;
+    uint32_t binding = (t->handle_offset - 0x20) / 8;
+    return binding < 32 && ((c->key->stencil_tex_mask >> binding) & 1u);
+}
+
 // Write texture results: component mask selects which of r,g,b,a go to consecutive registers.
 static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, int d0, int d1, bool texs, bool f16) {
-    sp(&c->body, "    { float4 t = %s;\n", call);
-    (void)slot;
+    bool integer = stencil_tex(c, slot);
+    if (integer && f16) sp(&c->body, "    { float4 t = float4(%s);\n", call);
+    else sp(&c->body, "    { %s t = %s;\n", integer ? "uint4" : "float4", call);
     if (f16) {
         // TEXS/TLDS .F16: components (in mask order) packed as half pairs into d0 (lo, hi) and d1 (lo, hi)
         int comps[4], n = 0;
@@ -531,7 +539,11 @@ static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, 
     for (int comp = 0; comp < 4; comp++) {
         if (!(mask & (1u << comp))) continue;
         int r = regs[n++];
-        if (r != RZ) { c->reg_used[r] = 1; sp(&c->body, "      r%d = as_type<uint>(t[%d]);\n", r, comp); }
+        if (r != RZ) {
+            c->reg_used[r] = 1;
+            if (integer) sp(&c->body, "      r%d = t[%d];\n", r, comp);
+            else sp(&c->body, "      r%d = as_type<uint>(t[%d]);\n", r, comp);
+        }
     }
     sp(&c->body, "    }\n");
 }
@@ -2028,7 +2040,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     }
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
-        sp(&s, "layout(set = %d, binding = %d) uniform %s t%d;\n", set, 32 + i, glsl_sampler_type(t), i);
+        sp(&s, "layout(set = %d, binding = %d) uniform %s%s t%d;\n", set, 32 + i,
+           stencil_tex(c, i) ? "u" : "", glsl_sampler_type(t), i);
         // size of level l as (width, height, depth or layers)
         switch (t->type) {
         case TEXTYPE_1D: sp(&s, "ivec3 tsize%d(int l) { return ivec3(textureSize(t%d, l), 1, 1); }\n", i, i); break;

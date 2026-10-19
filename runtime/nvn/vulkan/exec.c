@@ -2057,7 +2057,7 @@ static void build_pipeline(void *arg) {
 
 // ================================================================== feedback snapshots (renderer.m resolve_feedback)
 static NvnTexture *feedback_tex[4];
-static VkImageView feedback_view[4];
+static VkImageView feedback_view[4][2]; // depth/color and stencil views of the same snapshot
 static int nfeedback;
 static uint64_t g_cur_fs_hash;
 static NvnTexture *snap_tex[8];
@@ -2072,12 +2072,49 @@ typedef struct { NvnTexture *key; TexBackend copy; } Snap;
 static Snap snaps[16];
 static int nsnaps;
 
-static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_) {
+static NvnTexEntry *shader_texture_entry(int stage, ShaderTexture *st_) {
     int slot = ((int)st_->handle_offset - 0x20) / 8;
     uint64_t h = (slot >= 0 && slot < 32) ? st.tex[stage][slot] : 0;
     uint32_t tic = h & 0xFFFFF;
     if (!h || !st.tpool || tic >= (uint32_t)st.tpool->count) return NULL;
-    return ((NvnTexEntry *)st.tpool->entries)[tic].tex;
+    return &((NvnTexEntry *)st.tpool->entries)[tic];
+}
+
+static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_) {
+    NvnTexEntry *e = shader_texture_entry(stage, st_);
+    return e ? e->tex : NULL;
+}
+
+static uint32_t stencil_texture_bindings(int stage) {
+    uint32_t mask = 0;
+    if (!st.tpool) return mask;
+    NvnTexEntry *entries = st.tpool->entries;
+    for (int slot = 0; slot < 32; slot++) {
+        uint64_t h = st.tex[stage][slot];
+        uint32_t tic = h & 0xFFFFF;
+        if (h && tic < (uint32_t)st.tpool->count &&
+            nvn_texture_samples_stencil(entries[tic].tex, &entries[tic].view, entries[tic].has_view))
+            mask |= 1u << slot;
+    }
+    return mask;
+}
+
+static uint32_t feedback_copy_regions(const TexBackend *src, VkImageCopy regions[2]) {
+    uint32_t n = 0;
+    for (uint32_t aspect = 1; aspect <= VK_IMAGE_ASPECT_STENCIL_BIT; aspect <<= 1) {
+        if (!(src->aspect & aspect)) continue;
+        regions[n++] = (VkImageCopy){.srcSubresource = {aspect, 0, 0, 1},
+            .dstSubresource = {aspect, 0, 0, 1}, .extent = {src->width, src->height, 1}};
+    }
+    return n;
+}
+
+static void feedback_set_views(int index, TexBackend *b) {
+    static const VkComponentMapping id = {0};
+    VkImageAspectFlags aspect = b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect;
+    feedback_view[index][0] = vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, b->format, 0, 1, 0, 1, id, aspect);
+    feedback_view[index][1] = b->aspect & VK_IMAGE_ASPECT_STENCIL_BIT ?
+        vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, b->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_STENCIL_BIT) : VK_NULL_HANDLE;
 }
 
 static bool is_attachment(NvnTexture *t) {
@@ -2158,11 +2195,9 @@ static void resolve_feedback(Prog *pr) {
             TexBackend *src = vk_tex(t, true);
             Snap *existing = NULL;
             for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t && snaps[k].copy.image) existing = &snaps[k];
-            VkImageAspectFlags sa = src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : src->aspect;
-            static const VkComponentMapping id = {0};
             if (!nosnap && si >= 0 && (snap_ok[si] || self_write) && existing) {
                 feedback_tex[nfeedback] = t;
-                feedback_view[nfeedback++] = vk_image_view(&existing->copy, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, sa);
+                feedback_set_views(nfeedback++, &existing->copy);
                 continue;
             }
             stat_feedback_copies++;
@@ -2171,9 +2206,12 @@ static void resolve_feedback(Prog *pr) {
             VkCommandBuffer cb = vk_cmd();
             vk_full_barrier(cb);
             gp_mark(cb, "feedback snapshot %ux%u fmt %d", src->width, src->height, src->format);
-            VkImageCopy rg = {.srcSubresource = {src->aspect, 0, 0, 1}, .dstSubresource = {src->aspect, 0, 0, 1},
-                              .extent = {src->width, src->height, 1}};
-            vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+            // VkImageSubresourceLayers permits only one aspect per copy region.
+            // Both planes must survive: the lighting pass reads stencil material
+            // IDs and float depth through two views of this same attachment.
+            VkImageCopy regions[2];
+            uint32_t nregions = feedback_copy_regions(src, regions);
+            vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, nregions, regions);
             if (g_debug_frame && getenv("LARECOMP_FORENSICS_DEPTH") && (src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
                 static int nd;
                 char path[128];
@@ -2184,7 +2222,7 @@ static void resolve_feedback(Prog *pr) {
                 cb = vk_cmd();
             }
             feedback_tex[nfeedback] = t;
-            feedback_view[nfeedback++] = vk_image_view(dst, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, sa);
+            feedback_set_views(nfeedback++, dst);
             if (si < 0) { static int rr; si = rr++ & 7; snap_tex[si] = t; }
             snap_ok[si] = true;
             st.rt_dirty = true;
@@ -2459,7 +2497,7 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             wh[0] = e->tex->width; wh[1] = e->tex->height;
             for (int k = 0; k < nfeedback; k++)
                 if (e->tex == feedback_tex[k] && (st_->type == TEXTYPE_2D || st_->type == TEXTYPE_2D_ARRAY)) {
-                    view = feedback_view[k];
+                    view = feedback_view[k][nvn_texture_samples_stencil(e->tex, &e->view, e->has_view) ? 1 : 0];
                     if (st_->type == TEXTYPE_2D_ARRAY) view = vk_dummy_view(TEXTYPE_2D_ARRAY);  // (2D snapshot as array: rare)
                 }
         }
@@ -2965,6 +3003,8 @@ static void draw_(CmdRec *r, bool indexed) {
         }
     }
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
+    vkey.stencil_tex_mask = stencil_texture_bindings(0);
+    fkey.stencil_tex_mask = stencil_texture_bindings(1);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (pr) wait_built(&pr->state, "program", pr->code[0], pr->code[1]);
@@ -3544,9 +3584,11 @@ static void forensic_draw_record(Prog *pr, CmdRec *r, bool indexed) {
         const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
         if (!t) { fprintf(forensic_fp, " t%d=none", i); continue; }
         nvn_diag_texture_source(t, b && b->gpu_owned, frame);
+        NvnTexEntry *entry = shader_texture_entry(1, &pr->fi->tex[i]);
         fprintf(forensic_fp, " t%d=%llx/%ux%u/f%#x/target%u%s", i,
                 (unsigned long long)t->addr, t->width, t->height, t->format, t->target,
                 b && b->gpu_owned ? "/gpu" : "");
+        if (nvn_texture_samples_stencil(t, &entry->view, entry->has_view)) fprintf(forensic_fp, "/stencil");
     }
     int nvt = pr->vi ? pr->vi->ntex : 0;
     if (nvt > 12) nvt = 12;

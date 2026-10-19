@@ -51,6 +51,15 @@ typedef struct {
     uint8_t swizzle[4];
 } NvnTextureView;  // our layout of the guest NVNtextureView (0x28 bytes)
 
+// A view override takes precedence even when it explicitly selects depth (0).
+static inline bool nvn_texture_samples_stencil(const NvnTexture *t, const NvnTextureView *v, bool has_view) {
+    if (!t) return false;
+    if (t->format == 0x31) return true;  // stencil-only
+    if (t->format != 0x35 && t->format != 0x36) return false;
+    uint32_t mode = has_view && v && (v->setmask & 16) ? v->ds_mode : t->ds_mode;
+    return mode == 1;
+}
+
 typedef struct {
     NvnTexture *tex;
     NvnTextureView view;

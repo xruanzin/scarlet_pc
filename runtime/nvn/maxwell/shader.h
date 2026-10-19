@@ -55,6 +55,7 @@ typedef struct {
     uint8_t xfb_layout;       // 0: infer legacy layout, 1: Scarlet stream-output layout from NVN control
     uint8_t xfb_comp[4];      // component limit per stream; actual width comes from shader exports
     uint8_t layer_from_instance; // layered 3D render target: route instance N to slice N
+    uint32_t stencil_tex_mask; // direct NVN texture bindings (not translation slot indices): unsigned stencil fetches
 } ShaderKey;
 
 typedef struct {
