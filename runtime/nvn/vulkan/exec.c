@@ -3433,6 +3433,7 @@ static void forensic_save_shader(uint64_t addr, const char *stage, const ShaderI
 }
 
 static void forensic_draw_record(Prog *pr, CmdRec *r, bool indexed) {
+    if (!g_debug_frame) return; // skin logging alone must not snapshot texture assets
     uint64_t frame = renderer_present_count();
     if (frame != forensic_frame) {
         if (forensic_fp) fclose(forensic_fp);
@@ -3445,6 +3446,7 @@ static void forensic_draw_record(Prog *pr, CmdRec *r, bool indexed) {
         snprintf(path, sizeof path, "build/scarlet_forensics_%llu.txt", (unsigned long long)frame);
         forensic_fp = fopen(path, "w");
         if (forensic_fp) {
+            fprintf(forensic_fp, "# texture_sources=%s\n", nvn_diag_texture_capture_dir(frame));
             fprintf(forensic_fp,
                 "# Scarlet graphics forensics frame %llu\n"
                 "# barrier bits: 1 ORDER_PRIMITIVES, 2 ORDER_FRAGMENTS, 4 ORDER_FRAGMENTS_TILED, "
@@ -3541,9 +3543,20 @@ static void forensic_draw_record(Prog *pr, CmdRec *r, bool indexed) {
         NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
         const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
         if (!t) { fprintf(forensic_fp, " t%d=none", i); continue; }
+        nvn_diag_texture_source(t, b && b->gpu_owned, frame);
         fprintf(forensic_fp, " t%d=%llx/%ux%u/f%#x/target%u%s", i,
                 (unsigned long long)t->addr, t->width, t->height, t->format, t->target,
                 b && b->gpu_owned ? "/gpu" : "");
+    }
+    int nvt = pr->vi ? pr->vi->ntex : 0;
+    if (nvt > 12) nvt = 12;
+    for (int i = 0; i < nvt; i++) {
+        NvnTexture *t = shader_texture_object(0, &pr->vi->tex[i]);
+        const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
+        if (!t) { fprintf(forensic_fp, " vt%d=none", i); continue; }
+        nvn_diag_texture_source(t, b && b->gpu_owned, frame);
+        fprintf(forensic_fp, " vt%d=%llx/%ux%u/f%#x", i,
+                (unsigned long long)t->addr, t->width, t->height, t->format);
     }
     fputc('\n', forensic_fp);
     fflush(forensic_fp);  // process exits with _exit on some paths; never lose the tail of the forensic frame

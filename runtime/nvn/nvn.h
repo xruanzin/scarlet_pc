@@ -34,6 +34,9 @@ typedef struct NvnTexture {
     char label[64];
 } NvnTexture;
 
+const char *nvn_diag_texture_capture_dir(uint64_t frame);
+void nvn_diag_texture_source(const NvnTexture *texture, bool gpu_owned, uint64_t frame);
+
 typedef struct {
     uint32_t min_filter, mag_filter, wrap[3], compare_mode, compare_func, reduction;
     float lod_min, lod_max, lod_bias, max_aniso;
