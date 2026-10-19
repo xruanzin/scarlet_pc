@@ -7,7 +7,8 @@ param(
     [string]$DirectXDirectory = "",
     [switch]$NoBackendFallback,
     [switch]$RenderDoc,
-    [string]$RenderDocCommand = "C:\Program Files\RenderDoc\renderdoccmd.exe"
+    [string]$RenderDocCommand = "C:\Program Files\RenderDoc\renderdoccmd.exe",
+    [switch]$MaterialViews
 )
 
 $ErrorActionPreference = "Stop"
@@ -64,6 +65,10 @@ $env:Path = "$MsysBin;C:\msys64\usr\bin;$env:Path"
 $env:LARECOMP_NO_LAUNCHER = "1"
 $env:LARECOMP_LOG_HEAPS = "1"
 $env:LARECOMP_LOG_BINDINGS = ""
+if ($MaterialViews) {
+    $env:LARECOMP_LOG_MATERIAL_VIEWS = "1"
+    Write-Host "[scarlet-run] Material-view tracing enabled." -ForegroundColor Cyan
+}
 
 $Log = Join-Path $RepoRoot "scarlet_boot.log"
 if (Test-Path -LiteralPath $Log) {
