@@ -3111,8 +3111,13 @@ static void draw_(CmdRec *r, bool indexed) {
             memcpy(k.blend[i], st.blend[i], 8);
         }
     }
+    // Alpha-to-coverage only has meaningful coverage with multisampling.
+    // Scarlet leaves this state enabled on some 1x passes; forwarding it to
+    // Vulkan turns alpha into single-sample coverage decisions (visible as the
+    // heavy stipple/checker pattern on AMD). Preserve A2C for real MSAA, but
+    // disable it for 1-sample targets.
     if (st.ms[0xC] && pass_samples == 1) stat_a2c_1x++;
-    k.a2c = st.ms[0xC] != 0;
+    k.a2c = st.ms[0xC] != 0 && pass_samples > 1;
     k.raster_discard = st.raster_discard;
     k.topo_class = cls;
     k.poly_fill = st.poly[2] != 1;
