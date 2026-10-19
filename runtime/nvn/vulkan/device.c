@@ -93,6 +93,15 @@ static void pick_device(void) {
         LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
             VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
         if (p.apiVersion < VK_API_VERSION_1_3) continue;
+        const char *requested = getenv("LARECOMP_GRAPHICS_BACKEND");
+        if (requested) {
+            VkPhysicalDeviceDriverProperties driver = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+            VkPhysicalDeviceProperties2 props = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &driver};
+            vkGetPhysicalDeviceProperties2(pd[i], &props);
+            bool dozen = driver.driverID == VK_DRIVER_ID_MESA_DOZEN;
+            if (!strcmp(requested, "directx-dozen") && (!dozen || p.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU)) continue;
+            if (!strcmp(requested, "vulkan") && dozen) continue;
+        }
         int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
         if ((int)i == want) score = 100;
         if (score > best_score) { best_score = score; best = (int)i; }
@@ -101,6 +110,16 @@ static void pick_device(void) {
     g_vk.phys = pd[best];
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
+    const char *backend = getenv("LARECOMP_GRAPHICS_BACKEND");
+    if (backend && !strcmp(backend, "directx-dozen")) {
+        VkPhysicalDeviceDriverProperties driver = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 props = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &driver};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &props);
+        if (driver.driverID != VK_DRIVER_ID_MESA_DOZEN || g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU)
+            FATAL("DirectX requested but no hardware Mesa Dozen device selected\n");
+        LOG("[graphics-backend] selected=directx-dozen driver=%s info=%s\n", driver.driverName, driver.driverInfo);
+    }
+
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
     VkQueueFamilyProperties *qp = calloc(nq, sizeof *qp);
@@ -823,6 +842,8 @@ void ui_window_init(void) {
     create_swapchain();
     vk_exec_init();
     vk_shaders_init();
+    const char *backend = getenv("LARECOMP_GRAPHICS_BACKEND");
+    LOG("[graphics-backend] ready=%s\n", backend && !strcmp(backend, "directx-dozen") ? "directx-dozen" : "vulkan");
 }
 
 SDL_Window *ui_window(void) { return window; }

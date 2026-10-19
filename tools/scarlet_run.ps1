@@ -2,12 +2,17 @@ param(
     [string]$GameRoot = "D:\Pokemon Scarlet\Extracted\Base",
     [switch]$Profile,
     [switch]$LiveLog,
-    [switch]$GraphicsDiagnostics
+    [switch]$GraphicsDiagnostics,
+    [ValidateSet("Vulkan","DirectX")][string]$Backend = "Vulkan",
+    [string]$DirectXDirectory = "",
+    [switch]$NoBackendFallback
 )
 
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "scarlet_graphics_backend.ps1")
+if (-not $DirectXDirectory) { $DirectXDirectory = Join-Path $RepoRoot "tools\directx\mesa" }
 $Exe = Join-Path $RepoRoot "build\ScarletRecomp.exe"
 $GameDll = Join-Path $RepoRoot "build\lasgame.dll"
 $ExeFs = Join-Path $GameRoot "exefs"
@@ -121,20 +126,24 @@ try {
         Remove-Item Env:LARECOMP_VK_PROF -ErrorAction SilentlyContinue
         Remove-Item Env:LARECOMP_HLE_PROF -ErrorAction SilentlyContinue
     }
-    if ($LiveLog) {
-        # Diagnostic convenience only: piping thousands of native log lines
-        # through PowerShell/Tee-Object can stall the game itself on Windows.
-        $CmdLine = $BaseCmdLine + " 2>&1"
-        & $env:ComSpec /d /s /c $CmdLine | Tee-Object -FilePath $Log
-        $Code = $LASTEXITCODE
-    }
-    else {
-        # Fast path: cmd.exe writes directly to disk. PowerShell is not in the
-        # runtime's stdout/stderr hot path, so loading/shader bursts cannot block
-        # waiting for Tee-Object to consume lines.
-        $CmdLine = $BaseCmdLine + " > " + $Q + $Log + $Q + " 2>&1"
-        & $env:ComSpec /d /s /c $CmdLine
-        $Code = $LASTEXITCODE
+    $Code = Invoke-ScarletGraphicsBackend -Backend $Backend -DirectXDirectory $DirectXDirectory `
+        -Log $Log -NoFallback:$NoBackendFallback -Run {
+        param($AttemptLog)
+        if ($LiveLog) {
+            # Diagnostic convenience only: piping thousands of native log lines
+            # through PowerShell/Tee-Object can stall the game itself on Windows.
+            $CmdLine = $BaseCmdLine + " 2>&1"
+            & $env:ComSpec /d /s /c $CmdLine | Tee-Object -FilePath $AttemptLog | Out-Host
+            return $LASTEXITCODE
+        }
+        else {
+            # Fast path: cmd.exe writes directly to disk. PowerShell is not in the
+            # runtime's stdout/stderr hot path, so loading/shader bursts cannot block
+            # waiting for Tee-Object to consume lines.
+            $CmdLine = $BaseCmdLine + " > " + $Q + $AttemptLog + $Q + " 2>&1"
+            & $env:ComSpec /d /s /c $CmdLine
+            return $LASTEXITCODE
+        }
     }
 }
 finally {

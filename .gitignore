@@ -35,3 +35,6 @@ fonts/*.ttf
 
 # Relatórios locais do diagnóstico do Scarlet
 scarlet_*.json
+
+# Portable Mesa Dozen package (downloaded locally, never committed)
+/tools/directx/
