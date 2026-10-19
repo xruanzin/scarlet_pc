@@ -79,24 +79,17 @@ static uint64_t submit_seq;  // last physically submitted timeline value
 static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
 
-// Queue-level batching only: each NVN list still ends in its own primary
-// VkCommandBuffer(s). We merely send two consecutive lists in one
-// vkQueueSubmit2 call. This avoids the AMD crash seen when lists themselves
-// were merged into one command buffer while preserving upload/main order.
+// Keep one completed NVN list per physical submission. The deferred two-list
+// path failed at vkEndCommandBuffer(upload) on the AMD Windows driver. The
+// bounded array also serves immediate presentation/flush calls; do not defer
+// list-end work until that path has been validated on the affected driver.
 #define QBATCH_MAX_CBS 8
 static VkCommandBufferSubmitInfo qbatch_cbs[QBATCH_MAX_CBS];
 static uint32_t qbatch_ncb, qbatch_lists;
 static uint64_t stat_logical_submits, stat_queue_batches;
 
 static int queue_batch_limit(void) {
-    static int n = -1;
-    if (n < 0) {
-        const char *e = getenv("LARECOMP_QUEUE_BATCH");
-        n = e ? atoi(e) : 2;
-        if (n < 1) n = 1;
-        if (n > 2) n = 2;  // conservative on the AMD Windows driver
-    }
-    return n;
+    return 1;
 }
 
 uint64_t vk_completed_seq(void) {
@@ -602,7 +595,9 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
     return s;
 }
 
-// Guest memory copied once per submission: draws binding the same range share the copy.
+// Guest memory copied once per execution epoch: draws in the same list can
+// share a snapshot. Queue timeline values are resource-retirement tokens, not
+// guest-data versions: separate lists may see CPU writes at the same address.
 #define GCOPY_TAB 4096
 static struct { uint64_t addr, size, seq; VkSpan span; } gcopy[GCOPY_TAB];
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
@@ -4530,6 +4525,7 @@ void backend_execute(uint64_t handle) {
     bool thread_diag = vk_exec_diag_enter(handle);
     PROF_T0();
     if (ip_enabled()) ip_note_list(handle);
+    guest_copy_flush();
     exec_list(handle, 0);
     PROF_ADD(prof_exec);
     if (prof) cum_exec += SDL_GetTicksNS() - prof_t0_;
