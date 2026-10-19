@@ -515,14 +515,23 @@ static bool stencil_tex(const Ctx *c, int slot) {
     return binding < 32 && ((c->key->stencil_tex_mask >> binding) & 1u);
 }
 
-// Only called for the material-ID extraction of the fingerprinted deferred
-// lighting shader. Opt-in approximation: keep albedo, normal and scene lights,
-// but route tangent-bearing type 3 through the ordinary isotropic BRDF. RT4
-// carries its tangent, not emission, so do not add those RGB values as radiance.
+// Only called for the material-ID extraction of Scarlet's fingerprinted
+// deferred-lighting shader.  The clean F9 asset/G-buffer capture proved that
+// RT1 already contains the correct hair base colour while RT4 contains the
+// tangent field.  The visible cyan/purple corruption first appears in this
+// deferred-lighting pass.  Stencil bits 3..5 identify the main visible hair as
+// material 4 (with material 3 used by another tangent-bearing variant), so the
+// old diagnostic that handled only type 3 missed the dominant path.
+//
+// Opt-in compatibility mode keeps the correct albedo/normal/scene lighting and
+// routes both tangent-bearing material IDs through the ordinary isotropic BRDF.
+// Zero RT4's tangent registers so they cannot leak into the ordinary radiance
+// terms.  Once the exact anisotropic instruction bug is fixed this fallback can
+// be retired without touching guest assets.
 static void emit_hair_compat(Ctx *c, int dst, int src, const char *control) {
     if (!c->glsl || c->stage != STAGE_FRAGMENT || !c->key || !c->key->hair_isotropic ||
         dst != 62 || src != 47 || strcmp(control, "0x00000303u")) return;
-    sp(&c->body, "    if (r62 == 3u) { r62 = 0u; r6 = 0u; r7 = 0u; r32 = 0u; }\n");
+    sp(&c->body, "    if (r62 == 3u || r62 == 4u) { r62 = 0u; r6 = 0u; r7 = 0u; r32 = 0u; }\n");
 }
 
 // Write texture results: component mask selects which of r,g,b,a go to consecutive registers.
