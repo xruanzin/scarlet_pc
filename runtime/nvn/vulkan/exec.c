@@ -4602,8 +4602,8 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
 
 // ================================================================== executor (renderer.m exec_list)
 static void exec_list(uint64_t handle, int depth) {
-    uint64_t pin_handle = handle;
     uint64_t p = nvn_cmdstream_pin(handle);
+    uint64_t pin_handle = p; // stable host-chain start; guest handle may be recycled while execution is in flight
     if (depth == 0) st.obj = 0, st.obj_draw = 0;  // (a submitted list starts with no object; its called lists inherit)
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
