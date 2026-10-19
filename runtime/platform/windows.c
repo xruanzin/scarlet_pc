@@ -158,12 +158,17 @@ void plat_unmap_file(const void *ptr) {
 }
 
 void plat_set_cpu_boost(bool enabled) {
-    static int last = -1;
-    // Horizon's FastLoad request must not put the whole recompiled process above the Windows desktop.
-    SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
-    if (last != (int)enabled) {
-        fprintf(stderr, "[plat] CPU fast-load request %s (normal Windows process priority)\n", enabled ? "on" : "off");
+    static int last = -1, last_perf = -1;
+    bool perf = getenv("LARECOMP_PERFORMANCE") != NULL;
+    // Normal mode stays desktop-friendly. Explicit performance mode raises only
+    // one process class step; per-thread priorities below still preserve the
+    // guest's renderer/audio vs worker ordering.
+    SetPriorityClass(GetCurrentProcess(), perf ? ABOVE_NORMAL_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS);
+    if (last != (int)enabled || last_perf != (int)perf) {
+        fprintf(stderr, "[plat] CPU fast-load request %s (%s Windows process priority)\n",
+                enabled ? "on" : "off", perf ? "above-normal" : "normal");
         last = enabled;
+        last_perf = perf;
     }
 }
 
