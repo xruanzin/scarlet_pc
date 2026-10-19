@@ -929,12 +929,16 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     }
     uint32_t lv0 = v && (v->setmask & 1) ? v->base_level : 0;
     uint32_t nlv = v && (v->setmask & 1) && v->num_levels ? v->num_levels : b->levels - (lv0 < b->levels ? lv0 : 0);
-    uint32_t ly0 = v && (v->setmask & 2) ? v->min_layer : 0;
-    uint32_t nly = v && (v->setmask & 2) && v->num_layers ? v->num_layers : b->layers - (ly0 < b->layers ? ly0 : 0);
     if (lv0 >= b->levels) lv0 = b->levels - 1;
     if (lv0 + nlv > b->levels) nlv = b->levels - lv0;
-    if (ly0 >= b->layers) ly0 = b->layers - 1;
-    if (ly0 + nly > b->layers) nly = b->layers - ly0;
+    // A 3D image has one Vulkan array layer, but attachment views address its
+    // depth slices. Clamping these against b->layers silently selected slice 0.
+    uint32_t available = render && b->base_type == VK_IMAGE_VIEW_TYPE_3D ? b->depth >> lv0 : b->layers;
+    if (!available) available = 1;
+    uint32_t ly0 = v && (v->setmask & 2) ? v->min_layer : 0;
+    if (ly0 >= available) ly0 = available - 1;
+    uint32_t nly = v && (v->setmask & 2) && v->num_layers ? v->num_layers : available - ly0;
+    if (nly > available - ly0) nly = available - ly0;
     if (render) {
         VkImageViewType type = b->base_type == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
         uint32_t render_layers = 1;

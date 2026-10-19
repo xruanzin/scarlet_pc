@@ -42,12 +42,13 @@ typedef struct { VkFormat vf; uint8_t expand_rgb, alpha_one; } VkFmt;
 static const VkComponentMapping IDENTITY={0};
 static TexBackend backend;
 static VkImageAspectFlags seen;
+static uint32_t seen_layer, seen_layers;
 static VkImageView feedback_view[4][2];
 static struct { NvnDescPool *tpool; uint64_t tex[6][32]; } st;
 TexBackend *vk_tex(NvnTexture *t, bool render) { return &backend; }
 VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uint32_t lv0,
     uint32_t nlv, uint32_t ly0, uint32_t nly, VkComponentMapping sw, VkImageAspectFlags aspect) {
-    seen=aspect; return (VkImageView)(uintptr_t)(100+aspect);
+    seen=aspect; seen_layer=ly0; seen_layers=nly; return (VkImageView)(uintptr_t)(100+aspect);
 }
 VkImageView vk_dummy_view(int textype) { assert(!"unexpected dummy view"); return VK_NULL_HANDLE; }
 /*FUNCTIONS*/
@@ -88,6 +89,15 @@ int main(void) {
     assert(feedback_copy_regions(&backend,regions)==1);
     assert(regions[0].srcSubresource.aspectMask==VK_IMAGE_ASPECT_COLOR_BIT);
     feedback_set_views(1,&backend); assert(feedback_view[1][1]==VK_NULL_HANDLE);
+    backend.base_type=VK_IMAGE_VIEW_TYPE_3D; backend.depth=32; backend.layers=1; backend.levels=2;
+    backend.format=VK_FORMAT_A2B10G10R10_UNORM_PACK32; backend.width=backend.height=32;
+    t.format=0x3d; v=(NvnTextureView){.setmask=2,.num_layers=1};
+    for (uint16_t slice=0;slice<32;slice++) {
+        v.min_layer=slice; vk_view(&t,&v,true,true,TEXTYPE_2D);
+        assert(seen_layer==slice && seen_layers==1);
+    }
+    v.setmask|=1; v.base_level=1; v.num_levels=1; v.min_layer=15;
+    vk_view(&t,&v,true,true,TEXTYPE_2D); assert(seen_layer==15 && seen_layers==1);
     puts("depth/stencil selection, explicit depth override, attachment and snapshot aspects passed");
 }
 '''

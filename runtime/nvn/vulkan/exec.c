@@ -2930,6 +2930,62 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
 }
 
 static void draw_(CmdRec *r, bool indexed);
+// Execute the guest colour-grading shader, one 2D attachment slice at a time.
+// This avoids the layered 3D rendering path that faulted on Windows AMD, while
+// retaining the game's actual curve, exposure and colour-grading constants.
+static bool draw_lut_slices(CmdRec *r, bool indexed) {
+    NvnTexture *t = st.rt.ncolor > 0 ? st.rt.color[0] : NULL;
+    if (!t || t->target != 2 || t->format != 0x3D || t->width != 32 || t->height != 32 || t->depth != 32)
+        return false;
+    if (st.rt.has_cview[0] && (st.rt.cview[0].setmask & 2) && st.rt.cview[0].num_layers == 1)
+        return false; // the recursive single-slice draw, or an already explicit guest slice
+    if (st.rt.has_cview[0] && (st.rt.cview[0].setmask & 2) &&
+        (st.rt.cview[0].min_layer || (st.rt.cview[0].num_layers && st.rt.cview[0].num_layers != t->depth)))
+        return false;
+    for (int i = 1; i < st.rt.ncolor; i++) if (st.rt.color[i]) return false;
+    uint32_t base = (uint32_t)r->x[indexed ? 5 : 3];
+    uint32_t count = (uint32_t)r->x[indexed ? 6 : 4];
+    const char *compat = getenv("LARECOMP_LUT_IDENTITY");
+    if ((compat && atoi(compat)) || base != 0 || count != t->depth || st.rt.depth ||
+        (st.rt.has_cview[0] && (st.rt.cview[0].setmask & 1) && st.rt.cview[0].base_level != 0)) {
+        bool filled = renderer_fill_identity_lut_3d(t);
+        if (filled) { stat_draws++; g_draws_total++; }
+        return filled;
+    }
+    RtState saved = st.rt;
+    bool complete = true;
+    uint64_t issued_before = g_draws_total;
+    for (uint32_t slice = 0; slice < t->depth; slice++) {
+        CmdRec one;
+        memcpy(&one, r, sizeof one);
+        one.x[indexed ? 5 : 3] = slice;
+        one.x[indexed ? 6 : 4] = 1;
+        st.rt.cview[0].setmask |= 2;
+        st.rt.cview[0].min_layer = (uint16_t)slice;
+        st.rt.cview[0].num_layers = 1;
+        st.rt.has_cview[0] = true;
+        st.rt_dirty = true;
+        uint64_t before = g_draws_total;
+        draw_(&one, indexed);
+        if (g_draws_total == before) { complete = false; break; }
+    }
+    vk_end_pass();
+    st.rt = saved;
+    st.rt_dirty = true;
+    if (!complete) {
+        // A rejected shader/pipeline must not leave an uninitialized LUT.
+        // Finish any partial draws before the upload-CB compatibility copy.
+        if (g_draws_total != issued_before) renderer_flush();
+        renderer_fill_identity_lut_3d(t);
+        static int failed_logged;
+        if (!failed_logged++) LOG("[vk] Scarlet colour LUT: slice draw rejected; retaining identity compatibility fallback\n");
+        return true;
+    }
+    static int logged;
+    if (!logged++) LOG("[vk] Scarlet colour LUT: guest shader rendered into 32 individual depth slices\n");
+    return true;
+}
+
 static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
     draw_(r, indexed);
@@ -2940,19 +2996,7 @@ static void draw_(CmdRec *r, bool indexed) {
     storage_nwriteback = 0;
     if (prof) prof_tp_ = SDL_GetTicksNS();
     if (!st.program) { SKIP(0); return; }
-    // Scarlet builds a 32^3 A2B10G10R10 colour-grading LUT with one instanced
-    // layered draw. On the Windows AMD path this transition can hard-crash the
-    // process before Vulkan reports device loss. Until the exact layered path is
-    // made robust, upload a neutral identity LUT and skip only this tiny utility
-    // draw. The following tone-map pass then receives valid 3D colour data.
-    for (int i = 0; i < st.rt.ncolor; i++) {
-        NvnTexture *rt = st.rt.color[i];
-        if (rt && renderer_fill_identity_lut_3d(rt)) {
-            stat_draws++;
-            g_draws_total++;
-            return;
-        }
-    }
+    if (draw_lut_slices(r, indexed)) return;
     if (ip_enabled()) {  // (frame interpolation: what identifies this draw from one frame to the next)
         // what the draw is (program, vertex buffer, parameters), and which game object it belongs to: the same mesh
         // drawn for two objects (bushes, Pidgeys) is told apart by the object, not by the order the game drew them in
