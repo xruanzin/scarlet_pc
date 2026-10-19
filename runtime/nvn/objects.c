@@ -133,7 +133,9 @@ NVN(nvnQueueSubmitCommands) {
     if (!resolved) FATAL("nvn: failed to pin %d submitted command lists\n", n);
 
     for (int i = 0; i < n; i++) resolved[i] = nvn_cmdstream_pin(handles[i]);
+    backend_batch_begin();
     for (int i = 0; i < n; i++) backend_execute(resolved[i]);
+    backend_batch_end();
     for (int i = n - 1; i >= 0; i--) nvn_cmdstream_unpin(handles[i]);
 
     if (resolved != stack_resolved) free(resolved);
