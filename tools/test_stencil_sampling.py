@@ -43,12 +43,13 @@ static const VkComponentMapping IDENTITY={0};
 static TexBackend backend;
 static VkImageAspectFlags seen;
 static uint32_t seen_layer, seen_layers;
+static VkFormat seen_format;
 static VkImageView feedback_view[4][2];
 static struct { NvnDescPool *tpool; uint64_t tex[6][32]; } st;
 TexBackend *vk_tex(NvnTexture *t, bool render) { return &backend; }
 VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uint32_t lv0,
     uint32_t nlv, uint32_t ly0, uint32_t nly, VkComponentMapping sw, VkImageAspectFlags aspect) {
-    seen=aspect; seen_layer=ly0; seen_layers=nly; return (VkImageView)(uintptr_t)(100+aspect);
+    seen=aspect; seen_layer=ly0; seen_layers=nly; seen_format=fmt; return (VkImageView)(uintptr_t)(100+aspect);
 }
 VkImageView vk_dummy_view(int textype) { assert(!"unexpected dummy view"); return VK_NULL_HANDLE; }
 /*FUNCTIONS*/
@@ -58,6 +59,7 @@ int main(void) {
     backend=(TexBackend){.format=VK_FORMAT_D32_SFLOAT_S8_UINT,.width=1920,.height=1080,
         .depth=1,.levels=1,.layers=1,.samples=1,.base_type=VK_IMAGE_VIEW_TYPE_2D,
         .aspect=VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT};
+    t.backend=&backend;
     vk_view(&t,&v,false,false,TEXTYPE_2D); assert(seen==VK_IMAGE_ASPECT_DEPTH_BIT);
     vk_view(&t,&v,true,false,TEXTYPE_2D); assert(seen==VK_IMAGE_ASPECT_STENCIL_BIT);
     t.ds_mode=1; vk_view(&t,NULL,false,false,TEXTYPE_2D); assert(seen==VK_IMAGE_ASPECT_STENCIL_BIT);
@@ -98,6 +100,22 @@ int main(void) {
     }
     v.setmask|=1; v.base_level=1; v.num_levels=1; v.min_layer=15;
     vk_view(&t,&v,true,true,TEXTYPE_2D); assert(seen_layer==15 && seen_layers==1);
+    // Attachment view and pipeline declarations must agree for every mode.
+    unsetenv("LARECOMP_VK_RAW_SRGB_ATTACH");
+    backend.base_type=VK_IMAGE_VIEW_TYPE_2D; backend.layers=backend.levels=1;
+    backend.format=VK_FORMAT_R8G8B8A8_SRGB; t.format=0x38;
+    vk_view(&t,NULL,false,true,TEXTYPE_2D);
+    assert(seen_format==VK_FORMAT_R8G8B8A8_SRGB && vk_attachment_format(&t,NULL,false)==seen_format);
+    setenv("LARECOMP_VK_RAW_SRGB_ATTACH","1",1);
+    vk_view(&t,NULL,false,true,TEXTYPE_2D);
+    assert(seen_format==VK_FORMAT_R8G8B8A8_UNORM && vk_attachment_format(&t,NULL,false)==seen_format);
+    v=(NvnTextureView){.setmask=4,.format=0x38};
+    vk_view(&t,&v,true,true,TEXTYPE_2D);
+    assert(seen_format==VK_FORMAT_R8G8B8A8_SRGB && vk_attachment_format(&t,&v,true)==seen_format);
+    v.format=0x25; vk_view(&t,&v,true,true,TEXTYPE_2D);
+    assert(seen_format==VK_FORMAT_R8G8B8A8_UNORM && vk_attachment_format(&t,&v,true)==seen_format);
+    vk_view(&t,NULL,false,false,TEXTYPE_2D); assert(seen_format==VK_FORMAT_R8G8B8A8_SRGB);
+    unsetenv("LARECOMP_VK_RAW_SRGB_ATTACH");
     puts("depth/stencil selection, explicit depth override, attachment and snapshot aspects passed");
 }
 '''
@@ -146,7 +164,8 @@ class StencilSamplingTests(unittest.TestCase):
             self.skipTest('requires Vulkan and VMA headers')
         textures = Path(os.environ.get('SCARLET_TEXTURE_SOURCE', str(ROOT / 'runtime/nvn/vulkan/textures.c'))).read_text()
         executor = (ROOT / 'runtime/nvn/vulkan/exec.c').read_text()
-        funcs = '\n'.join(function(textures, name) for name in ('fmt_of','vk_format','view_type_for','vk_view'))
+        funcs = '\n'.join(function(textures, name) for name in
+            ('fmt_of','vk_format','renderer_format_is_depth','view_type_for','vk_attachment_format','vk_view'))
         funcs += '\n' + '\n'.join(function(executor, name) for name in
             ('stencil_texture_bindings','feedback_copy_regions','feedback_set_views'))
         exe = self.build(VIEW_HARNESS.replace('/*FUNCTIONS*/', funcs), 'views',

@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 import zipfile
 
@@ -26,8 +27,14 @@ class ForensicsCollectorTests(unittest.TestCase):
                 (capture / 'test.bin').write_bytes(b'current-texture')
                 stale = build / 'forensics-textures/frame_7_100'; stale.mkdir(parents=True)
                 (stale / 'old.bin').write_bytes(b'stale')
+                started = int(time.time()) - 30
                 (build / 'scarlet_forensics_7.txt').write_text(
+                    f'# capture_started_unix_s={started}\n'
                     '# texture_sources=build/forensics-textures/frame_7_101\nframe7\n')
+                for name, timestamp in [('pass_mrt_7_abc_rt1.png', started + 2),
+                                         ('pass_stale.png', started - 60)]:
+                    image = build / name; image.write_bytes(b'fixture')
+                    os.utime(image, (timestamp, timestamp))
                 if nested:
                     old = repo / 'build/scarlet_forensics_6.txt'; old.write_text('old-root')
                     os.utime(old, (1000, 1000))
@@ -41,6 +48,8 @@ class ForensicsCollectorTests(unittest.TestCase):
                 with zipfile.ZipFile(archives[0]) as archive:
                     names = archive.namelist()
                     self.assertIn('scarlet_forensics_7.txt', names)
+                    self.assertIn('passes/pass_mrt_7_abc_rt1.png', names)
+                    self.assertNotIn('passes/pass_stale.png', names)
                     self.assertIn('textures/texture_1/test.bin', names)
                     self.assertEqual(archive.read('textures/texture_1/test.bin'), b'current-texture')
                     self.assertFalse(any('old.bin' in n or 'forensics_6' in n for n in names))

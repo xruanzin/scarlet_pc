@@ -40,9 +40,16 @@ if ($TextureLine) {
 
 # Keep only passes from the same capture. Older F9 runs leave pass_*.png
 # behind in build/, which previously mixed unrelated frames in the ZIP.
-$cutoff = $forensics.LastWriteTime.AddSeconds(-8)
+$cutoff = $forensics.LastWriteTimeUtc.AddSeconds(-8)
+$StartLine = Select-String -LiteralPath $forensics.FullName -Pattern '^# capture_started_unix_s=([0-9]{1,11})$' | Select-Object -First 1
+if ($StartLine) {
+    $started = [DateTimeOffset]::FromUnixTimeSeconds([long]$StartLine.Matches[0].Groups[1].Value).UtcDateTime
+    if ($started -le $forensics.LastWriteTimeUtc -and $started -ge $forensics.LastWriteTimeUtc.AddHours(-1)) {
+        $cutoff = $started.AddSeconds(-1)
+    }
+}
 $passes = Get-ChildItem $build -Filter "pass_*.png" -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.LastWriteTime -ge $cutoff -and $_.LastWriteTime -le $forensics.LastWriteTime.AddSeconds(3) } |
+    Where-Object { $_.LastWriteTimeUtc -ge $cutoff -and $_.LastWriteTimeUtc -le $forensics.LastWriteTimeUtc.AddSeconds(3) } |
     Sort-Object Name
 if ($passes) {
     $passDir = Join-Path $tmp "passes"
@@ -54,7 +61,7 @@ if ($passes) {
 # captures. Package only files from this F9 capture, using the same timestamp
 # window as pass_*.png, so DoF/depth regressions can be diagnosed from one ZIP.
 $depths = Get-ChildItem $build -Filter "fbdepth_*.pgm" -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.LastWriteTime -ge $cutoff -and $_.LastWriteTime -le $forensics.LastWriteTime.AddSeconds(3) } |
+    Where-Object { $_.LastWriteTimeUtc -ge $cutoff -and $_.LastWriteTimeUtc -le $forensics.LastWriteTimeUtc.AddSeconds(3) } |
     Sort-Object Name
 if ($depths) {
     $depthDir = Join-Path $tmp "depth"

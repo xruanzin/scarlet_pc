@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "../../kernel.h"
 #include "../../platform.h"
@@ -1189,6 +1190,7 @@ static uint32_t tex_wh[2][64][2];
 static VkFormat pass_color[8], pass_depth, pass_stencil;
 static uint32_t pass_ncolor, pass_samples = 1, pass_w, pass_h;
 static int debug_pass_no;
+static bool debug_mrt_drawn;
 // Lightweight always-on pass-break attribution. Scarlet currently creates
 // hundreds of rendering instances per frame; keeping just the source line that
 // ended each pass lets us remove the dominant break without the much heavier
@@ -1204,6 +1206,8 @@ static void vk_end_pass_at(int line) {
     if (prof && line < 4096) prof_end_line[line]++;
     vkCmdEndRendering(vk_cmd());
     in_pass = false;
+    bool save_materials = debug_mrt_drawn;
+    debug_mrt_drawn = false;
     if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
@@ -1214,6 +1218,23 @@ static void vk_end_pass_at(int line) {
         else snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
         renderer_save_texture_tex(st.rt.color[0]->backend, path);
     }
+    // G-buffer passes can have RT0 unbound. The old F9 path skipped all their
+    // material/normal/emissive outputs, hiding the source of hair colour errors.
+    if (g_debug_frame && save_materials) {
+        static uint64_t frame = ~0ull;
+        static unsigned saved;
+        uint64_t now = renderer_present_count();
+        if (frame != now) { frame = now; saved = 0; }
+        for (int i = 1; i < st.rt.ncolor && saved < 32; i++) {
+            NvnTexture *t = st.rt.color[i];
+            if (!t || !t->backend || pass_color[i] == VK_FORMAT_UNDEFINED) continue;
+            char path[256];
+            snprintf(path, sizeof path, "build/pass_mrt_%llu_%llx_rt%d.png", (unsigned long long)now,
+                     (unsigned long long)t->addr, i);
+            renderer_save_texture_tex(t->backend, path);
+            saved++;
+        }
+    }
 }
 
 static uint32_t level_extent(uint32_t v, uint32_t lv) { v >>= lv; return v ? v : 1; }
@@ -1223,6 +1244,7 @@ static void begin_pass(void) {
     vk_end_pass();
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
     st.rt_dirty = false;
+    debug_mrt_drawn = false;
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
     if (tf_barrier_pending) { stat_tf_dep_rt++; tf_pending_clear(); stat_tf_barriers++; }
@@ -1258,12 +1280,7 @@ static void begin_pass(void) {
             ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
             ca[i].clearValue.color.float32[3] = fresh ? 0.0f : 1.0f;
         }
-        pass_color[i] = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4) && vk_format(t->format) == b->format
-                      ? vk_format(st.rt.cview[i].format) : b->format;
-        if (!(st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4)) && !getenv("LARECOMP_VK_SRGB_ATTACH")) {
-            if (pass_color[i] == VK_FORMAT_R8G8B8A8_SRGB) pass_color[i] = VK_FORMAT_R8G8B8A8_UNORM;
-            else if (pass_color[i] == VK_FORMAT_B8G8R8A8_SRGB) pass_color[i] = VK_FORMAT_B8G8R8A8_UNORM;
-        }
+        pass_color[i] = vk_attachment_format(t, &st.rt.cview[i], st.rt.has_cview[i]);
         uint32_t lv = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 1) ? st.rt.cview[i].base_level : 0;
         uint32_t ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
         if (!w) { renderer_texture_scale(t, &pass_sx, &pass_sy); w = ew; }
@@ -2064,6 +2081,20 @@ static NvnTexture *feedback_tex[4];
 static VkImageView feedback_view[4][2]; // depth/color and stencil views of the same snapshot
 static int nfeedback;
 static uint64_t g_cur_fs_hash;
+static uint64_t fragment_code_hash(uint64_t fs) {
+    static uint64_t previous, hash;
+    if (fs != previous) {
+        previous = fs;
+        hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0;
+    }
+    return hash;
+}
+
+static bool sharp_dof_variant(uint64_t hash) {
+    const char *e = getenv("LARECOMP_NO_DOF");
+    // Same composite fingerprint in the academy, classroom and statue captures.
+    return e && atoi(e) != 0 && hash == 0xfbff97881854688eull;
+}
 static NvnTexture *snap_tex[8];
 static bool snap_ok[8];
 static const char *snap_why[8];
@@ -3037,6 +3068,8 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
+    uint64_t fs_hash = fragment_code_hash(st.program->stages[1].code_addr);
+    fkey.sharp_scene = sharp_dof_variant(fs_hash);
     vkey.layer_varying = fkey.layer_varying = lut_slice_active;
     vkey.bindless_storage = fkey.bindless_storage = g_vk.bindless_storage_slots;
     vkey.storage_buffers = fkey.storage_buffers = storage_buffer_count();
@@ -3074,12 +3107,8 @@ static void draw_(CmdRec *r, bool indexed) {
     if (pr) wait_built(&pr->state, "program", pr->code[0], pr->code[1]);
     if (!pr || atomic_load(&pr->state) != 1) { SKIP(pr ? 1 + (atomic_load(&pr->state) > 1) : 3); return; }
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
-        static uint64_t last_fs, last_hash;
+        uint64_t last_hash = fs_hash;
         uint64_t fs = st.program->stages[1].code_addr;
-        if (fs != last_fs) {
-            last_fs = fs;
-            last_hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0;
-        }
         static uint64_t skip[16];
         static int nskip = -1;
         if (nskip < 0) {
@@ -3497,6 +3526,8 @@ static void draw_(CmdRec *r, bool indexed) {
     // ---- draw
     if (!use_index) vkCmdDraw(cb, count, inst, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
+    if (g_debug_frame && !vertex_only_xfb && pr->vi->attr_mask && st.rt.depth && st.rt.ncolor > 1)
+        debug_mrt_drawn = true;
     surface_finish_writes(pr->vi);
     if (!vertex_only_xfb) surface_finish_writes(pr->fi);
     bool surface_write = pr->vi->uses_surface_write || pr->vi->uses_surface_atomic ||
@@ -3550,6 +3581,7 @@ static void forensic_draw_record(Prog *pr, CmdRec *r, bool indexed) {
         snprintf(path, sizeof path, "build/scarlet_forensics_%llu.txt", (unsigned long long)frame);
         forensic_fp = fopen(path, "w");
         if (forensic_fp) {
+            fprintf(forensic_fp, "# capture_started_unix_s=%lld\n", (long long)time(NULL));
             fprintf(forensic_fp, "# texture_sources=%s\n", nvn_diag_texture_capture_dir(frame));
             fprintf(forensic_fp,
                 "# Scarlet graphics forensics frame %llu\n"
@@ -3585,6 +3617,13 @@ static void forensic_draw_record(Prog *pr, CmdRec *r, bool indexed) {
         if (rv->setmask & 4) fprintf(forensic_fp, "/f%#x", rv->format);
         if (rv->setmask & 1) fprintf(forensic_fp, "/lv%u+%u", rv->base_level, rv->num_levels);
         if (rv->setmask & 2) fprintf(forensic_fp, "/ly%u+%u", rv->min_layer, rv->num_layers);
+    }
+    for (int i = 1; i < st.rt.ncolor; i++) {
+        const NvnTexture *t = st.rt.color[i];
+        if (!t) continue;
+        fprintf(forensic_fp, " rt%d=%llx/%ux%u/f%#x", i, (unsigned long long)t->addr,
+                t->width, t->height, t->format);
+        if (st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4)) fprintf(forensic_fp, "/viewf%#x", st.rt.cview[i].format);
     }
     if (st.vbuf[0].addr)
         fprintf(forensic_fp, " v0=%llx+%llu/stride%u", (unsigned long long)st.vbuf[0].addr,

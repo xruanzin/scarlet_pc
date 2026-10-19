@@ -2116,6 +2116,13 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;\n");
     }
     sp(&s, "void main() {\n");
+    if (stage == STAGE_FRAGMENT && key && key->sharp_scene && info->ntex >= 3 &&
+        key->rt_kind[0] == 0 && info->tex[2].type == TEXTYPE_2D && !info->tex[2].shadow && !stencil_tex(c, 2) &&
+        (c->in_attr_mask & 1u) && (c->omap_target & 0xFu) == 0xFu) {
+        // The captured DOF composite samples its sharp scene at t2/v0.xy.
+        // Keep the image in linear HDR; later colour grading and UI still run.
+        sp(&s, "  c0 = texture(t2, v0.xy);\n  return;\n");
+    }
     if (stage == STAGE_VERTEX) {
         sp(&s, "  gl_Position = vec4(0, 0, 0, 1);\n");
         if (key && key->layer_varying) sp(&s, "  guest_layer = 0u;\n");

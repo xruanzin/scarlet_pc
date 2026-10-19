@@ -919,6 +919,22 @@ static const VkComponentMapping IDENTITY = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_CO
 
 // render: attachment view (one level, one layer). Otherwise a sampled view of type want_textype (TEXTYPE_*),
 // with the NVN component swizzle, converting between compatible types the way renderer.m does.
+VkFormat vk_attachment_format(const NvnTexture *t, const NvnTextureView *v, bool has_view) {
+    const TexBackend *b = t->backend;
+    VkFormat base = b ? b->format : vk_format(t->format), fmt = base;
+    if (!has_view) v = NULL;
+    bool explicit_format = v && (v->setmask & 4);
+    if (explicit_format && !renderer_format_is_depth(t->format) && vk_format(t->format) == base)
+        fmt = fmt_of(v->format).vf;
+    // The image view AND pipeline must use this same format. Native sRGB is
+    // the default; the raw-view experiment is enabled only by this switch.
+    if (!explicit_format && getenv("LARECOMP_VK_RAW_SRGB_ATTACH")) {
+        if (fmt == VK_FORMAT_R8G8B8A8_SRGB) fmt = VK_FORMAT_R8G8B8A8_UNORM;
+        else if (fmt == VK_FORMAT_B8G8R8A8_SRGB) fmt = VK_FORMAT_B8G8R8A8_UNORM;
+    }
+    return fmt;
+}
+
 VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype) {
     TexBackend *b = vk_tex(t, render);
     if (!has_view) v = NULL;
@@ -927,36 +943,7 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
         VkFormat vf = fmt_of(v->format).vf;
         if (vk_format(t->format) == b->format) fmt = vf;  // (fallback images keep their own format)
     }
-    /*
-     * Scarlet's final tone-map shader writes an already sRGB-encoded value
-     * (the shader contains the 12.92 / 1.055 / 1/2.4 transfer curve) into an
-     * RGBA8_SRGB texture.  Treating the attachment itself as SRGB in Vulkan
-     * applies the fixed-function encode a second time, producing the washed-out
-     * pink/blue image seen in the cutscenes.  NVN keeps the storage texture
-     * tagged sRGB for later sampling, but this render-target use is raw.
-     *
-     * Use the linear-compatible attachment view unless the guest supplied an
-     * explicit format view.  Sampling still uses the original sRGB view, so the
-     * following composite decodes exactly once.  The environment switch keeps
-     * the old behaviour available for A/B testing.
-     */
-    /*
-     * Vulkan's sRGB attachment conversion matches NVN here.  A previous
-     * experiment forced UNORM attachment views to avoid a suspected double
-     * encode; the A/B capture made the whole scene too dark, so retain native
-     * sRGB attachment semantics by default.  LARECOMP_VK_RAW_SRGB_ATTACH=1
-     * keeps the old experiment available for diagnostics.
-     */
-    if (render && (!v || !(v->setmask & 4)) && getenv("LARECOMP_VK_RAW_SRGB_ATTACH")) {
-        VkFormat before = fmt;
-        if (fmt == VK_FORMAT_R8G8B8A8_SRGB) fmt = VK_FORMAT_R8G8B8A8_UNORM;
-        else if (fmt == VK_FORMAT_B8G8R8A8_SRGB) fmt = VK_FORMAT_B8G8R8A8_UNORM;
-        if (before != fmt) {
-            static int logged_srgb_rt;
-            if (!logged_srgb_rt++)
-                LOG("[vk] diagnostic raw UNORM view for sRGB render target\n");
-        }
-    }
+    if (render) fmt = vk_attachment_format(t, v, v != NULL);
     uint32_t lv0 = v && (v->setmask & 1) ? v->base_level : 0;
     uint32_t nlv = v && (v->setmask & 1) && v->num_levels ? v->num_levels : b->levels - (lv0 < b->levels ? lv0 : 0);
     if (lv0 >= b->levels) lv0 = b->levels - 1;
