@@ -65,7 +65,10 @@ void vk_collect_dead(void);
 
 // ================================================================== submissions
 // A submission = optional upload command buffer + the main one, signalling the timeline with its number.
-#define SUBS 8
+#define MAX_QUEUE_LISTS 16
+// Two batches of slots: recording a full batch must never wrap to one of its
+// already-ended, not-yet-submitted command buffers.
+#define SUBS (MAX_QUEUE_LISTS * 2)
 typedef struct {
     VkCommandBuffer main, upload;
     bool main_begun, upload_begun, ts;  // ts: GPU timestamps written (profiling)
@@ -79,17 +82,26 @@ static uint64_t submit_seq;  // last physically submitted timeline value
 static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
 
-// Keep one completed NVN list per physical submission. The deferred two-list
-// path failed at vkEndCommandBuffer(upload) on the AMD Windows driver. The
-// bounded array also serves immediate presentation/flush calls; do not defer
-// list-end work until that path has been validated on the affected driver.
-#define QBATCH_MAX_CBS 8
+// Each list can contribute an upload and a main command buffer.
+#define QBATCH_MAX_CBS (MAX_QUEUE_LISTS * 2)
+_Static_assert(SUBS > MAX_QUEUE_LISTS, "queue batch must not wrap the slot ring");
 static VkCommandBufferSubmitInfo qbatch_cbs[QBATCH_MAX_CBS];
 static uint32_t qbatch_ncb, qbatch_lists;
 static uint64_t stat_logical_submits, stat_queue_batches;
 
 static int queue_batch_limit(void) {
-    return 1;
+    static int n = -1;
+    if (n < 0) {
+        const char *e = getenv("LARECOMP_QUEUE_BATCH");
+        n = e ? atoi(e) : 16;
+        if (n < 1) n = 1;
+        if (n > MAX_QUEUE_LISTS) n = MAX_QUEUE_LISTS;
+        // Keep guest lists as distinct command buffers, but amortize queue submission
+        // across sixteen lists. Scarlet still records thousands of logical lists in a
+        // short window; batching 8 cut submit count roughly in half on the Ryzen 4600G,
+        // so extend that same ordered batching without changing guest command order.
+    }
+    return n;
 }
 
 uint64_t vk_completed_seq(void) {
@@ -247,10 +259,17 @@ void vk_gpuprof_report(void) {
 // The command buffers stay distinct and are appended in exact guest order:
 // upload0, main0, upload1, main1, ...
 static bool qbatch_finish_current(bool force_main) {
+    // Reserve for the worst-case upload/main pair before writing either entry.
+    if (qbatch_ncb > QBATCH_MAX_CBS - 2)
+        FATAL("vk: queue batch capacity exhausted before list finalization\n");
     vk_end_pass();
-    if (tf_barrier_pending) stat_tf_dep_submit++;
-    tf_flush_pending_barrier();
 
+    // Do not force a transform-feedback memory barrier merely because one
+    // command buffer/list ends. Commands submitted to the same Vulkan queue
+    // remain ordered across submissions, and tf_pending_used_by_draw()/the
+    // explicit copy/compute/RT paths insert the visibility barrier at the first
+    // real consumer. Flushing here created one barrier per queue batch even when
+    // the captured stream was never read before being overwritten again.
     Sub *s = sub();
     if (!s->main_begun && !s->upload_begun && !force_main) return false;
 
@@ -595,9 +614,7 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
     return s;
 }
 
-// Guest memory copied once per execution epoch: draws in the same list can
-// share a snapshot. Queue timeline values are resource-retirement tokens, not
-// guest-data versions: separate lists may see CPU writes at the same address.
+// Guest memory copied once per submission: draws binding the same range share the copy.
 #define GCOPY_TAB 4096
 static struct { uint64_t addr, size, seq; VkSpan span; } gcopy[GCOPY_TAB];
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
@@ -809,28 +826,37 @@ static bool range_overlap_u64(uint64_t a, uint64_t as, uint64_t b, uint64_t bs) 
 
 static void tf_pending_add(uint64_t addr, uint64_t size) {
     if (!addr || !size) return;
-    for (uint32_t i = 0; i < tf_pending_n; i++) {
-        if (range_overlap_u64(addr, size, tf_pending_addr[i], tf_pending_size[i])) {
-            uint64_t lo = addr < tf_pending_addr[i] ? addr : tf_pending_addr[i];
-            uint64_t ae = addr + size, be = tf_pending_addr[i] + tf_pending_size[i];
-            uint64_t hi = ae > be ? ae : be;
-            tf_pending_addr[i] = lo;
-            tf_pending_size[i] = hi - lo;
-            tf_barrier_pending = true;
-            return;
+    uint64_t lo = addr, hi = addr + size;
+    if (hi < lo) hi = UINT64_MAX;
+
+    // Coalesce transitively. A new range can bridge two older TF writes; the
+    // previous first-match implementation left the second range behind, which
+    // inflated dependency checks/barriers in Scarlet's stream-output bursts.
+    for (uint32_t i = 0; i < tf_pending_n;) {
+        uint64_t rlo = tf_pending_addr[i], rhi = rlo + tf_pending_size[i];
+        if (rhi < rlo) rhi = UINT64_MAX;
+        if (lo <= rhi && rlo <= hi) {
+            if (rlo < lo) lo = rlo;
+            if (rhi > hi) hi = rhi;
+            tf_pending_n--;
+            tf_pending_addr[i] = tf_pending_addr[tf_pending_n];
+            tf_pending_size[i] = tf_pending_size[tf_pending_n];
+            continue;
         }
+        i++;
     }
+
     if (tf_pending_n < 64) {
-        tf_pending_addr[tf_pending_n] = addr;
-        tf_pending_size[tf_pending_n] = size;
+        tf_pending_addr[tf_pending_n] = lo;
+        tf_pending_size[tf_pending_n] = hi - lo;
         tf_pending_n++;
     } else {
-        // Saturation is rare; one broad range is conservative and preserves correctness.
-        uint64_t lo = addr, hi = addr + size;
+        // Saturation is rare; collapse everything into one conservative range.
         for (uint32_t i = 0; i < tf_pending_n; i++) {
-            if (tf_pending_addr[i] < lo) lo = tf_pending_addr[i];
-            uint64_t e = tf_pending_addr[i] + tf_pending_size[i];
-            if (e > hi) hi = e;
+            uint64_t rlo = tf_pending_addr[i], rhi = rlo + tf_pending_size[i];
+            if (rhi < rlo) rhi = UINT64_MAX;
+            if (rlo < lo) lo = rlo;
+            if (rhi > hi) hi = rhi;
         }
         tf_pending_addr[0] = lo;
         tf_pending_size[0] = hi - lo;
@@ -891,7 +917,26 @@ static void tf_pending_clear(void) {
 static void tf_flush_pending_barrier(void) {
     if (!tf_barrier_pending) return;
     vk_end_pass();
-    vk_full_barrier(vk_cmd());
+    VkCommandBuffer cb = vk_cmd();
+    // Stream-output only needs its writes made visible to later consumers.
+    // A global ALL_COMMANDS write/read+write barrier serialized unrelated color,
+    // depth and transfer work and became very expensive in Scarlet's TF-heavy
+    // scenes. Keep the destination broad (the consumer can be vertex/UBO/SSBO/
+    // indirect guest memory), but scope the producer to TF writes and do not
+    // unnecessarily order unrelated destination writes.
+    VkMemoryBarrier2 mb = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT,
+        .srcAccessMask = VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT
+    };
+    VkDependencyInfo di = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers = &mb
+    };
+    vkCmdPipelineBarrier2(cb, &di);
     tf_pending_clear();
     stat_tf_barriers++;
 }
@@ -1642,6 +1687,9 @@ static void translate_program(void *arg) {
             f = fopen(path, "wb");
             if (f) { fwrite((const void *)(uintptr_t)p->code[0], 1, n, f); fclose(f); }
         }
+        // Keep the program alive. Some Scarlet programs reach position through control-flow paths that the
+        // current static diagnostic does not recognize; rejecting them caused hundreds of valid model draws/frame
+        // to disappear. The diagnostic dump remains useful, but it must not change rendering semantics.
     }
 
     log_shader_flow(p->vi, p->code[0], "vs");
@@ -2972,12 +3020,19 @@ static void draw_(CmdRec *r, bool indexed) {
             debug_draw(pr, r, indexed);
         }
     }
-    resolve_feedback(pr);
-    snap_reason = "draw-depthwrite";
-    if (st.rt.depth && st.ds[0] && st.ds[1]) snapshots_invalidate(st.rt.depth);
-    snap_reason = "draw-colorwrite";
-    for (int i = 0; i < st.rt.ncolor; i++)
-        if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
+    bool vertex_only_xfb = vkey.xfb;
+    // XFB pipelines are vertex-only and rasterization-discarded. They cannot
+    // sample in a fragment stage or modify color/depth attachments, so avoid
+    // framebuffer feedback copies and attachment invalidation on this very hot
+    // Scarlet path.
+    if (!vertex_only_xfb) {
+        resolve_feedback(pr);
+        snap_reason = "draw-depthwrite";
+        if (st.rt.depth && st.ds[0] && st.ds[1]) snapshots_invalidate(st.rt.depth);
+        snap_reason = "draw-colorwrite";
+        for (int i = 0; i < st.rt.ncolor; i++)
+            if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
+    }
     begin_pass();
     VkCommandBuffer cb = vk_cmd();
 
@@ -3065,8 +3120,13 @@ static void draw_(CmdRec *r, bool indexed) {
             memcpy(k.blend[i], st.blend[i], 8);
         }
     }
+    // Alpha-to-coverage only has meaningful coverage with multisampling.
+    // Scarlet leaves this state enabled on some 1x passes; forwarding it to
+    // Vulkan turns alpha into single-sample coverage decisions (visible as the
+    // heavy stipple/checker pattern on AMD). Preserve A2C for real MSAA, but
+    // disable it for 1-sample targets.
     if (st.ms[0xC] && pass_samples == 1) stat_a2c_1x++;
-    k.a2c = st.ms[0xC] != 0;
+    k.a2c = st.ms[0xC] != 0 && pass_samples > 1;
     k.raster_discard = st.raster_discard;
     k.topo_class = cls;
     k.poly_fill = st.poly[2] != 1;
@@ -3155,13 +3215,15 @@ static void draw_(CmdRec *r, bool indexed) {
     PROF_ADD(prof_sets);
     VkDescriptorImageInfo fii[64];
     uint64_t prof_tx_ = prof ? SDL_GetTicksNS() : 0;
-    for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
-        float sc[2]; uint32_t wh[2];
-        texture_info(1, pr->fi, i, &fii[i], sc, wh);
-        tex_sc[1][i][0] = sc[0]; tex_sc[1][i][1] = sc[1]; tex_wh[1][i][0] = wh[0]; tex_wh[1][i][1] = wh[1];
+    if (!vertex_only_xfb) {
+        for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
+            float sc[2]; uint32_t wh[2];
+            texture_info(1, pr->fi, i, &fii[i], sc, wh);
+            tex_sc[1][i][0] = sc[0]; tex_sc[1][i][1] = sc[1]; tex_wh[1][i][0] = wh[0]; tex_wh[1][i][1] = wh[1];
+        }
     }
     if (prof) prof_tex += SDL_GetTicksNS() - prof_tx_;
-    if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
+    if (!vertex_only_xfb && fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
         // Draws into the swapchain image (see renderer.m): composites fill the window, UI goes in a centred 16:9 box.
         bool reads_scene = false;
         for (int i = 0; i < pr->fi->ntex && i < 64; i++)
@@ -3218,10 +3280,17 @@ static void draw_(CmdRec *r, bool indexed) {
     apply_scissor();
     float rs0[4] = {vp_sx, vp_sy, vp_ox, vp_oy};
     uint64_t prof_t1_ = prof ? SDL_GetTicksNS() : 0;
-    VkDescriptorSet fset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, tint, 0, 0, 0, fii);
+    if (vertex_only_xfb) {
+        // Pipeline stageCount is one for XFB, so set 1 is not statically used.
+        // Binding only the vertex set avoids thousands of fragment descriptor
+        // allocations/updates per second in Scarlet's stream-output passes.
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, 1, &vset, 0, NULL);
+    } else {
+        VkDescriptorSet fset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, tint, 0, 0, 0, fii);
+        VkDescriptorSet sets[2] = {vset, fset};
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, 2, sets, 0, NULL);
+    }
     if (prof) prof_sets += SDL_GetTicksNS() - prof_t1_;
-    VkDescriptorSet sets[2] = {vset, fset};
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, 2, sets, 0, NULL);
 
     uint64_t prof_t2_ = prof ? SDL_GetTicksNS() : 0;
     // ---- indices (copied; the largest index bounds the vertex data copied below)
@@ -3274,8 +3343,13 @@ static void draw_(CmdRec *r, bool indexed) {
             free(e);
         }
         if (!scan_src) {
-            max_index += 1;
-            if (base_vertex > 0) max_index += (uint32_t)base_vertex;
+            // Vertex fetch for indexed draws addresses index + baseVertex.  A
+            // negative baseVertex does not increase the upper bound, while a
+            // positive one does.  Keep the bound in signed space so malformed
+            // guest data cannot wrap a negative base into a multi-GB copy.
+            uint64_t upper = (uint64_t)max_index + 1u;
+            if (base_vertex > 0) upper += (uint32_t)base_vertex;
+            max_index = upper > UINT32_MAX ? UINT32_MAX : (uint32_t)upper;
         }
     }
     if (use_index) vkCmdBindIndexBuffer(cb, ib.buf, ib.off, itype_vk);
@@ -3298,8 +3372,9 @@ static void draw_(CmdRec *r, bool indexed) {
             if (scan_src) {  // copying after all: the index scan bounds the copy
                 if (scan_isz == 2) { const uint16_t *q = scan_src; for (uint32_t i = 0; i < icount; i++) if (q[i] > max_index && q[i] != (uint16_t)scan_restart) max_index = q[i]; }
                 else { const uint32_t *q = scan_src; for (uint32_t i = 0; i < icount; i++) if (q[i] > max_index && q[i] != scan_restart) max_index = q[i]; }
-                max_index += 1;
-                if (base_vertex > 0) max_index += (uint32_t)base_vertex;
+                uint64_t upper = (uint64_t)max_index + 1u;
+                if (base_vertex > 0) upper += (uint32_t)base_vertex;
+                max_index = upper > UINT32_MAX ? UINT32_MAX : (uint32_t)upper;
                 scan_src = NULL;
             }
             uint64_t stride = k.stride[s], need;
@@ -3319,9 +3394,9 @@ static void draw_(CmdRec *r, bool indexed) {
     if (!use_index) vkCmdDraw(cb, count, inst, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
     surface_finish_writes(pr->vi);
-    surface_finish_writes(pr->fi);
+    if (!vertex_only_xfb) surface_finish_writes(pr->fi);
     bool surface_write = pr->vi->uses_surface_write || pr->vi->uses_surface_atomic ||
-                         pr->fi->uses_surface_write || pr->fi->uses_surface_atomic;
+                         (!vertex_only_xfb && (pr->fi->uses_surface_write || pr->fi->uses_surface_atomic));
     stat_draws++;
     g_draws_total++;
     cum_draws++;
@@ -4216,11 +4291,14 @@ static void exec_list(uint64_t handle, int depth) {
                 stat_tf_merged++;
                 // Keep the dynamic-rendering instance open across independent TF passes. A barrier is
                 // inserted lazily before a consumer, a resume counter read, a render-target change, or submission.
-                // [tf-check]: does the GPU really write sane vertex data into the guest buffers? Look at the first
-                // few TF passes (waits for the GPU once each). nan/huge/zero counts per buffer tell a working TF
-                // from one that writes nothing, garbage or the wrong layout.
+                //
+                // The old unconditional [tf-check] path flushed and waited for the whole GPU on the first 12 TF
+                // passes. That was useful while bringing stream output up, but it stalls Scarlet exactly when the
+                // character/world geometry begins using TF. Keep the expensive readback strictly diagnostic.
                 static int tf_checks;
-                if (tf_checks < 12) {
+                static int tf_check_enabled = -1;
+                if (tf_check_enabled < 0) tf_check_enabled = getenv("LARECOMP_TF_CHECK") != NULL;
+                if (tf_check_enabled && tf_checks < 12) {
                     tf_checks++;
                     uint64_t sq = vk_pending_seq();
                     renderer_flush();
@@ -4525,7 +4603,7 @@ void backend_execute(uint64_t handle) {
     bool thread_diag = vk_exec_diag_enter(handle);
     PROF_T0();
     if (ip_enabled()) ip_note_list(handle);
-    guest_copy_flush();
+    guest_copy_flush(); // snapshot version is independent of the GPU retirement timeline
     exec_list(handle, 0);
     PROF_ADD(prof_exec);
     if (prof) cum_exec += SDL_GetTicksNS() - prof_t0_;

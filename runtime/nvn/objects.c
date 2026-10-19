@@ -335,23 +335,14 @@ static void builder_layout(uint64_t b, TexLayout *t) {
     if (!t->layers) t->layers = 1;
     t->levels = G(uint32_t, b, 0x1C) ? G(uint32_t, b, 0x1C) : 1;
     tegra_layout_init(t);
-    // BNTX/NVN packagedTextureLayout is a bitfield, not a bare block-height
-    // integer. Bits 0..2 are blockHeightLog2; higher bits carry packaged/sparse
-    // layout flags. The old code accepted the layout only when the *entire*
-    // low word was <= 5, so values such as 0x11/0x21 silently fell back to a
-    // guessed block height and BC7/BC6H textures were deswizzled with the wrong
-    // GOB geometry (the coloured/stippled surfaces seen in Scarlet).
+    // Packaged BNTX textures can provide an explicit Tegra block height.
+    // A zero value means "no packaged-layout override" here; keep the normal
+    // height-derived Tegra layout. Forcing zero to blockHeightLog2=0 corrupts
+    // textures whose real block height is 2/4/8/16 GOBs.
     uint64_t pl = G(uint64_t, b, 0x50);
-    // A zero layout is valid for blockHeightLog2=0. Packaged texture data
-    // being present distinguishes that from an ordinary builder using defaults.
-    bool have_pl = pl != 0 || G(uint64_t, b, 0x48) != 0;
-    if (have_pl) t->block_height_log2 = (uint32_t)pl & 7u;
-    if (have_pl && G(uint32_t, b, 0x20) >= 0x4D && G(uint32_t, b, 0x20) <= 0x50 && ((uint32_t)pl & ~7u)) {
-        static int told_bc_layout;
-        if (told_bc_layout++ < 12)
-            LOG("[tex-layout] compressed f%#x %ux%u packaged=%#x -> blockHeightLog2=%u\n",
-                G(uint32_t, b, 0x20), t->width, t->height, (uint32_t)pl, t->block_height_log2);
-    }
+    bool have_pl = pl != 0;
+    if (pl && (uint32_t)pl <= 5u)
+        t->block_height_log2 = (uint32_t)pl;
     if (have_pl && getenv("LARECOMP_LOG_PACKAGED")) {
         static int n;
         if (n++ < 4000) LOG("[nvn] packaged layout %016llx fmt %#x %ux%u lv %u -> bh %u flags %#x\n",

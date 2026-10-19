@@ -33,6 +33,7 @@ HARNESS = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#define MAX_QUEUE_LISTS 16
 typedef struct { uint64_t buf, off; void *ptr; } VkSpan;
 static unsigned copies, lists, submits, locked;
 static uint64_t value;
@@ -62,7 +63,7 @@ static void renderer_submit_list(void);
 static unsigned qbatch_lists;
 static bool qbatch_finish_current(bool force_main) { qbatch_lists++; return true; }
 static void qbatch_submit(int wait, int signal) {
-    assert(!wait && !signal && qbatch_lists == 1);
+    assert(!wait && !signal && qbatch_lists > 0 && qbatch_lists <= 16);
     qbatch_lists = 0; submits++;
 }
 static void exec_list(uint64_t handle, int depth) {
@@ -81,15 +82,16 @@ int main(int argc, char **argv) {
     assert(argc == 2);
     unsetenv("LARECOMP_SYNC_SUBMIT");
     if (!strcmp(argv[1], "cache")) {
+        unsetenv("LARECOMP_QUEUE_BATCH");
         for (value = 1; value <= 1000; value++) backend_execute(value);
-        assert(copies == 1000 && lists == 1000 && submits == 1000 && !locked);
+        assert(copies == 1000 && lists == 1000 && submits == 62 && qbatch_lists == 8 && !locked);
         puts("1000 list executions: current bytes across lists, one snapshot within each list");
     } else {
-        if (!strcmp(argv[1], "inherited-batch")) setenv("LARECOMP_QUEUE_BATCH", "2", 1);
+        if (!strcmp(argv[1], "single")) setenv("LARECOMP_QUEUE_BATCH", "1", 1);
         else unsetenv("LARECOMP_QUEUE_BATCH");
-        renderer_submit_list(); renderer_submit_list();
-        assert(submits == 2 && !qbatch_lists);
-        puts("list-end work is submitted immediately");
+        for (int i = 0; i < 32; i++) renderer_submit_list();
+        assert(submits == (!strcmp(argv[1], "single") ? 32 : 2) && !qbatch_lists);
+        puts("configured list grouping submits at its requested boundary");
     }
 }
 '''
@@ -122,8 +124,8 @@ class ListSnapshotTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
 
     def test_new_list_reads_updated_guest_memory(self): self.run_case('cache')
-    def test_immediate_submission_default(self): self.run_case('default')
-    def test_inherited_batch_setting_cannot_restore_deferred_path(self): self.run_case('inherited-batch')
+    def test_sixteen_lists_default(self): self.run_case('default')
+    def test_single_list_override(self): self.run_case('single')
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)

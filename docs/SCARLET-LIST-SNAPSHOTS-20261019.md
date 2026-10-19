@@ -1,46 +1,41 @@
-# List snapshots and immediate queue submission
+# Sixteen-list queue batching with bounded slot lifetime
 
-The supplied `scarlet_boot(20261019-041526).log` stops during initial rendering:
-`vkEndCommandBuffer(s->upload)` returns `-13` at the two-list batch finalizer.
-This reports the failing API, not the underlying AMD driver cause. The four
-screenshots are from other executions: the character and UI render, with face
-corruption and a noisy later scene. They do not establish the last log's frame
-or prove that one bug explains all remaining graphical defects.
+The supplied Windows source identifies commit e2439f0, which enables sixteen
+logical lists per physical queue submission. That source still has SUBS=8 and
+QBATCH_MAX_CBS=16. A list can produce both upload and main command buffers.
 
-## Changes
+The ninth list wraps to the first slot before any physical submission occurs.
+Its sequence still matches the pending timeline value, so sub() does not reset
+its already-ended command buffers. Ending one again is invalid. The provided
+AMD log reports vkEndCommandBuffer(upload) returning -13. The CPU regression
+reproduces that invalid lifecycle; actual AMD execution is still untested here.
 
-- List-end submission immediately drains the queue batch again. The previous
-  two-list deferral is disabled, including an inherited `LARECOMP_QUEUE_BATCH=2`.
-  Each list retains its own upload/main command buffers, existing ordering,
-  timeline signal, resource retirement and Vulkan error checks. This is a
-  conservative rollback of the path involved in the new crash, not a claim
-  that the exact driver's error has been reproduced or diagnosed.
-- Each `backend_execute` starts a new guest-copy cache epoch. Two execution
-  calls can otherwise share a pending GPU timeline number while guest code
-  changes a buffer between them. The old cache could return the previous
-  constant/vertex snapshot at the same address and size. Within one execution,
-  unchanged ranges still share a snapshot. GPU retirement remains keyed to
-  the timeline; it is separate from the CPU snapshot version.
+## Final changes
 
-Transform feedback, packed output attributes and texture-layout changes already
-present in the branch are retained. This patch neither changes the ROM nor
-guesses a texture block height from screenshots.
+- Default to sixteen lists, with LARECOMP_QUEUE_BATCH clamped to 1–16.
+- Use 32 submission slots (two full batches), and capacity for 32 command-buffer
+  entries (upload+main for every list). Assert the ring is larger than a batch.
+- Check capacity for a whole upload/main pair before ending either buffer.
+- Preserve one guest-copy snapshot epoch per executor entry, independently of
+  the GPU resource-retirement timeline.
+- Integrate the user's e2439f0 history, retaining its texture-layout fixes,
+  vertex bounds and scoped TF barriers. The merge retains the snapshots fix.
+- Do not add or change jogar.ps1.
+
+Slots are initialized lazily and reset only after their old GPU sequence is
+waited. More slots may retain more descriptor resources. No shader/GPU clock,
+30-FPS guarantee or complete graphical correction is implied by the batch size.
 
 ## Validation
 
-`tools/test_vulkan_list_snapshots.py` compiles the actual cache, executor entry,
-queue-limit and list-end submit functions with mocked GPU allocation/submission.
-It changes one guest buffer over 1000 execution calls while holding the pending
-timeline fixed. Every execution must read current bytes and reuse one snapshot
-within that execution. Separate cases verify that list end physically submits
-immediately, with and without an inherited batching variable. All three cases
-fail against the pre-change source and pass after the change. This is a CPU
-regression harness, not a Vulkan-driver test.
+The production sub() regression simulates 4096 upload+main lists in 256 batches.
+Every new list must acquire a fresh/reset slot; command-buffer capacity must
+cover both entries. The e2439f0 source fails at ring reuse before submission;
+the fixed source passes. Additional production cache/executor/list-end tests
+check fresh guest bytes at a fixed pending timeline, reuse within one list,
+sixteen-list default submission and the one-list override. Vulkan calls are
+mocked; this is not an AMD driver execution test.
 
-The edited executor translation unit compiles with the Vulkan/SDL/VMA headers
-on Linux. Actual Scarlet, Windows and the AMD proprietary driver remain untested
-here. Complete graphics correctness and a stable 30 FPS are not established.
-
-Build with `tools/scarlet_build_windows.ps1`, then run
-`tools/scarlet_run.ps1 -Profile`. First verify whether this startup failure is
-gone, then compare the remaining face/scene corruption on the same screen.
+Build using scarlet_build_windows.ps1 and run scarlet_run.ps1 -Profile with
+LARECOMP_QUEUE_BATCH=16. The queue/list counters should show grouped submission;
+explicit flushes/presentation/synchronization can submit smaller batches.

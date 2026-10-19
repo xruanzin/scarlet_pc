@@ -70,9 +70,18 @@ uint64_t tegra_layer_size(const TexLayout *t) {
     uint64_t size = 0;
     for (uint32_t i = 0; i < t->levels; i++) size += level_size(t, i, NULL);
     if (t->layers > 1) {
-        // layers are aligned to the level-0 block size
+        // Match modern Tegra image layout: the layer stride is aligned using
+        // the effective level-0 block geometry after shrinking oversized
+        // block height/depth for small surfaces. Aligning every array layer to
+        // the original block height can shift all layers after layer 0.
         uint32_t bh = t->block_height_log2;
-        size = align_up(size, 512ull << bh);
+        uint32_t bd = t->block_depth_log2;
+        uint32_t aligned_h = (uint32_t)align_up(t->height, t->fmt->bh ? t->fmt->bh : 1);
+        while (bh > 0 && aligned_h <= (1u << (bh - 1)) * 8u)
+            bh--;
+        while (bd > 0 && t->depth <= (1u << (bd - 1)))
+            bd--;
+        size = align_up(size, 512ull << (bh + bd));
     }
     return size;
 }
