@@ -57,7 +57,8 @@ typedef struct {
     uint8_t layer_from_instance; // layered 3D render target: route instance N to slice N
     uint32_t stencil_tex_mask; // direct NVN texture bindings (not translation slot indices): unsigned stencil fetches
     uint8_t layer_varying; // split 3D draws: carry guest layer as flat uint, independent of physical layer 0
-    uint8_t hair_isotropic; // opt-in Scarlet anisotropic-material compatibility lighting
+    uint8_t hair_isotropic; // Scarlet anisotropic-material compatibility lighting
+    uint8_t ring_neutral_grade; // Scarlet opening schoolyard: neutralize the erroneous cool tone-map cast
     uint8_t sharp_scene; // recognized Scarlet DOF composite: return its unblurred scene input
 } ShaderKey;
 
