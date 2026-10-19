@@ -27,6 +27,26 @@
 // budget. Every recording gets a tiny opaque handle in guest memory and the
 // actual CmdRec stream lives in host segments chained from that handle.
 #define HOSTSEG_BASE_SIZE (32u << 10)
+#define HOSTSEG_MAGIC 0x534547484f53544full /* "HOSTSEGO" */
+/*
+ * Expanded command streams used to keep all segments in one flat array and
+ * linearly scan that array on every BeginRecording, AddCommandMemory, submit
+ * pin and unpin. Scarlet records thousands of lists per frame; once the pool
+ * reached ~7.7k segments those O(N) scans alone consumed tens of milliseconds
+ * of CPU time per frame.
+ *
+ * Each allocation now has a tiny prefix containing its stable pool index,
+ * recordings keep an intrusive chain of their segments, and ordinary 32 KiB
+ * segments use an O(1) free list. Guest command-memory ranges contain one
+ * fixed-size CMD_JUMP handle per recorded list, so recycling a range can walk
+ * those handles and release the exact chains instead of scanning the pool.
+ */
+typedef struct {
+    uint64_t magic;
+    uint32_t index;
+    uint32_t pad;
+} HostSegPrefix;
+
 // Most Scarlet command lists are small. A fixed 128 KB allocation per live list grew to >800 MB in character
 // creation. Use 32 KB base segments and allocate a larger segment only when one expanded record actually needs it.
 // LARECOMP_HOSTSEG_MB is a safety ceiling for backing allocations, not a target pool size.
@@ -45,41 +65,107 @@ typedef struct {
     uint32_t size;
     bool busy;
     bool pending_release;
+    bool on_free32;
+    bool chain_head;
     uint32_t refs;
     uint64_t origin_lo, origin_hi;  // guest handle slot that owns this segment chain
+    int32_t chain_next;
+    int32_t free_next;
 } HostSeg;
 static HostSeg *g_hostseg;
 static int g_nhostseg, g_caphostseg;
+static int32_t g_free32 = -1;
 static pthread_mutex_t g_hostseg_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_take_count;
 static uint64_t g_hostseg_bytes;
 
-// Pool pressure only (caller holds g_hostseg_lock): free the chains whose game handle is dead. A chain's handle is the
-// CMD_JUMP in the game's command memory at origin_lo; when the game freed or reused that memory for anything else
-// (the ring slot was never handed to AddCommandMemory/BeginRecording again, so hostseg_release_range never ran) the
-// handle can't be submitted any more and its segments only leak. A chain whose slot still holds its JUMP stays.
+static int hostseg_index_from_mem(uint64_t mem) {
+    if (!mem) return -1;
+    const HostSegPrefix *h = (const HostSegPrefix *)(uintptr_t)(mem - sizeof(HostSegPrefix));
+    if (h->magic != HOSTSEG_MAGIC || h->index >= (uint32_t)g_nhostseg) return -1;
+    int idx = (int)h->index;
+    return g_hostseg[idx].mem == (uint8_t *)(uintptr_t)mem ? idx : -1;
+}
+
+static void hostseg_free32_push_locked(int idx) {
+    HostSeg *s = &g_hostseg[idx];
+    if (s->size != HOSTSEG_BASE_SIZE || s->on_free32) return;
+    s->free_next = g_free32;
+    s->on_free32 = true;
+    g_free32 = idx;
+}
+
+static int hostseg_free32_pop_locked(void) {
+    while (g_free32 >= 0) {
+        int idx = g_free32;
+        HostSeg *s = &g_hostseg[idx];
+        g_free32 = s->free_next;
+        s->free_next = -1;
+        s->on_free32 = false;
+        if (!s->busy && !s->refs && s->size == HOSTSEG_BASE_SIZE) return idx;
+    }
+    return -1;
+}
+
+static void hostseg_make_free_locked(int idx) {
+    HostSeg *s = &g_hostseg[idx];
+    s->busy = false;
+    s->pending_release = false;
+    s->origin_lo = s->origin_hi = 0;
+    s->chain_head = false;
+    s->chain_next = -1;
+    if (!s->refs) hostseg_free32_push_locked(idx);
+}
+
+// Release one exact recording chain. Returns the number of segments touched.
+static int hostseg_release_chain_locked(int head) {
+    int n = 0;
+    for (int idx = head, guard = 0; idx >= 0 && idx < g_nhostseg && guard++ < 65536;) {
+        HostSeg *s = &g_hostseg[idx];
+        int next = s->chain_next;
+        if (!s->busy) break;
+        n++;
+        if (s->refs) {
+            s->pending_release = true;
+            static uint64_t deferred;
+            uint64_t d = ++deferred;
+            if (d <= 16 || !(d & 255))
+                LOG("[nvn] deferred host command recycle #%llu: refs=%u origin=%llx..%llx\n",
+                    (unsigned long long)d, s->refs,
+                    (unsigned long long)s->origin_lo, (unsigned long long)s->origin_hi);
+        } else {
+            hostseg_make_free_locked(idx);
+        }
+        idx = next;
+    }
+    return n;
+}
+
+// Resolve a guest command-handle slot to the exact first host segment.
+static int hostseg_head_from_slot_locked(uint64_t slot) {
+    if (slot < GUEST_LO || slot + sizeof(CmdRec) > GUEST_HI) return -1;
+    const CmdRec *r = (const CmdRec *)(uintptr_t)slot;
+    if (r->op != CMD_JUMP || r->size != sizeof(CmdRec) || !r->x[0]) return -1;
+    int idx = hostseg_index_from_mem(r->x[0]);
+    if (idx < 0) return -1;
+    HostSeg *s = &g_hostseg[idx];
+    if (!s->busy || !s->chain_head || s->origin_lo != slot || slot >= s->origin_hi) return -1;
+    return idx;
+}
+
+// Pool pressure only (caller holds g_hostseg_lock): free chains whose guest
+// handle is gone. Only chain heads are inspected, so this is O(number of lists)
+// rather than the old O(segments^2) nested scan.
 static bool hostseg_slot_intact(uint64_t lo) {
-    if (lo < GUEST_LO || lo + sizeof(CmdRec) > GUEST_HI) return false;
-    const CmdRec *r = (const CmdRec *)(uintptr_t)lo;
-    if (r->op != CMD_JUMP || r->size != sizeof(CmdRec)) return false;
-    for (int j = 0; j < g_nhostseg; j++)
-        if (g_hostseg[j].busy && g_hostseg[j].origin_lo == lo && (uint64_t)(uintptr_t)g_hostseg[j].mem == r->x[0]) return true;
-    return false;
+    return hostseg_head_from_slot_locked(lo) >= 0;
 }
 static int hostseg_reclaim_dead_locked(void) {
     int freed = 0;
     for (int i = 0; i < g_nhostseg; i++) {
         HostSeg *s = &g_hostseg[i];
-        if (!s->busy || s->refs || !s->origin_lo || g_take_count - s->born < 4096) continue;
+        if (!s->busy || !s->chain_head || s->refs || !s->origin_lo || g_take_count - s->born < 4096) continue;
         if (hostseg_slot_intact(s->origin_lo)) continue;
-        uint64_t lo = s->origin_lo;
-        for (int j = i; j < g_nhostseg; j++) {  // the whole chain (same origin), including those before i already done
-            HostSeg *t = &g_hostseg[j];
-            if (t->busy && !t->refs && t->origin_lo == lo) {
-                t->busy = false; t->pending_release = false; t->origin_lo = t->origin_hi = 0;
-                freed++;
-            }
-        }
+        freed += hostseg_release_chain_locked(i);
     }
     return freed;
 }
@@ -87,21 +173,24 @@ static int hostseg_reclaim_dead_locked(void) {
 static void hostseg_release_range(uint64_t lo, uint64_t hi) {
     if (!lo || hi <= lo) return;
     pthread_mutex_lock(&g_hostseg_lock);
-    for (int i = 0; i < g_nhostseg; i++) {
-        HostSeg *s = &g_hostseg[i];
-        if (!s->busy || s->origin_hi <= lo || s->origin_lo >= hi) continue;
-        if (s->refs) {
-            s->pending_release = true;
-            static uint64_t deferred;
-            uint64_t n = ++deferred;
-            if (n <= 16 || !(n & 255))
-                LOG("[nvn] deferred host command recycle #%llu: refs=%u origin=%llx..%llx\n",
-                    (unsigned long long)n, s->refs,
-                    (unsigned long long)s->origin_lo, (unsigned long long)s->origin_hi);
-        } else {
-            s->busy = false;
-            s->pending_release = false;
-            s->origin_lo = s->origin_hi = 0;
+
+    int released = 0;
+    // Normal path: every guest handle is one fixed-size CmdRec slot. Walk the
+    // supplied NVN command-memory range and release only the chains actually
+    // referenced by its jump handles.
+    for (uint64_t p = lo; p + sizeof(CmdRec) <= hi; p += sizeof(CmdRec)) {
+        int head = hostseg_head_from_slot_locked(p);
+        if (head >= 0) released += hostseg_release_chain_locked(head);
+    }
+
+    // Compatibility fallback for unusual SDK ranges that do not begin on our
+    // handle-slot boundary. This path should be rare; keeping it preserves the
+    // old semantics without putting the common path back on an O(N) scan.
+    if (!released) {
+        for (int i = 0; i < g_nhostseg; i++) {
+            HostSeg *s = &g_hostseg[i];
+            if (!s->busy || !s->chain_head || s->origin_hi <= lo || s->origin_lo >= hi) continue;
+            released += hostseg_release_chain_locked(i);
         }
     }
     pthread_mutex_unlock(&g_hostseg_lock);
@@ -116,22 +205,38 @@ static uint32_t hostseg_alloc_size(uint32_t need) {
 }
 
 static int hostseg_best_free_locked(uint32_t need) {
+    if (need == HOSTSEG_BASE_SIZE) {
+        int idx = hostseg_free32_pop_locked();
+        if (idx >= 0) return idx;
+    }
     int best = -1;
     for (int i = 0; i < g_nhostseg; i++) {
         HostSeg *s = &g_hostseg[i];
-        if (s->busy || s->refs || s->size < need) continue;
+        if (s->busy || s->refs || s->on_free32 || s->size < need) continue;
         if (best < 0 || s->size < g_hostseg[best].size) best = i;
     }
     return best;
 }
 
+static void hostseg_chain_append_locked(NvnCmdBuf *cb, int idx) {
+    HostSeg *s = &g_hostseg[idx];
+    s->chain_next = -1;
+    s->chain_head = cb->host_chain_head < 0;
+    if (cb->host_chain_tail >= 0 && cb->host_chain_tail < g_nhostseg)
+        g_hostseg[cb->host_chain_tail].chain_next = idx;
+    else
+        cb->host_chain_head = idx;
+    cb->host_chain_tail = idx;
+}
+
 static uint64_t hostseg_take(NvnCmdBuf *cb, uint32_t need, uint32_t *actual_size) {
     static uint64_t total;
     uint8_t *mem = NULL;
+    int pick = -1;
     uint32_t want = hostseg_alloc_size(need);
     pthread_mutex_lock(&g_hostseg_lock);
 
-    int pick = hostseg_best_free_locked(want);
+    pick = hostseg_best_free_locked(want);
     // Reclaim stale chains before growing a large backing pool. This is deliberately
     // opportunistic: live/pinned command streams are never reclaimed.
     if (pick < 0 && g_hostseg_bytes >= (256ull << 20)) {
@@ -149,6 +254,7 @@ static uint64_t hostseg_take(NvnCmdBuf *cb, uint32_t need, uint32_t *actual_size
         s->origin_lo = cb->host_origin_lo;
         s->origin_hi = cb->host_origin_hi;
         s->born = g_take_count + 1;
+        s->free_next = -1;
         mem = s->mem;
         *actual_size = s->size;
     }
@@ -168,6 +274,7 @@ static uint64_t hostseg_take(NvnCmdBuf *cb, uint32_t need, uint32_t *actual_size
             s->origin_lo = cb->host_origin_lo;
             s->origin_hi = cb->host_origin_hi;
             s->born = g_take_count + 1;
+            s->free_next = -1;
             mem = s->mem;
             *actual_size = s->size;
         }
@@ -180,19 +287,28 @@ static uint64_t hostseg_take(NvnCmdBuf *cb, uint32_t need, uint32_t *actual_size
             if (p) { g_hostseg = p; g_caphostseg = nc; }
         }
         if (g_nhostseg < g_caphostseg) {
-            mem = malloc(want);
-            if (mem) {
+            int idx = g_nhostseg;
+            HostSegPrefix *raw = malloc(sizeof *raw + want);
+            if (raw) {
+                raw->magic = HOSTSEG_MAGIC;
+                raw->index = (uint32_t)idx;
+                raw->pad = 0;
+                mem = (uint8_t *)(raw + 1);
                 g_hostseg[g_nhostseg++] = (HostSeg){
                     .born = g_take_count + 1, .mem = mem, .size = want,
-                    .busy = true, .pending_release = false, .refs = 0,
-                    .origin_lo = cb->host_origin_lo, .origin_hi = cb->host_origin_hi
+                    .busy = true, .pending_release = false, .on_free32 = false,
+                    .chain_head = false, .refs = 0,
+                    .origin_lo = cb->host_origin_lo, .origin_hi = cb->host_origin_hi,
+                    .chain_next = -1, .free_next = -1
                 };
+                pick = idx;
                 g_hostseg_bytes += want;
                 *actual_size = want;
             }
         }
     }
 
+    if (pick >= 0) hostseg_chain_append_locked(cb, pick);
     uint64_t n = ++total;
     g_take_count++;
     int pool = g_nhostseg;
@@ -211,28 +327,41 @@ uint64_t nvn_cmdstream_pin(uint64_t handle) {
     uint64_t resolved = handle;
     pthread_mutex_lock(&g_hostseg_lock);
 
-    bool matched = false;
-    // Normal NVN handle: a tiny guest CMD_JUMP whose whole host chain shares
-    // the same origin range. Pin every segment in that chain.
-    for (int i = 0; i < g_nhostseg; i++) {
-        HostSeg *s = &g_hostseg[i];
-        if (!s->busy || !s->origin_lo || handle < s->origin_lo || handle >= s->origin_hi) continue;
-        s->refs++;
-        matched = true;
-    }
-    if (matched) {
+    int head = -1;
+    if (handle >= GUEST_LO && handle + sizeof(CmdRec) <= GUEST_HI) {
         const CmdRec *r = (const CmdRec *)(uintptr_t)handle;
-        if (r->op == CMD_JUMP && r->x[0]) resolved = r->x[0];
+        if (r->op == CMD_JUMP && r->size == sizeof(CmdRec) && r->x[0]) {
+            resolved = r->x[0];
+            head = hostseg_index_from_mem(resolved);
+            if (head >= 0) {
+                HostSeg *s = &g_hostseg[head];
+                if (!s->busy || !s->chain_head || s->origin_lo != handle) head = -1;
+            }
+        }
     } else {
-        // Host-only fallback / already-resolved handle: pin the segment which
-        // contains the address. Chains with a guest origin are already protected
-        // by the queue-level pin; this extra ref protects the active segment too.
+        head = hostseg_index_from_mem(handle);
+        if (head >= 0) {
+            resolved = handle;
+            // Host-only fallback recordings also start at a chain head.
+            if (!g_hostseg[head].busy) head = -1;
+        }
+    }
+
+    if (head >= 0) {
+        for (int idx = head, guard = 0; idx >= 0 && idx < g_nhostseg && guard++ < 65536; idx = g_hostseg[idx].chain_next)
+            g_hostseg[idx].refs++;
+    } else {
+        // Safety fallback for an old/unusual handle. This retains the old
+        // behaviour but should disappear from ordinary Scarlet submissions.
         for (int i = 0; i < g_nhostseg; i++) {
             HostSeg *s = &g_hostseg[i];
-            uint64_t lo = (uint64_t)(uintptr_t)s->mem, hi = lo + s->size;
-            if (s->busy && handle >= lo && handle < hi) {
+            if (!s->busy) continue;
+            if (s->origin_lo && handle >= s->origin_lo && handle < s->origin_hi) {
                 s->refs++;
-                break;
+                if (s->chain_head) resolved = (uint64_t)(uintptr_t)s->mem;
+            } else {
+                uint64_t lo = (uint64_t)(uintptr_t)s->mem, hi = lo + s->size;
+                if (!s->origin_lo && handle >= lo && handle < hi) s->refs++;
             }
         }
     }
@@ -241,33 +370,27 @@ uint64_t nvn_cmdstream_pin(uint64_t handle) {
     return resolved;
 }
 
-void nvn_cmdstream_unpin(uint64_t handle) {
-    if (!handle) return;
+void nvn_cmdstream_unpin(uint64_t resolved) {
+    if (!resolved) return;
     pthread_mutex_lock(&g_hostseg_lock);
 
-    bool matched = false;
-    for (int i = 0; i < g_nhostseg; i++) {
-        HostSeg *s = &g_hostseg[i];
-        if (!s->origin_lo || handle < s->origin_lo || handle >= s->origin_hi) continue;
-        if (s->refs) s->refs--;
-        matched = true;
-        if (!s->refs && s->pending_release) {
-            s->busy = false;
-            s->pending_release = false;
-            s->origin_lo = s->origin_hi = 0;
+    int head = hostseg_index_from_mem(resolved);
+    if (head >= 0) {
+        for (int idx = head, guard = 0; idx >= 0 && idx < g_nhostseg && guard++ < 65536;) {
+            HostSeg *s = &g_hostseg[idx];
+            int next = s->chain_next;
+            if (s->refs) s->refs--;
+            if (!s->refs && s->pending_release) hostseg_make_free_locked(idx);
+            idx = next;
         }
-    }
-    if (!matched) {
+    } else {
+        // Fallback for a non-prefixed legacy/fallback pointer.
         for (int i = 0; i < g_nhostseg; i++) {
             HostSeg *s = &g_hostseg[i];
             uint64_t lo = (uint64_t)(uintptr_t)s->mem, hi = lo + s->size;
-            if (handle < lo || handle >= hi) continue;
+            if (resolved < lo || resolved >= hi) continue;
             if (s->refs) s->refs--;
-            if (!s->refs && s->pending_release) {
-                s->busy = false;
-                s->pending_release = false;
-                s->origin_lo = s->origin_hi = 0;
-            }
+            if (!s->refs && s->pending_release) hostseg_make_free_locked(i);
             break;
         }
     }
