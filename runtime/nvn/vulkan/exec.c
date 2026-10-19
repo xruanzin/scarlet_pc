@@ -1006,6 +1006,12 @@ const char *renderer_stats(void) {
         snprintf(stats_text + n, sizeof stats_text - n, ", a2c1x %llu",
                  (unsigned long long)stat_a2c_1x);
     }
+    if (stat_logical_submits || stat_queue_batches) {
+        size_t n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n, ", qbatch %llu lists/%llu queue",
+                 (unsigned long long)stat_logical_submits,
+                 (unsigned long long)stat_queue_batches);
+    }
     {
         uint32_t bf[4] = {0}; uint64_t bc[4] = {0};
         for (uint32_t fl = 0; fl < 256; fl++) {
@@ -1096,6 +1102,7 @@ const char *renderer_stats(void) {
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
     stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = stat_raster_discard_sets = stat_raster_discard_on = stat_a2c_1x = 0;
+    stat_logical_submits = stat_queue_batches = 0;
     stat_tf_dep_vbuf = stat_tf_dep_cbuf = stat_tf_dep_sbuf = stat_tf_dep_gmem = stat_tf_dep_op = stat_tf_dep_submit = stat_tf_dep_rt = 0;
     return stats_text;
 }
