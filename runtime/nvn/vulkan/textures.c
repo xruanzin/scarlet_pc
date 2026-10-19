@@ -941,8 +941,14 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
      * the old behaviour available for A/B testing.
      */
     if (render && (!v || !(v->setmask & 4)) && !getenv("LARECOMP_VK_SRGB_ATTACH")) {
+        VkFormat before = fmt;
         if (fmt == VK_FORMAT_R8G8B8A8_SRGB) fmt = VK_FORMAT_R8G8B8A8_UNORM;
         else if (fmt == VK_FORMAT_B8G8R8A8_SRGB) fmt = VK_FORMAT_B8G8R8A8_UNORM;
+        if (before != fmt) {
+            static int logged_srgb_rt;
+            if (!logged_srgb_rt++)
+                LOG("[vk] sRGB render target uses raw linear-compatible attachment view (single encode path)\n");
+        }
     }
     uint32_t lv0 = v && (v->setmask & 1) ? v->base_level : 0;
     uint32_t nlv = v && (v->setmask & 1) && v->num_levels ? v->num_levels : b->levels - (lv0 < b->levels ? lv0 : 0);
