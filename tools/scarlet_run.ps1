@@ -66,6 +66,11 @@ if (Test-Path -LiteralPath $Log) {
 Write-Host "[scarlet-run] Primeiro boot do Scarlet..." -ForegroundColor Cyan
 Write-Host "[scarlet-run] Game root: $GameRoot"
 Write-Host "[scarlet-run] Log: $Log"
+$CurrentHead = (& git -C $RepoRoot rev-parse HEAD 2>$null)
+$MarkerNow = Join-Path $RepoRoot "build\.runtime_build_head"
+$BuiltHeadNow = if (Test-Path -LiteralPath $MarkerNow) { (Get-Content -LiteralPath $MarkerNow -Raw).Trim() } else { "<sem marcador>" }
+Write-Host "[scarlet-run] SCRIPT_REV=$($CurrentHead.Trim())"
+Write-Host "[scarlet-run] EXE_REV=$BuiltHeadNow"
 Write-Host ""
 
 # Windows PowerShell 5.1 turns native stderr into NativeCommandError when
