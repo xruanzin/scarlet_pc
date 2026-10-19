@@ -944,6 +944,18 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
         if (vk_format(t->format) == b->format) fmt = vf;  // (fallback images keep their own format)
     }
     if (render) fmt = vk_attachment_format(t, v, v != NULL);
+
+    // Scarlet character albedo is commonly BC7 sRGB (NVN 0x4e).  Keep two
+    // runtime-only A/B switches here so base-colour faults can be isolated
+    // without rebuilding shaders or touching tone mapping.
+    if (!render && t->format == 0x4E && getenv("LARECOMP_BC7_LINEAR") &&
+        fmt == VK_FORMAT_BC7_SRGB_BLOCK) {
+        fmt = VK_FORMAT_BC7_UNORM_BLOCK;
+        static int bc7_linear_logged;
+        if (!bc7_linear_logged++)
+            LOG("[vk] diagnostic: sampling NVN BC7 sRGB (0x4e) as linear BC7 UNORM\n");
+    }
+
     uint32_t lv0 = v && (v->setmask & 1) ? v->base_level : 0;
     uint32_t nlv = v && (v->setmask & 1) && v->num_levels ? v->num_levels : b->levels - (lv0 < b->levels ? lv0 : 0);
     if (lv0 >= b->levels) lv0 = b->levels - 1;
@@ -992,6 +1004,19 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
                                       (VkComponentSwizzle)(c[3] + 1)};
         } else if (fmt_of(t->format).alpha_one) {
             sw.a = VK_COMPONENT_SWIZZLE_ONE;
+        }
+
+        // If an albedo arrives with red/blue exchanged, the resulting brown/
+        // auburn hair becomes blue/purple before lighting.  Apply the swap at
+        // the sampled image view so the test is independent of BC7 decoding,
+        // shader translation and post processing.
+        if (t->format == 0x4E && getenv("LARECOMP_BC7_SWAP_RB")) {
+            VkComponentSwizzle tmp = sw.r;
+            sw.r = sw.b;
+            sw.b = tmp;
+            static int bc7_swap_logged;
+            if (!bc7_swap_logged++)
+                LOG("[vk] diagnostic: BC7 sRGB sampled R/B swap enabled\n");
         }
     }
     VkImageViewType want = view_type_for(want_textype);
