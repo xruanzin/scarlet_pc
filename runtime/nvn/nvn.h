@@ -126,6 +126,7 @@ typedef struct {
     uint64_t guest;       // the guest NVNcommandBuffer*
     uint64_t obj_tag;     // frame interpolation: the game object the list's last CMD_OBJECT named (cmdbuf.c)
     uint64_t host_origin_lo, host_origin_hi;  // guest handle slot owning the host segment chain
+    int32_t host_chain_head, host_chain_tail; // indices in cmdbuf.c's host segment pool for O(chain) recycle
     NvnProgram *diag_programs[6]; // diagnostic-only bindings; never used by the executor
     bool diag_tf_active;
 } NvnCmdBuf;
