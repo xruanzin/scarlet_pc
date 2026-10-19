@@ -2407,6 +2407,8 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     if (neutral_tint && stage == 1 && k >= 3 && scarlet_character_material(si)) {
         int only = atoi(neutral_tint);
         if (only <= 1 || only == k) {
+            const char *off_s = getenv("LARECOMP_NEUTRAL_HAIR_OFF");
+            uint64_t only_off = off_s && *off_s ? strtoull(off_s, NULL, 0) : UINT64_MAX;
             uint8_t *tmp = malloc((size_t)size);
             if (tmp) {
                 memcpy(tmp, (const void *)(uintptr_t)r.addr, (size_t)size);
@@ -2414,14 +2416,23 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
                 for (uint64_t off = 0; off + 16 <= size; off += 16) {
                     float *v = (float *)(void *)(tmp + off);
                     if (!tint_like_vec4(v)) continue;
+                    if (only_off != UINT64_MAX && off != only_off) continue;
+                    float r0 = v[0], g0 = v[1], b0 = v[2], a0 = v[3];
+                    uint32_t raw[4]; memcpy(raw, v, sizeof raw);
+                    static unsigned candidate_logs;
+                    if (candidate_logs++ < 128)
+                        LOG("[material-tint-candidate] cb%d(u%d) off=%#llx rgba=%g,%g,%g,%g raw=%08x,%08x,%08x,%08x\n",
+                            k, k - 3, (unsigned long long)off, r0, g0, b0, a0,
+                            raw[0], raw[1], raw[2], raw[3]);
                     v[0] = v[1] = v[2] = 1.0f;
                     changed++;
                 }
                 if (changed) {
                     static unsigned logs;
                     if (logs++ < 64)
-                        LOG("[material-tint] neutralized %u candidate vec4(s) in shader cb%d (NVN u%d, %llu bytes)\n",
-                            changed, k, k - 3, (unsigned long long)size);
+                        LOG("[material-tint] neutralized %u candidate vec4(s) in shader cb%d (NVN u%d, %llu bytes%s)\n",
+                            changed, k, k - 3, (unsigned long long)size,
+                            only_off != UINT64_MAX ? ", offset-filtered" : "");
                     VkDescriptorBufferInfo out = ubo_span(vk_transient_copy(tmp, size, 256), size);
                     free(tmp);
                     return out;
