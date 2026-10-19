@@ -119,8 +119,13 @@ RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
 # of every runtime/backend object.
 RT_REV := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo nogit)
 RT_REV_STAMP := $(B)/rt/.rev-$(RT_REV)
-RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
-CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(DEPINC)
+# The lifted game DLL already targets x86-64-v3 on Windows. Use the same
+# baseline for the runtime/backend so the command processor, descriptor setup,
+# texture bookkeeping and shader translator can use AVX2/FMA too. -O3 does not
+# enable unsafe fast-math; graphics correctness remains governed by the shader
+# translator and guest code.
+RTFLAGS  := -O3 -g $(GENARCH) -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
+CXXFLAGS := -O3 -g $(GENARCH) -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(DEPINC)
 
 all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))
 
