@@ -2951,10 +2951,25 @@ static bool draw_lut_slices(CmdRec *r, bool indexed) {
     uint32_t base = (uint32_t)r->x[indexed ? 5 : 3];
     uint32_t count = (uint32_t)r->x[indexed ? 6 : 4];
     const char *compat = getenv("LARECOMP_LUT_IDENTITY");
-    if ((compat && atoi(compat)) || base != 0 || count != t->depth || st.rt.depth ||
+    const char *guest_lut = getenv("LARECOMP_GUEST_LUT");
+    /*
+     * Scarlet's translated LUT shader is currently producing a corrupt cube on
+     * Vulkan (captured slices have a near-constant green axis and saturated blue
+     * values). Until the translator path is corrected, prefer the neutral cube;
+     * this preserves scene lighting/material colours instead of applying the
+     * broken blue/purple grade. LARECOMP_GUEST_LUT=1 restores the guest shader
+     * for A/B debugging.
+     */
+    bool force_identity = (compat && atoi(compat)) || !(guest_lut && atoi(guest_lut));
+    if (force_identity || base != 0 || count != t->depth || st.rt.depth ||
         (st.rt.has_cview[0] && (st.rt.cview[0].setmask & 1) && st.rt.cview[0].base_level != 0)) {
         bool filled = renderer_fill_identity_lut_3d(t);
-        if (filled) { stat_draws++; g_draws_total++; }
+        if (filled) {
+            stat_draws++; g_draws_total++;
+            static int identity_logged;
+            if (!identity_logged++)
+                LOG("[vk] Scarlet colour LUT: using neutral identity cube (guest LUT disabled; LARECOMP_GUEST_LUT=1 to compare)\n");
+        }
         return filled;
     }
     RtState saved = st.rt;
