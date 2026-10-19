@@ -781,11 +781,40 @@ static bool tf_pending_overlaps_range(Range r) {
     return false;
 }
 
-static bool tf_pending_used_by_draw(void) {
-    for (int i = 0; i < 16; i++) if (tf_pending_overlaps_range(st.vbuf[i])) return true;
-    for (int stage = 0; stage < 6; stage++) {
-        for (int i = 0; i < 18; i++) if (tf_pending_overlaps_range(st.ubuf[stage][i])) return true;
-        for (int i = 0; i < 16; i++) if (tf_pending_overlaps_range(st.sbuf[stage][i])) return true;
+static bool tf_pending_used_by_draw(const ShaderInfo *vi, const ShaderInfo *fi) {
+    // Only bindings that the currently translated shaders can actually read
+    // create a TF dependency.  The old conservative test scanned every stale
+    // NVN binding, so a TF output left bound in an unused vertex slot forced a
+    // barrier before virtually every following TF draw.
+    uint32_t used_streams = 0;
+    if (vi) {
+        for (int aidx = 0; aidx < 32; aidx++) {
+            if (!(vi->attr_mask & (1u << aidx))) continue;
+            if (aidx >= st.nattrib) continue;
+            uint32_t a = st.attrib[aidx];
+            uint32_t fmt = a & 0xFF, stream = (a >> 8) & 0x1F;
+            if (fmt && stream < 16) used_streams |= 1u << stream;
+        }
+    }
+    for (int stream = 0; stream < 16; stream++)
+        if ((used_streams & (1u << stream)) && tf_pending_overlaps_range(st.vbuf[stream])) return true;
+
+    const ShaderInfo *si[2] = {vi, fi};
+    for (int stage = 0; stage < 2; stage++) {
+        if (!si[stage]) continue;
+        uint32_t cm = si[stage]->cbuf_mask;
+        for (int i = 0; i < 18; i++)
+            if ((cm & (1u << i)) && tf_pending_overlaps_range(st.ubuf[stage][i])) return true;
+
+        // storage_buffers means the translated shader may resolve LDG/STG via
+        // the bound NVN storage ranges; check those ranges.  Native imported
+        // gmem access is conservatively synchronized because its address is
+        // computed dynamically by the guest shader.
+        if (si[stage]->storage_buffers) {
+            for (int i = 0; i < 16; i++)
+                if (tf_pending_overlaps_range(st.sbuf[stage][i])) return true;
+        }
+        if (si[stage]->uses_gmem) return true;
     }
     return false;
 }
@@ -2828,7 +2857,7 @@ static void draw_(CmdRec *r, bool indexed) {
             }
         }
     }
-    if (tf_barrier_pending && (!st.tf_active || st.tf_resume || tf_pending_used_by_draw()))
+    if (tf_barrier_pending && (!st.tf_active || st.tf_resume || tf_pending_used_by_draw(pr->vi, pr->fi)))
         tf_flush_pending_barrier();
 
     if (g_debug_frame) debug_draw(pr, r, indexed);
