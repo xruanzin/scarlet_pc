@@ -516,22 +516,15 @@ static bool stencil_tex(const Ctx *c, int slot) {
 }
 
 // Only called for the material-ID extraction of Scarlet's fingerprinted
-// deferred-lighting shader.  The clean F9 asset/G-buffer capture proved that
-// RT1 already contains the correct hair base colour while RT4 contains the
-// tangent field.  The visible cyan/purple corruption first appears in this
-// deferred-lighting pass.  Stencil bits 3..5 identify the main visible hair as
-// material 4 (with material 3 used by another tangent-bearing variant), so the
-// old diagnostic that handled only type 3 missed the dominant path.
-//
-// Opt-in compatibility mode keeps the correct albedo/normal/scene lighting and
-// routes both tangent-bearing material IDs through the ordinary isotropic BRDF.
-// Zero RT4's tangent registers so they cannot leak into the ordinary radiance
-// terms.  Once the exact anisotropic instruction bug is fixed this fallback can
-// be retired without touching guest assets.
+// deferred-lighting shader.  Clean F9 captures show that stencil value 31
+// (bits 3..5 == material 3) is the visible hair path.  RT1 already contains
+// the correct base colour and RT4 carries the tangent.  Route only material 3
+// through the ordinary isotropic BRDF here; material 4 is used broadly by the
+// scene/background and must not be rewritten.
 static void emit_hair_compat(Ctx *c, int dst, int src, const char *control) {
     if (!c->glsl || c->stage != STAGE_FRAGMENT || !c->key || !c->key->hair_isotropic ||
         dst != 62 || src != 47 || strcmp(control, "0x00000303u")) return;
-    sp(&c->body, "    if (r62 == 3u || r62 == 4u) { r62 = 0u; r6 = 0u; r7 = 0u; r32 = 0u; }\n");
+    sp(&c->body, "    if (r62 == 3u) { r62 = 0u; r6 = 0u; r7 = 0u; r32 = 0u; }\n");
 }
 
 // Write texture results: component mask selects which of r,g,b,a go to consecutive registers.
@@ -2225,6 +2218,30 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                 }
                 r++;
             }
+        }
+        // Scarlet hair compatibility: the captured G-buffer proves that the
+        // hair albedo in t4 is correct, while the deferred-lighting result
+        // becomes cyan/purple.  For material 3 only, preserve the luminance
+        // computed by the guest lighting shader but restore chroma from the
+        // original linear albedo.  This keeps shadows/highlights while avoiding
+        // the corrupt colour rotation.  The shader key fingerprints the exact
+        // deferred-lighting program, so no other material/pass is affected.
+        if (key && key->hair_isotropic && info->ntex > 4 && stencil_tex(c, 0) &&
+            info->tex[4].type == TEXTYPE_2D && !info->tex[4].shadow && key->rt_kind[0] == 0) {
+            sp(&s,
+               "  { ivec2 hp = ivec2((gl_FragCoord.xy - rscale[0].zw) / rscale[0].xy);\n"
+               "    hp = max(hp, ivec2(0));\n"
+               "    uint hs = texelFetch(t0, ivec2(rsc(uvec2(hp), rscale[1])), 0).r;\n"
+               "    uint hm = bitfieldExtract(hs, 3, 3);\n"
+               "    if (hm == 3u) {\n"
+               "      vec3 hb = texelFetch(t4, ivec2(rsc(uvec2(hp), rscale[5])), 0).rgb;\n"
+               "      vec3 hl = max(c0.rgb, vec3(0.0));\n"
+               "      float ll = dot(hl, vec3(0.2126, 0.7152, 0.0722));\n"
+               "      float lb = max(dot(hb, vec3(0.2126, 0.7152, 0.0722)), 0.02);\n"
+               "      float hscl = clamp(ll / lb, 0.25, 2.0);\n"
+               "      c0.rgb = hb * hscl;\n"
+               "    }\n"
+               "  }\n");
         }
         if (tint)
             sp(&s, "  if (ltint[0].w > 0.0f) { vec3 g = c0.rgb; float l = dot(g, vec3(0.299f, 0.587f, 0.114f));\n"
