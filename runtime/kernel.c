@@ -369,6 +369,33 @@ static uint32_t svc_arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) 
         pthread_mutex_unlock(&g_klock);
         return R_OK;
     }
+
+    // A valid Horizon mutex owner must be a live thread handle.  Scarlet's
+    // academy transition exposed a stale/corrupted owner word whose low bits
+    // were pointer-like (no such handle); the old implementation then slept
+    // forever because no thread could ever unlock it.  Recover only this
+    // impossible state, atomically taking the mutex for the requester. Valid
+    // owners keep the normal priority-ordered arbitration path below.
+    KObject *oo = handle_get(owner);
+    if (!oo || oo->type != KOBJ_THREAD) {
+        uint32_t expected = v;
+        if (__atomic_compare_exchange_n(u32p(addr), &expected, tag, false,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+            static uint64_t stale_mutex_recoveries;
+            uint64_t n = ++stale_mutex_recoveries;
+            if (n <= 16 || !(n & 255))
+                LOG("[kernel] recovered stale mutex owner #%llu: addr=%llx word=%08x owner=%x -> tag=%x\n",
+                    (unsigned long long)n, (unsigned long long)addr, v, owner, tag);
+            pthread_mutex_unlock(&g_klock);
+            return R_OK;
+        }
+        v = expected;
+        if (v != (owner | WAITERS_BIT)) {
+            pthread_mutex_unlock(&g_klock);
+            return R_OK;
+        }
+    }
+
     KThread *t = t_cur;
     t->wait_kind = WAIT_MUTEX;
     t->wait_addr = addr;
