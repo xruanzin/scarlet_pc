@@ -15,16 +15,18 @@ $RomFs = Join-Path $GameRoot "romfs"
 
 # git pull updates source files, not the already-built EXE. Compare the exact
 # Git revision that produced the runtime; timestamps are unreliable after checkout.
-if (Test-Path -LiteralPath $Exe -PathType Leaf -and -not $env:LARECOMP_SKIP_AUTO_BUILD) {
+if ((Test-Path -LiteralPath $Exe -PathType Leaf) -and -not $env:LARECOMP_SKIP_AUTO_BUILD) {
     $Head = (& git -C $RepoRoot rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $Head) { $Head = "" } else { $Head = $Head.Trim() }
     $Marker = Join-Path $RepoRoot "build\.runtime_build_head"
     $BuiltHead = if (Test-Path -LiteralPath $Marker) { (Get-Content -LiteralPath $Marker -Raw).Trim() } else { "" }
-    if ($LASTEXITCODE -ne 0 -or -not $Head) { $Head = "" }
-    if (-not $BuiltHead -or $BuiltHead -ne $Head.Trim()) {
-        Write-Host "[scarlet-run] EXE nao corresponde ao HEAD atual; fazendo build incremental..." -ForegroundColor Yellow
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "scarlet_build_windows.ps1")
+    Write-Host "[scarlet-run] Runtime HEAD atual: $Head"
+    Write-Host "[scarlet-run] Runtime HEAD do EXE: $BuiltHead"
+    if (-not $BuiltHead -or $BuiltHead -ne $Head) {
+        Write-Host "[scarlet-run] EXE nao corresponde ao HEAD atual; recompilando runtime..." -ForegroundColor Yellow
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "scarlet_build_windows.ps1") -ForceRuntime
         if ($LASTEXITCODE -ne 0) {
-            throw "Build incremental falhou (exit $LASTEXITCODE). Envie scarlet_build.log."
+            throw "Build do runtime falhou (exit $LASTEXITCODE). Envie scarlet_build.log."
         }
     }
 }
