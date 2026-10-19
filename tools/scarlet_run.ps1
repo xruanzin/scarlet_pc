@@ -15,14 +15,21 @@ $RomFs = Join-Path $GameRoot "romfs"
 
 # git pull updates source files, not the already-built EXE. Compare the exact
 # Git revision that produced the runtime; timestamps are unreliable after checkout.
-if ((Test-Path -LiteralPath $Exe -PathType Leaf) -and -not $env:LARECOMP_SKIP_AUTO_BUILD) {
+$SkipAutoBuild = $false
+if ($env:LARECOMP_SKIP_AUTO_BUILD) {
+    $SkipAutoBuild = @('1','true','yes','on') -contains $env:LARECOMP_SKIP_AUTO_BUILD.ToLowerInvariant()
+}
+if (Test-Path -LiteralPath $Exe -PathType Leaf) {
     $Head = (& git -C $RepoRoot rev-parse HEAD 2>$null)
     if ($LASTEXITCODE -ne 0 -or -not $Head) { $Head = "" } else { $Head = $Head.Trim() }
     $Marker = Join-Path $RepoRoot "build\.runtime_build_head"
     $BuiltHead = if (Test-Path -LiteralPath $Marker) { (Get-Content -LiteralPath $Marker -Raw).Trim() } else { "" }
     Write-Host "[scarlet-run] Runtime HEAD atual: $Head"
     Write-Host "[scarlet-run] Runtime HEAD do EXE: $BuiltHead"
-    if (-not $BuiltHead -or $BuiltHead -ne $Head) {
+    if ($SkipAutoBuild) {
+        Write-Host "[scarlet-run] Auto-build desativado por LARECOMP_SKIP_AUTO_BUILD=$env:LARECOMP_SKIP_AUTO_BUILD" -ForegroundColor Yellow
+    }
+    elseif (-not $BuiltHead -or $BuiltHead -ne $Head) {
         Write-Host "[scarlet-run] EXE nao corresponde ao HEAD atual; recompilando runtime..." -ForegroundColor Yellow
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "scarlet_build_windows.ps1") -ForceRuntime
         if ($LASTEXITCODE -ne 0) {
