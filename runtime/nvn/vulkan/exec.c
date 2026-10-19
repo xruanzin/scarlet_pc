@@ -2323,6 +2323,28 @@ static VkDescriptorBufferInfo ubo_span(VkSpan s, uint64_t size) {
     return (VkDescriptorBufferInfo){s.buf, s.off, size > max ? max : size};
 }
 
+// True for fragment programs that currently sample a small BC7-sRGB texture.
+// Scarlet character materials use this pattern for their base colour; keeping
+// the diagnostic scoped here avoids touching sky/UI/full-screen passes.
+static bool scarlet_character_material(ShaderInfo *si) {
+    if (!si) return false;
+    for (int i = 0; i < si->ntex && i < 64; i++) {
+        NvnTexture *t = shader_texture_object(1, &si->tex[i]);
+        if (t && t->format == 0x4E && t->width <= 512 && t->height <= 512)
+            return true;
+    }
+    return false;
+}
+
+static bool tint_like_vec4(const float *v) {
+    if (!isfinite(v[0]) || !isfinite(v[1]) || !isfinite(v[2]) || !isfinite(v[3])) return false;
+    if (v[3] < 0.90f || v[3] > 1.10f) return false;
+    for (int i = 0; i < 3; i++) if (v[i] < 0.0f || v[i] > 1.25f) return false;
+    float lo = fminf(v[0], fminf(v[1], v[2]));
+    float hi = fmaxf(v[0], fmaxf(v[1], v[2]));
+    return hi - lo > 0.12f;
+}
+
 // Constant buffer k of a stage (renderer.m bind_cbufs), copied into transient memory.
 static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t gx, uint32_t gy, uint32_t gz) {
     static const uint8_t zeros[0x10000];
@@ -2374,6 +2396,41 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         g_exp_count[0]++;
         return ubo_span(vk_transient_copy(ident, size, 256), size);
     }
+    // Diagnostic A/B for Scarlet's cyan/purple character colours.
+    // It does not modify guest memory.  For character-material fragment draws,
+    // copy the selected guest cbuffer and neutralize only vec4 values that look
+    // like RGB tints (alpha ~= 1 and visibly chromatic RGB).  Value "1" scans
+    // all guest material cbuffers; a numeric value 3..17 restricts it to that
+    // shader cbuffer.  This is intentionally opt-in until the exact guest field
+    // is identified from the accompanying material-draw trace.
+    const char *neutral_tint = getenv("LARECOMP_NEUTRAL_HAIR_TINT");
+    if (neutral_tint && stage == 1 && k >= 3 && scarlet_character_material(si)) {
+        int only = atoi(neutral_tint);
+        if (only <= 1 || only == k) {
+            uint8_t *tmp = malloc((size_t)size);
+            if (tmp) {
+                memcpy(tmp, (const void *)(uintptr_t)r.addr, (size_t)size);
+                unsigned changed = 0;
+                for (uint64_t off = 0; off + 16 <= size; off += 16) {
+                    float *v = (float *)(void *)(tmp + off);
+                    if (!tint_like_vec4(v)) continue;
+                    v[0] = v[1] = v[2] = 1.0f;
+                    changed++;
+                }
+                if (changed) {
+                    static unsigned logs;
+                    if (logs++ < 64)
+                        LOG("[material-tint] neutralized %u candidate vec4(s) in shader cb%d (NVN u%d, %llu bytes)\n",
+                            changed, k, k - 3, (unsigned long long)size);
+                    VkDescriptorBufferInfo out = ubo_span(vk_transient_copy(tmp, size, 256), size);
+                    free(tmp);
+                    return out;
+                }
+                free(tmp);
+            }
+        }
+    }
+
     // LARECOMP_VK_UBO_DIRECT=1 (experiment X3): bind the range in place in the imported guest heap, read when the GPU
     // runs - as on the console - in case compute shaders write it after this point. Counted: direct vs copied.
     static int direct = -1;
@@ -3222,14 +3279,25 @@ static void draw_(CmdRec *r, bool indexed) {
                 uint32_t mask = pr->fi->cbuf_mask;
                 for (int bi = 0; bi < 18; bi++) {
                     if (!(mask & (1u << bi))) continue;
-                    Range rb = st.ubuf[1][bi];
+                    // Maxwell cbuf 0/1 are driver/compiler-owned. Guest NVN
+                    // uniform-buffer slot N backs shader cbuf N+3.
+                    if (bi < 3) {
+                        LOG(" cb%d=special", bi);
+                        continue;
+                    }
+                    int ui = bi - 3;
+                    Range rb = st.ubuf[1][ui];
                     if (!rb.addr || rb.size < 16) {
-                        LOG(" cb%d=none", bi);
+                        LOG(" cb%d(u%d)=none", bi, ui);
                         continue;
                     }
                     const uint32_t *p = (const uint32_t *)(uintptr_t)rb.addr;
-                    LOG(" cb%d@%llx=%08x,%08x,%08x,%08x", bi,
-                        (unsigned long long)rb.addr, p[0], p[1], p[2], p[3]);
+                    uint64_t words = rb.size / 4;
+                    if (words > 16) words = 16;
+                    LOG(" cb%d(u%d)@%llx[%llu]=", bi, ui,
+                        (unsigned long long)rb.addr, (unsigned long long)rb.size);
+                    for (uint64_t wi = 0; wi < words; wi++)
+                        LOG("%s%08x", wi ? "," : "", p[wi]);
                 }
                 LOG("\n");
             }
