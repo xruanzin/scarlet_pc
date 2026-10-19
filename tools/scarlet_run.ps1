@@ -66,6 +66,12 @@ try {
     # skipped temporarily until their shader/pipeline finishes instead of crashing the game.
     $env:LARECOMP_VK_OPT = "0"
     $env:LARECOMP_SHADER_WAIT_MS = "12000"
+
+    # Scarlet's character/material normal maps use the BC5 path heavily. On this
+    # port the signed decode produces the characteristic mirrored-face lighting
+    # seam seen on AMD. Prefer unsigned BC5 for normal-map content while we keep
+    # the generic runtime switch available for A/B verification.
+    $env:LARECOMP_BC5_UNORM = "1"
     Remove-Item Env:LARECOMP_SHADER_TIMEOUT_EXIT -ErrorAction SilentlyContinue
     Remove-Item Env:LARECOMP_SYNC_SHADERS -ErrorAction SilentlyContinue
     Remove-Item Env:LARECOMP_TF_CHECK -ErrorAction SilentlyContinue
