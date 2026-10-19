@@ -22,7 +22,7 @@
 
 static uint64_t g_draws_total;  // (never reset: LARECOMP_COUNTER_LOG)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
-static uint64_t stat_tf_merged, stat_tf_barriers;
+static uint64_t stat_tf_merged, stat_tf_barriers, stat_raster_discard_sets, stat_raster_discard_on;
 static uint32_t stat_pass_end_line[4096];
 static bool tf_barrier_pending;
 static uint64_t tf_pending_addr[64], tf_pending_size[64];
@@ -879,6 +879,11 @@ const char *renderer_stats(void) {
         snprintf(stats_text + n, sizeof stats_text - n, ", tfmerge %llu/barrier %llu",
                  (unsigned long long)stat_tf_merged, (unsigned long long)stat_tf_barriers);
     }
+    if (stat_raster_discard_sets) {
+        size_t n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n, ", rdiscard %llu/%llu",
+                 (unsigned long long)stat_raster_discard_on, (unsigned long long)stat_raster_discard_sets);
+    }
     {
         uint32_t top_line[5] = {0}, top_count[5] = {0};
         for (uint32_t l = 1; l < 4096; l++) {
@@ -946,7 +951,7 @@ const char *renderer_stats(void) {
         prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = prof_tex_watch_skips = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
-    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = 0;
+    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = stat_raster_discard_sets = stat_raster_discard_on = 0;
     return stats_text;
 }
 
@@ -4010,6 +4015,8 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_SET_PRIMITIVE_RESTART: st.prim_restart = r->x[0] != 0; st.restart_index = (uint32_t)r->x[1]; break;
         case CMD_SET_RASTERIZER_DISCARD:
             st.raster_discard = r->x[0] != 0;
+            stat_raster_discard_sets++;
+            if (st.raster_discard) stat_raster_discard_on++;
             break;
         case CMD_SET_COPY_STRIDES: st.copy_row_stride = r->x[0]; st.copy_image_stride = r->x[1]; break;
         case CMD_CLEAR_COLOR: {
