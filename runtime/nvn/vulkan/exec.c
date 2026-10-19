@@ -83,7 +83,7 @@ static bool in_pass;
 // VkCommandBuffer(s). We merely send two consecutive lists in one
 // vkQueueSubmit2 call. This avoids the AMD crash seen when lists themselves
 // were merged into one command buffer while preserving upload/main order.
-#define QBATCH_MAX_CBS 8
+#define QBATCH_MAX_CBS 16
 static VkCommandBufferSubmitInfo qbatch_cbs[QBATCH_MAX_CBS];
 static uint32_t qbatch_ncb, qbatch_lists;
 static uint64_t stat_logical_submits, stat_queue_batches;
@@ -92,12 +92,13 @@ static int queue_batch_limit(void) {
     static int n = -1;
     if (n < 0) {
         const char *e = getenv("LARECOMP_QUEUE_BATCH");
-        n = e ? atoi(e) : 4;
+        n = e ? atoi(e) : 8;
         if (n < 1) n = 1;
-        if (n > 4) n = 4;
-        // Four distinct command buffers per submit is still conservative (we never merge guest lists into one CB)
-        // but halves queue-submit pressure versus the old default of two. This matters on Scarlet's 1000+ logical
-        // lists/frame and is safe with the AMD workaround because upload/main ordering remains explicit.
+        if (n > 8) n = 8;
+        // Keep guest lists as distinct command buffers, but amortize the queue submission
+        // itself across eight lists. Scarlet regularly records 2000+ logical lists in
+        // ~2 seconds; the previous cap of four left 600+ vkQueueSubmit2 calls in that
+        // interval on the Ryzen 4600G. Ordering inside the submit is unchanged.
     }
     return n;
 }
