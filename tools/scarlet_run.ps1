@@ -70,6 +70,22 @@ if ($MaterialViews) {
     Write-Host "[scarlet-run] Material-view tracing enabled." -ForegroundColor Cyan
 }
 
+# Keep graphics A/B tests mutually isolated. A neutral-tint run is not
+# interpretable if older BC7/channel/lighting experiments are inherited from
+# the parent PowerShell session.
+if ($env:LARECOMP_NEUTRAL_HAIR_TINT) {
+    foreach ($name in @(
+        "LARECOMP_BC7_SWAP_RB",
+        "LARECOMP_BC7_LINEAR",
+        "LARECOMP_HAIR_ISOTROPIC"
+    )) {
+        if (Test-Path "Env:$name") {
+            Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+            Write-Host "[scarlet-run] Cleared incompatible diagnostic: $name" -ForegroundColor Yellow
+        }
+    }
+}
+
 $Log = Join-Path $RepoRoot "scarlet_boot.log"
 if (Test-Path -LiteralPath $Log) {
     Remove-Item -LiteralPath $Log -Force
