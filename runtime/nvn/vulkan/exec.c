@@ -3319,6 +3319,23 @@ static void forensic_draw_record(Prog *pr, CmdRec *r, bool indexed) {
         rt_w, rt_h, rt_fmt, d_fmt, pass_samples, st.tf_active ? 1u : 0u,
         st.raster_discard ? 1u : 0u, st.ms[0xC] ? 1u : 0u, pr->vi ? pr->vi->attr_mask : 0,
         (unsigned long long)forensic_barriers_since_draw, forensic_last_barrier_flags);
+    if (st.vbuf[0].addr)
+        fprintf(forensic_fp, " v0=%llx+%llu/stride%u", (unsigned long long)st.vbuf[0].addr,
+                (unsigned long long)st.vbuf[0].size, st.nstream > 0 ? st.stream[0][0] : 0);
+    if (pr->vi) {
+        fprintf(forensic_fp, " vcb=%#x", pr->vi->cbuf_dynamic);
+        for (int ai = 11; ai <= 12; ai++) if (pr->vi->attr_mask & (1u << ai)) {
+            uint32_t av = ai < st.nattrib ? st.attrib[ai] : 0;
+            fprintf(forensic_fp, " a%d=f%#x/s%u/+%u", ai, av & 0xff, (av >> 8) & 0x1f, av >> 13);
+        }
+        int dumped_cb = 0;
+        for (int ci = 0; ci < 18 && dumped_cb < 6; ci++) {
+            if (!(pr->vi->cbuf_mask & (1u << ci)) || !st.ubuf[0][ci].addr) continue;
+            fprintf(forensic_fp, " cb%d=%llx+%llu", ci, (unsigned long long)st.ubuf[0][ci].addr,
+                    (unsigned long long)st.ubuf[0][ci].size);
+            dumped_cb++;
+        }
+    }
     int nt = pr->fi ? pr->fi->ntex : 0;
     if (nt > 12) nt = 12;
     for (int i = 0; i < nt; i++) {
