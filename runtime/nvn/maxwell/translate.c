@@ -266,6 +266,8 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
                 if (imap == 2 && c->ipa_mode >= 0) sprintf(e, "as_type<uint>(in.v%d[%d] * in.pos.w)", a, comp);
                 else sprintf(e, "as_type<uint>(in.v%d[%d])", a, comp);
             }
+        } else if (addr == 0x64 && c->glsl && c->key && c->key->layer_varying) {
+            strcpy(e, "guest_layer");
         } else if (addr == 0x3FC) { c->uses_front_facing = true; strcpy(e, "(front_facing ? 0xFFFFFFFFu : 0u)"); }
         else if (addr == 0x2E0 || addr == 0x2E4) { sprintf(e, "as_type<uint>(point_coord[%d])", (addr >> 2) & 1); }
         else { sprintf(e, "0u /* attr %#x */", addr); }
@@ -291,7 +293,9 @@ static void attr_store(Ctx *c, int src, uint32_t addr) {
         sp(&c->body, "    /* store attr %#x */\n", addr);
         return;
     }
-    if (addr >= 0x70 && addr < 0x80) {
+    if (addr == 0x64 && c->glsl && c->key && c->key->layer_varying) {
+        sp(&c->body, "    guest_layer = %s;\n", v);
+    } else if (addr >= 0x70 && addr < 0x80) {
         sp(&c->body, "    out.pos[%d] = as_type<float>(%s);\n", (addr >> 2) & 3, v);
     } else if (addr >= 0x80 && addr < 0x280) {
         int a = (addr - 0x80) >> 4;
@@ -1961,6 +1965,9 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     int stage = c->stage;
     Str body = {0};
     glsl_rewrite(c, &body, c->body.buf ? c->body.buf : "");
+    if (key && key->layer_varying &&
+        ((stage == STAGE_VERTEX ? c->out_attr_mask : c->in_attr_mask) & (1u << 31)))
+        fail(c, "split-layer varying conflicts with generic output/input 31");
     if (info->uses_gmem && (info->cbuf_mask & (1u << GMEM_BUFFER_INDEX))) fail(c, "cbuf %d clashes with gmem", GMEM_BUFFER_INDEX);
     if (info->cbuf_mask >> 18) fail(c, "cbuf index out of range");
     for (int i = 0; i < info->ntex; i++)
@@ -2061,6 +2068,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         // compiler fuses or reorders the math feeding it (MSL gets this from preserveInvariance; without it foliage
         // drawn twice flickered black)
         sp(&s, "invariant gl_Position;\nprecise gl_Position;\n");
+        if (key && key->layer_varying)
+            sp(&s, "layout(location = 31) flat out uint guest_layer;\n");
         if (key && key->layer_from_instance)
             sp(&s, "#extension GL_ARB_shader_viewport_layer_array : enable\n");
         for (int i = 0; i < 32; i++) {
@@ -2090,6 +2099,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             }
         }
     } else if (stage == STAGE_FRAGMENT) {
+        if (key && key->layer_varying)
+            sp(&s, "layout(location = 31) flat in uint guest_layer;\n");
         for (int i = 0; i < 32; i++) {
             if (!(c->in_attr_mask & (1u << i))) continue;
             const char *interp = (c->flat_mask & (1u << i)) ? "flat " : (c->noperspective_mask & (1u << i)) ? "noperspective " : "";
@@ -2107,6 +2118,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     sp(&s, "void main() {\n");
     if (stage == STAGE_VERTEX) {
         sp(&s, "  gl_Position = vec4(0, 0, 0, 1);\n");
+        if (key && key->layer_varying) sp(&s, "  guest_layer = 0u;\n");
         for (int i = 0; i < 32; i++) {
             if (!(c->out_attr_mask & (1u << i))) continue;
             uint8_t cm = info->out_comp_mask[i];

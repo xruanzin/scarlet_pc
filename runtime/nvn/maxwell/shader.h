@@ -56,6 +56,7 @@ typedef struct {
     uint8_t xfb_comp[4];      // component limit per stream; actual width comes from shader exports
     uint8_t layer_from_instance; // layered 3D render target: route instance N to slice N
     uint32_t stencil_tex_mask; // direct NVN texture bindings (not translation slot indices): unsigned stencil fetches
+    uint8_t layer_varying; // split 3D draws: carry guest layer as flat uint, independent of physical layer 0
 } ShaderKey;
 
 typedef struct {

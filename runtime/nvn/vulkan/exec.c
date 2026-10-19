@@ -2930,6 +2930,7 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
 }
 
 static void draw_(CmdRec *r, bool indexed);
+static bool lut_slice_active;
 // Execute the guest colour-grading shader, one 2D attachment slice at a time.
 // This avoids the layered 3D rendering path that faulted on Windows AMD, while
 // retaining the game's actual curve, exposure and colour-grading constants.
@@ -2953,6 +2954,8 @@ static bool draw_lut_slices(CmdRec *r, bool indexed) {
         return filled;
     }
     RtState saved = st.rt;
+    bool saved_slice_active = lut_slice_active;
+    lut_slice_active = true;
     bool complete = true;
     uint64_t issued_before = g_draws_total;
     for (uint32_t slice = 0; slice < t->depth; slice++) {
@@ -2971,6 +2974,7 @@ static bool draw_lut_slices(CmdRec *r, bool indexed) {
     }
     vk_end_pass();
     st.rt = saved;
+    lut_slice_active = saved_slice_active;
     st.rt_dirty = true;
     if (!complete) {
         // A rejected shader/pipeline must not leave an uninitialized LUT.
@@ -3018,6 +3022,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
+    vkey.layer_varying = fkey.layer_varying = lut_slice_active;
     vkey.bindless_storage = fkey.bindless_storage = g_vk.bindless_storage_slots;
     vkey.storage_buffers = fkey.storage_buffers = storage_buffer_count();
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;

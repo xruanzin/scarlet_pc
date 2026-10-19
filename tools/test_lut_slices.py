@@ -17,6 +17,7 @@ HARNESS = r'''
 #include "nvn/nvn.h"
 /*RTSTATE*/
 static struct { RtState rt; bool rt_dirty; } st;
+static bool lut_slice_active;
 static unsigned calls, ended, filled, flushed;
 static int fail_slice=-1;
 static uint64_t stat_draws, g_draws_total;
@@ -29,6 +30,7 @@ static void draw_(CmdRec *r, bool indexed);
 static void draw_(CmdRec *r, bool indexed) {
     // Must bypass recursion into the split path and preserve shader instance ID.
     assert(!draw_lut_slices(r,indexed));
+    assert(lut_slice_active);
     assert(st.rt_dirty && st.rt.has_cview[0]);
     assert(st.rt.cview[0].num_layers==1 && st.rt.cview[0].min_layer==calls);
     assert(r->x[indexed?5:3]==calls && r->x[indexed?6:4]==1);
@@ -54,11 +56,13 @@ int main(void) {
         assert(!memcmp(&st.rt,&before,sizeof before));
         assert(!memcmp(&r,&old,sizeof r));
         assert(st.rt_dirty);
+        assert(!lut_slice_active);
     }
     CmdRec r={.x={4,0,3,0,32}};
     calls=ended=filled=flushed=0; fail_slice=3;
     assert(draw_lut_slices(&r,false));
     assert(calls==3 && filled==1 && flushed==1 && ended==1);
+    assert(!lut_slice_active);
     fail_slice=-1;
     setenv("LARECOMP_LUT_IDENTITY","1",1); calls=ended=filled=0;
     assert(draw_lut_slices(&r,false) && filled==1 && calls==0);
