@@ -656,8 +656,26 @@ void backend_present(NvnTexture *t) {
     extern bool g_debug_frame;
     static long debug_at = -1;
     if (debug_at < 0) { const char *e = getenv("LARECOMP_DEBUG_FRAME"); debug_at = e ? atol(e) : 0; }
+
+    // Reliable forensic hotkey: poll SDL keyboard state directly from the
+    // presentation loop instead of depending on the guest/input event path.
+    // Some Scarlet UI states consume F-keys before g_debug_frame_request sees
+    // them, which left F9 apparently working but produced no forensic file.
+    static bool f9_prev;
+    const bool *keys = SDL_GetKeyboardState(NULL);
+    bool f9_now = keys && keys[SDL_SCANCODE_F9];
+    if (f9_now && !f9_prev) {
+        debug_at = (long)total_frames + 1;
+        LOG("[forensics] F9 captured; forensic frame scheduled at %ld\n", debug_at);
+    }
+    f9_prev = f9_now;
+
     extern volatile int g_debug_frame_request;
-    if (g_debug_frame_request) { g_debug_frame_request = 0; debug_at = (long)total_frames + 1; }
+    if (g_debug_frame_request) {
+        g_debug_frame_request = 0;
+        debug_at = (long)total_frames + 1;
+        LOG("[forensics] input capture request; forensic frame scheduled at %ld\n", debug_at);
+    }
     // LARECOMP_DEBUG_FRAMES=<n> (with LARECOMP_DEBUG_FRAME / F9): dump n consecutive frames (build/pass_<frame>_NNN.png)
     static long debug_n = -1;
     if (debug_n < 0) { const char *e = getenv("LARECOMP_DEBUG_FRAMES"); debug_n = e && atol(e) > 1 ? atol(e) : 1; }
