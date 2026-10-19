@@ -22,7 +22,7 @@
 
 static uint64_t g_draws_total;  // (never reset: LARECOMP_COUNTER_LOG)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
-static uint64_t stat_tf_merged, stat_tf_barriers, stat_raster_discard_sets, stat_raster_discard_on;
+static uint64_t stat_tf_merged, stat_tf_barriers, stat_raster_discard_sets, stat_raster_discard_on, stat_a2c_1x;
 static uint64_t stat_tf_dep_vbuf, stat_tf_dep_cbuf, stat_tf_dep_sbuf, stat_tf_dep_gmem, stat_tf_dep_op, stat_tf_dep_submit, stat_tf_dep_rt;
 static uint32_t stat_pass_end_line[4096];
 static bool tf_barrier_pending;
@@ -921,6 +921,11 @@ const char *renderer_stats(void) {
         snprintf(stats_text + n, sizeof stats_text - n, ", rdiscard %llu/%llu",
                  (unsigned long long)stat_raster_discard_on, (unsigned long long)stat_raster_discard_sets);
     }
+    if (stat_a2c_1x) {
+        size_t n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n, ", a2c1x %llu",
+                 (unsigned long long)stat_a2c_1x);
+    }
     {
         uint32_t top_line[5] = {0}, top_count[5] = {0};
         for (uint32_t l = 1; l < 4096; l++) {
@@ -988,7 +993,7 @@ const char *renderer_stats(void) {
         prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = prof_tex_watch_skips = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
-    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = stat_raster_discard_sets = stat_raster_discard_on = 0;
+    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = stat_raster_discard_sets = stat_raster_discard_on = stat_a2c_1x = 0;
     stat_tf_dep_vbuf = stat_tf_dep_cbuf = stat_tf_dep_sbuf = stat_tf_dep_gmem = stat_tf_dep_op = stat_tf_dep_submit = stat_tf_dep_rt = 0;
     return stats_text;
 }
@@ -2956,6 +2961,7 @@ static void draw_(CmdRec *r, bool indexed) {
             memcpy(k.blend[i], st.blend[i], 8);
         }
     }
+    if (st.ms[0xC] && pass_samples == 1) stat_a2c_1x++;
     k.a2c = st.ms[0xC] != 0;
     k.raster_discard = st.raster_discard;
     k.topo_class = cls;
