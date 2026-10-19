@@ -262,13 +262,11 @@ NVN(nvnBufferInvalidateMappedRange) { (void)c; }
 // ================================================================== textures
 // TextureBuilder: device@0 flags@8 target@0xC width@0x10 height@0x14 depth@0x18 levels@0x1C
 //   format@0x20 samples@0x24 swizzle@0x28 dsmode@0x2C stride@0x30 pool@0x38 offset@0x40
-//   packaged@0x48 layout@0x50 glname@0x58 packaged-layout-present@0x60 (host-private)
+//   packaged@0x48 layout@0x50 glname@0x58
 #define TB(T, off) G(T, A(0), off)
 NVN(nvnTextureBuilderSetDevice) { TB(uint64_t, 0) = A(1); }
 NVN(nvnTextureBuilderSetDefaults) {
-    // NVNtextureBuilder is 0x80 bytes. Clear the host-private tail as well so
-    // packaged-layout-present never survives a reused builder.
-    memset(AP(0) + 8, 0, 0x78);
+    memset(AP(0) + 8, 0, 0x58);
     TB(uint32_t, 0xC) = 1;  // 2D
     TB(uint32_t, 0x10) = TB(uint32_t, 0x14) = TB(uint32_t, 0x18) = 1;
     TB(uint32_t, 0x1C) = 1;
@@ -295,10 +293,7 @@ NVN(nvnTextureBuilderSetDepthStencilMode) { TB(uint32_t, 0x2C) = (uint32_t)A(1);
 NVN(nvnTextureBuilderSetStride) { TB(uint64_t, 0x30) = A(1); }
 NVN(nvnTextureBuilderSetStorage) { TB(uint64_t, 0x38) = A(1); TB(uint64_t, 0x40) = A(2); }
 NVN(nvnTextureBuilderSetPackagedTextureData) { TB(uint64_t, 0x48) = A(1); }
-NVN(nvnTextureBuilderSetPackagedTextureLayout) {
-    TB(uint64_t, 0x50) = A(1) ? *(uint64_t *)AP(1) : 0;
-    TB(uint8_t, 0x60) = A(1) ? 1 : 0;
-}
+NVN(nvnTextureBuilderSetPackagedTextureLayout) { TB(uint64_t, 0x50) = A(1) ? *(uint64_t *)AP(1) : 0; }
 NVN(nvnTextureBuilderSetGLTextureName) { TB(uint32_t, 0x58) = (uint32_t)A(1); }
 NVN(nvnTextureBuilderGetDevice) { RET(TB(uint64_t, 0)); }
 NVN(nvnTextureBuilderGetFlags) { RET(TB(uint32_t, 8)); }
@@ -347,7 +342,9 @@ static void builder_layout(uint64_t b, TexLayout *t) {
     // guessed block height and BC7/BC6H textures were deswizzled with the wrong
     // GOB geometry (the coloured/stippled surfaces seen in Scarlet).
     uint64_t pl = G(uint64_t, b, 0x50);
-    bool have_pl = G(uint8_t, b, 0x60) != 0;
+    // A zero layout is valid for blockHeightLog2=0. Packaged texture data
+    // being present distinguishes that from an ordinary builder using defaults.
+    bool have_pl = pl != 0 || G(uint64_t, b, 0x48) != 0;
     if (have_pl) t->block_height_log2 = (uint32_t)pl & 7u;
     if (have_pl && G(uint32_t, b, 0x20) >= 0x4D && G(uint32_t, b, 0x20) <= 0x50 && ((uint32_t)pl & ~7u)) {
         static int told_bc_layout;
