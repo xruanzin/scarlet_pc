@@ -817,28 +817,37 @@ static bool range_overlap_u64(uint64_t a, uint64_t as, uint64_t b, uint64_t bs) 
 
 static void tf_pending_add(uint64_t addr, uint64_t size) {
     if (!addr || !size) return;
-    for (uint32_t i = 0; i < tf_pending_n; i++) {
-        if (range_overlap_u64(addr, size, tf_pending_addr[i], tf_pending_size[i])) {
-            uint64_t lo = addr < tf_pending_addr[i] ? addr : tf_pending_addr[i];
-            uint64_t ae = addr + size, be = tf_pending_addr[i] + tf_pending_size[i];
-            uint64_t hi = ae > be ? ae : be;
-            tf_pending_addr[i] = lo;
-            tf_pending_size[i] = hi - lo;
-            tf_barrier_pending = true;
-            return;
+    uint64_t lo = addr, hi = addr + size;
+    if (hi < lo) hi = UINT64_MAX;
+
+    // Coalesce transitively. A new range can bridge two older TF writes; the
+    // previous first-match implementation left the second range behind, which
+    // inflated dependency checks/barriers in Scarlet's stream-output bursts.
+    for (uint32_t i = 0; i < tf_pending_n;) {
+        uint64_t rlo = tf_pending_addr[i], rhi = rlo + tf_pending_size[i];
+        if (rhi < rlo) rhi = UINT64_MAX;
+        if (lo <= rhi && rlo <= hi) {
+            if (rlo < lo) lo = rlo;
+            if (rhi > hi) hi = rhi;
+            tf_pending_n--;
+            tf_pending_addr[i] = tf_pending_addr[tf_pending_n];
+            tf_pending_size[i] = tf_pending_size[tf_pending_n];
+            continue;
         }
+        i++;
     }
+
     if (tf_pending_n < 64) {
-        tf_pending_addr[tf_pending_n] = addr;
-        tf_pending_size[tf_pending_n] = size;
+        tf_pending_addr[tf_pending_n] = lo;
+        tf_pending_size[tf_pending_n] = hi - lo;
         tf_pending_n++;
     } else {
-        // Saturation is rare; one broad range is conservative and preserves correctness.
-        uint64_t lo = addr, hi = addr + size;
+        // Saturation is rare; collapse everything into one conservative range.
         for (uint32_t i = 0; i < tf_pending_n; i++) {
-            if (tf_pending_addr[i] < lo) lo = tf_pending_addr[i];
-            uint64_t e = tf_pending_addr[i] + tf_pending_size[i];
-            if (e > hi) hi = e;
+            uint64_t rlo = tf_pending_addr[i], rhi = rlo + tf_pending_size[i];
+            if (rhi < rlo) rhi = UINT64_MAX;
+            if (rlo < lo) lo = rlo;
+            if (rhi > hi) hi = rhi;
         }
         tf_pending_addr[0] = lo;
         tf_pending_size[0] = hi - lo;
