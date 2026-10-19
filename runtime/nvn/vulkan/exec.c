@@ -3637,7 +3637,13 @@ static void forensic_draw_record(Prog *pr, CmdRec *r, bool indexed) {
         fprintf(forensic_fp, " t%d=%llx/%ux%u/f%#x/target%u%s", i,
                 (unsigned long long)t->addr, t->width, t->height, t->format, t->target,
                 b && b->gpu_owned ? "/gpu" : "");
-        if (nvn_texture_samples_stencil(t, &entry->view, entry->has_view)) fprintf(forensic_fp, "/stencil");
+        if (entry && entry->has_view) {
+            const NvnTextureView *tv = &entry->view;
+            if (tv->setmask & 4) fprintf(forensic_fp, "/viewf%#x", tv->format);
+            if (tv->setmask & 1) fprintf(forensic_fp, "/lv%u+%u", tv->base_level, tv->num_levels);
+            if (tv->setmask & 2) fprintf(forensic_fp, "/ly%u+%u", tv->min_layer, tv->num_layers);
+        }
+        if (entry && nvn_texture_samples_stencil(t, &entry->view, entry->has_view)) fprintf(forensic_fp, "/stencil");
     }
     int nvt = pr->vi ? pr->vi->ntex : 0;
     if (nvt > 12) nvt = 12;
