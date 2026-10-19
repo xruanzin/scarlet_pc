@@ -1,6 +1,7 @@
 param(
     [int]$Jobs = 4,
-    [switch]$Setup
+    [switch]$Setup,
+    [switch]$ForceRuntime
 )
 
 $ErrorActionPreference = "Stop"
@@ -71,6 +72,14 @@ if (Test-Path -LiteralPath $Log) {
 Write-Host "[scarlet-build] Compilando runtime + codigo gerado com -j$Jobs..." -ForegroundColor Cyan
 Write-Host "[scarlet-build] Repo MSYS2: $RepoPosix"
 Write-Host "[scarlet-build] Log: $Log"
+
+if ($ForceRuntime) {
+    $RtDir = Join-Path $RepoRoot "build\rt"
+    if (Test-Path -LiteralPath $RtDir) {
+        Write-Host "[scarlet-build] Forcando recompilacao completa do runtime..." -ForegroundColor Yellow
+        Remove-Item -LiteralPath $RtDir -Recurse -Force
+    }
+}
 
 # The backtick keeps $PATH for Bash instead of expanding it in PowerShell.
 $Cmd = "set -o pipefail; export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin':`$PATH; cd '$RepoPosix'; make -j$Jobs EXE_NAME=ScarletRecomp build/ScarletRecomp.exe build/lasgame.dll 2>&1 | tee scarlet_build.log"
