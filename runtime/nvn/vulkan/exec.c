@@ -2944,19 +2944,19 @@ static void draw_(CmdRec *r, bool indexed) {
     if (vkey.xfb && st.program) {
         const NvnShaderStage *vs = &st.program->stages[0];
         // Scarlet's stream-output programs captured in graphics diagnostics all
-        // carry this control signature. The game binds three TF buffers whose
-        // capacities are consistently 12:4:4 bytes/vertex. Some shaders still
-        // write v1.yz/v2.yz as ordinary outputs, but those components are not
-        // part of the stream-output layout.
+        // carry this control signature. It identifies three streams, but NOT
+        // fixed 12:4:4 byte widths: the preceding morph/copy passes allocate
+        // 12:12:12 and export xyz, then skinning writes packed 12:4:4 streams.
+        // Derive each width from the shader's stores instead of dropping yz.
         uint32_t tf0 = vs->tf_meta0, tf1 = vs->tf_meta1;
         if (tf0 == 0x00010101u && tf1 == 0x00000103u) {
             vkey.xfb_layout = 1;
-            vkey.xfb_comp[0] = 3;  // v0.xyz -> buffer 0, stride 12
-            vkey.xfb_comp[1] = 1;  // v1.x   -> buffer 1, stride 4
-            vkey.xfb_comp[2] = 1;  // v2.x   -> buffer 2, stride 4
+            vkey.xfb_comp[0] = 4;
+            vkey.xfb_comp[1] = 4;
+            vkey.xfb_comp[2] = 4;
             static _Atomic int tf_layout_logged;
             if (!atomic_exchange(&tf_layout_logged, 1))
-                LOG("[vk] Scarlet TF layout: control 10101/103 -> v0.xyz, v1.x, v2.x (12:4:4, packed streams raw-u32)\n");
+                LOG("[vk] Scarlet TF layout: control 10101/103 -> shader export widths (12:12:12 or 12:4:4; packed scalar streams raw-u32)\n");
         } else {
             static _Atomic unsigned tf_unknown_logs;
             if (atomic_fetch_add(&tf_unknown_logs, 1) < 8)

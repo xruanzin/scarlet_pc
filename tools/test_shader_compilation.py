@@ -173,9 +173,8 @@ layout(location=0, xfb_buffer=0, xfb_offset=0, xfb_stride=12) out vec3 v0;
 layout(location=1, xfb_buffer=1, xfb_offset=0, xfb_stride=4) out float v1;
 layout(location=2, xfb_buffer=2, xfb_offset=0, xfb_stride=4) out float v2;
 void main() {
-    // Scarlet shaders can write xyz for all three generic outputs while the
-    // stream-output layout captures only xyz/x/x. Keep the extra components
-    // in temporaries and pack the selected TF components at the end.
+    // Synthetic explicit xyz/x/x layout: verify the compiler preserves XFB.
+    // Production Scarlet layout selection is tested in test_transform_feedback.py.
     vec4 t0 = vec4(float(gl_VertexIndex), 2.0, 3.0, 1.0);
     vec4 t1 = vec4(4.0, 40.0, 400.0, 1.0);
     vec4 t2 = vec4(5.0, 50.0, 500.0, 1.0);

@@ -1933,6 +1933,15 @@ static const char *glsl_sampler_type(const ShaderTexture *t) {
     return names[ty][t->shadow ? 1 : 0];
 }
 
+// The Scarlet control signature identifies separate varying streams, not their
+// byte widths. Morph/copy passes export xyz (12 bytes); skinning passes export
+// an already packed x (4 bytes), under the very same control signature.
+static int xfb_components(const ShaderKey *key, int i, uint8_t mask) {
+    int n = __builtin_popcount((unsigned)mask & 0xFu);
+    if (key && key->xfb_layout && n > key->xfb_comp[i]) n = key->xfb_comp[i];
+    return n;
+}
+
 // Declarations + entry point around the (rewritten) body; mirrors the MSL assembly in maxwell_translate.
 static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     ShaderInfo *info = c->info;
@@ -2046,11 +2055,11 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             uint8_t cm = info->out_comp_mask[i];
             int nc = 0;
             if (key && key->xfb && i < 4) {
-                nc = key->xfb_layout ? key->xfb_comp[i] : __builtin_popcount((unsigned)cm & 0xFu);
+                nc = xfb_components(key, i, cm);
             }
             if (nc > 0) {
-                // Scarlet's captured 12:4:4 stream-output layout stores v1.x/v2.x
-                // as packed 32-bit normal/tangent words. The guest shader moves
+                // Scalar v1/v2 exports store packed normal/tangent words;
+                // vector exports in earlier passes remain float vectors. The guest shader moves
                 // those words through a float register with a bitcast. Exposing
                 // them as float XFB outputs lets a driver canonicalize NaN-like
                 // bit patterns and corrupt the packed value. Preserve the exact
@@ -2089,7 +2098,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             if (!(c->out_attr_mask & (1u << i))) continue;
             uint8_t cm = info->out_comp_mask[i];
             int nc = key && key->xfb && i < 4 ?
-                     (key->xfb_layout ? key->xfb_comp[i] : __builtin_popcount((unsigned)cm & 0xFu)) : 0;
+                     xfb_components(key, i, cm) : 0;
             if (nc > 0)
                 sp(&s, "  vec4 xfbtmp%d = vec4(0, 0, 0, 1);\n", i);
             else
@@ -2121,9 +2130,9 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             for (int i = 0; i < 4; i++) {
                 uint8_t cm = info->out_comp_mask[i] & 0xFu;
                 if (!(c->out_attr_mask & (1u << i)) || !cm) continue;
-                int nc = key->xfb_layout ? key->xfb_comp[i] : __builtin_popcount((unsigned)cm);
+                int nc = xfb_components(key, i, cm);
                 if (nc <= 0) continue;
-                // The captured Scarlet layout is contiguous from x: xyz / x / x.
+                // Scarlet streams are contiguous from x; widths depend on this shader's exports.
                 // Unknown layouts retain the old mask-derived swizzle.
                 char sw[5]; int sn = 0;
                 static const char comp[] = "xyzw";
