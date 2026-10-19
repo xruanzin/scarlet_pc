@@ -74,7 +74,8 @@ if ($Performance) {
     # selected) can still upscale to the window.
     $env:LARECOMP_SCALE = "0.50"
     $env:LARECOMP_NO_SMAA = "1"
-    Write-Host "[scarlet-run] Performance mode: 960x540 scalable targets, host SMAA bypassed." -ForegroundColor Green
+    $env:LARECOMP_PERFORMANCE = "1"
+    Write-Host "[scarlet-run] Performance mode: 960x540 scalable targets, host SMAA bypassed, CPU scheduling optimized." -ForegroundColor Green
 }
 if ($MaterialViews) {
     $env:LARECOMP_LOG_MATERIAL_VIEWS = "1"
