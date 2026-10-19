@@ -940,14 +940,21 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
      * following composite decodes exactly once.  The environment switch keeps
      * the old behaviour available for A/B testing.
      */
-    if (render && (!v || !(v->setmask & 4)) && !getenv("LARECOMP_VK_SRGB_ATTACH")) {
+    /*
+     * Vulkan's sRGB attachment conversion matches NVN here.  A previous
+     * experiment forced UNORM attachment views to avoid a suspected double
+     * encode; the A/B capture made the whole scene too dark, so retain native
+     * sRGB attachment semantics by default.  LARECOMP_VK_RAW_SRGB_ATTACH=1
+     * keeps the old experiment available for diagnostics.
+     */
+    if (render && (!v || !(v->setmask & 4)) && getenv("LARECOMP_VK_RAW_SRGB_ATTACH")) {
         VkFormat before = fmt;
         if (fmt == VK_FORMAT_R8G8B8A8_SRGB) fmt = VK_FORMAT_R8G8B8A8_UNORM;
         else if (fmt == VK_FORMAT_B8G8R8A8_SRGB) fmt = VK_FORMAT_B8G8R8A8_UNORM;
         if (before != fmt) {
             static int logged_srgb_rt;
             if (!logged_srgb_rt++)
-                LOG("[vk] sRGB render target uses raw linear-compatible attachment view (single encode path)\n");
+                LOG("[vk] diagnostic raw UNORM view for sRGB render target\n");
         }
     }
     uint32_t lv0 = v && (v->setmask & 1) ? v->base_level : 0;
