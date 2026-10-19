@@ -3285,8 +3285,13 @@ static void draw_(CmdRec *r, bool indexed) {
             free(e);
         }
         if (!scan_src) {
-            max_index += 1;
-            if (base_vertex > 0) max_index += (uint32_t)base_vertex;
+            // Vertex fetch for indexed draws addresses index + baseVertex.  A
+            // negative baseVertex does not increase the upper bound, while a
+            // positive one does.  Keep the bound in signed space so malformed
+            // guest data cannot wrap a negative base into a multi-GB copy.
+            uint64_t upper = (uint64_t)max_index + 1u;
+            if (base_vertex > 0) upper += (uint32_t)base_vertex;
+            max_index = upper > UINT32_MAX ? UINT32_MAX : (uint32_t)upper;
         }
     }
     if (use_index) vkCmdBindIndexBuffer(cb, ib.buf, ib.off, itype_vk);
@@ -3309,8 +3314,9 @@ static void draw_(CmdRec *r, bool indexed) {
             if (scan_src) {  // copying after all: the index scan bounds the copy
                 if (scan_isz == 2) { const uint16_t *q = scan_src; for (uint32_t i = 0; i < icount; i++) if (q[i] > max_index && q[i] != (uint16_t)scan_restart) max_index = q[i]; }
                 else { const uint32_t *q = scan_src; for (uint32_t i = 0; i < icount; i++) if (q[i] > max_index && q[i] != scan_restart) max_index = q[i]; }
-                max_index += 1;
-                if (base_vertex > 0) max_index += (uint32_t)base_vertex;
+                uint64_t upper = (uint64_t)max_index + 1u;
+                if (base_vertex > 0) upper += (uint32_t)base_vertex;
+                max_index = upper > UINT32_MAX ? UINT32_MAX : (uint32_t)upper;
                 scan_src = NULL;
             }
             uint64_t stride = k.stride[s], need;
