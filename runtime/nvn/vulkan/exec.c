@@ -899,7 +899,26 @@ static void tf_pending_clear(void) {
 static void tf_flush_pending_barrier(void) {
     if (!tf_barrier_pending) return;
     vk_end_pass();
-    vk_full_barrier(vk_cmd());
+    VkCommandBuffer cb = vk_cmd();
+    // Stream-output only needs its writes made visible to later consumers.
+    // A global ALL_COMMANDS write/read+write barrier serialized unrelated color,
+    // depth and transfer work and became very expensive in Scarlet's TF-heavy
+    // scenes. Keep the destination broad (the consumer can be vertex/UBO/SSBO/
+    // indirect guest memory), but scope the producer to TF writes and do not
+    // unnecessarily order unrelated destination writes.
+    VkMemoryBarrier2 mb = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT,
+        .srcAccessMask = VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT
+    };
+    VkDependencyInfo di = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers = &mb
+    };
+    vkCmdPipelineBarrier2(cb, &di);
     tf_pending_clear();
     stat_tf_barriers++;
 }
