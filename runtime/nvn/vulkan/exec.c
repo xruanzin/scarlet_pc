@@ -1260,6 +1260,10 @@ static void begin_pass(void) {
         }
         pass_color[i] = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4) && vk_format(t->format) == b->format
                       ? vk_format(st.rt.cview[i].format) : b->format;
+        if (!(st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4)) && !getenv("LARECOMP_VK_SRGB_ATTACH")) {
+            if (pass_color[i] == VK_FORMAT_R8G8B8A8_SRGB) pass_color[i] = VK_FORMAT_R8G8B8A8_UNORM;
+            else if (pass_color[i] == VK_FORMAT_B8G8R8A8_SRGB) pass_color[i] = VK_FORMAT_B8G8R8A8_UNORM;
+        }
         uint32_t lv = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 1) ? st.rt.cview[i].base_level : 0;
         uint32_t ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
         if (!w) { renderer_texture_scale(t, &pass_sx, &pass_sy); w = ew; }
@@ -3564,6 +3568,13 @@ static void forensic_draw_record(Prog *pr, CmdRec *r, bool indexed) {
         rt_w, rt_h, rt_fmt, d_fmt, pass_samples, st.tf_active ? 1u : 0u,
         st.raster_discard ? 1u : 0u, st.ms[0xC] ? 1u : 0u, pr->vi ? pr->vi->attr_mask : 0,
         (unsigned long long)forensic_barriers_since_draw, forensic_last_barrier_flags);
+    if (st.rt.ncolor > 0 && st.rt.color[0] && st.rt.has_cview[0]) {
+        const NvnTextureView *rv = &st.rt.cview[0];
+        fprintf(forensic_fp, " rtview=set%#x", rv->setmask);
+        if (rv->setmask & 4) fprintf(forensic_fp, "/f%#x", rv->format);
+        if (rv->setmask & 1) fprintf(forensic_fp, "/lv%u+%u", rv->base_level, rv->num_levels);
+        if (rv->setmask & 2) fprintf(forensic_fp, "/ly%u+%u", rv->min_layer, rv->num_layers);
+    }
     if (st.vbuf[0].addr)
         fprintf(forensic_fp, " v0=%llx+%llu/stride%u", (unsigned long long)st.vbuf[0].addr,
                 (unsigned long long)st.vbuf[0].size, st.nstream > 0 ? st.stream[0][0] : 0);
