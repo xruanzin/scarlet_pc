@@ -2049,7 +2049,16 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                 nc = key->xfb_layout ? key->xfb_comp[i] : __builtin_popcount((unsigned)cm & 0xFu);
             }
             if (nc > 0) {
-                if (nc == 1)
+                // Scarlet's captured 12:4:4 stream-output layout stores v1.x/v2.x
+                // as packed 32-bit normal/tangent words. The guest shader moves
+                // those words through a float register with a bitcast. Exposing
+                // them as float XFB outputs lets a driver canonicalize NaN-like
+                // bit patterns and corrupt the packed value. Preserve the exact
+                // 32 bits by making the two 4-byte streams uint outputs.
+                bool xfb_raw_u32 = key && key->xfb_layout && nc == 1 && (i == 1 || i == 2);
+                if (xfb_raw_u32)
+                    sp(&s, "layout(location = %d, xfb_buffer = %d, xfb_offset = 0, xfb_stride = 4) out uint v%d;\n", i, i, i);
+                else if (nc == 1)
                     sp(&s, "layout(location = %d, xfb_buffer = %d, xfb_offset = 0, xfb_stride = 4) out float v%d;\n", i, i, i);
                 else
                     sp(&s, "layout(location = %d, xfb_buffer = %d, xfb_offset = 0, xfb_stride = %d) out vec%d v%d;\n",
@@ -2124,7 +2133,11 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                     for (int j = 0; j < 4; j++) if (cm & (1u << j)) sw[sn++] = comp[j];
                 }
                 sw[sn] = 0;
-                sp(&s, "  v%d = xfbtmp%d.%s;\n", i, i, sw);
+                bool xfb_raw_u32 = key->xfb_layout && nc == 1 && (i == 1 || i == 2);
+                if (xfb_raw_u32)
+                    sp(&s, "  v%d = floatBitsToUint(xfbtmp%d.%s);\n", i, i, sw);
+                else
+                    sp(&s, "  v%d = xfbtmp%d.%s;\n", i, i, sw);
             }
         }
         if (key && key->layer_from_instance)
