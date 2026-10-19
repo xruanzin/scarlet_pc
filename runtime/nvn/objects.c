@@ -367,6 +367,12 @@ static void builder_layout(uint64_t b, TexLayout *t) {
     uint64_t pl = G(uint64_t, b, 0x50);
     bool have_pl = G(uint8_t, b, 0x60) != 0;
     if (have_pl) t->block_height_log2 = (uint32_t)pl & 7u;
+    if (have_pl && G(uint32_t, b, 0x20) >= 0x4D && G(uint32_t, b, 0x20) <= 0x50 && ((uint32_t)pl & ~7u)) {
+        static int told_bc_layout;
+        if (told_bc_layout++ < 12)
+            LOG("[tex-layout] compressed f%#x %ux%u packaged=%#x -> blockHeightLog2=%u\n",
+                G(uint32_t, b, 0x20), t->width, t->height, (uint32_t)pl, t->block_height_log2);
+    }
     if (have_pl && getenv("LARECOMP_LOG_PACKAGED")) {
         static int n;
         if (n++ < 4000) LOG("[nvn] packaged layout %016llx fmt %#x %ux%u lv %u -> bh %u flags %#x\n",
