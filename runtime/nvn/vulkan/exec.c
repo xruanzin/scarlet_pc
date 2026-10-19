@@ -2106,17 +2106,39 @@ static bool hair_lighting_variant(uint64_t hash) {
 }
 
 static uint64_t schoolyard_grade_frame = ~0ull;
-static void scarlet_scene_markers(uint64_t fs_hash) {
-    // Large schoolyard/court surface shader, present in the opening ring capture
-    // and absent from the classroom capture.  Keep the marker frame-local.
-    if (fs_hash == 0x3ae37283c5b5471bull)
+static void scarlet_scene_markers(uint64_t fs_addr) {
+    // These fragment programs occur in the opening academy schoolyard/court
+    // capture and are absent from the classroom capture. Guest code addresses
+    // are more robust here than hashing a translated shader variant.
+    switch (fs_addr) {
+    case 0x72715cc300ull:
+    case 0x727164aa00ull:
+    case 0x7271748900ull:
+    case 0x727191fe00ull:
+    case 0x72723c3600ull:
+    case 0x7272433000ull:
+    case 0x727355e900ull:
+    case 0x7273570800ull:
+    case 0x72735f6800ull:
+    case 0x7273605d00ull:
+    case 0x728d023900ull:
+    case 0x728d026500ull:
+    case 0x728d02ba00ull:
+    case 0x728d26d900ull:
+    case 0x728d270500ull:
+    case 0x728d275a00ull:
         schoolyard_grade_frame = renderer_present_count();
+        break;
+    default:
+        break;
+    }
 }
-static bool schoolyard_grade_variant(uint64_t fs_hash) {
+static bool schoolyard_grade_variant(uint64_t fs_addr) {
     const char *off = getenv("LARECOMP_NO_RING_GRADE_FIX");
-    return !(off && atoi(off) != 0) &&
-           fs_hash == 0x659b4ff9126251f4ull &&
-           schoolyard_grade_frame == renderer_present_count();
+    if (off && atoi(off) != 0) return false;
+    if (schoolyard_grade_frame != renderer_present_count()) return false;
+    // Tone-map variants observed in the two opening captures.
+    return fs_addr == 0x7273317200ull || fs_addr == 0x7273318200ull;
 }
 
 static NvnTexture *snap_tex[8];
@@ -3207,11 +3229,12 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
-    uint64_t fs_hash = fragment_code_hash(st.program->stages[1].code_addr);
-    scarlet_scene_markers(fs_hash);
+    uint64_t fs_addr = st.program->stages[1].code_addr;
+    uint64_t fs_hash = fragment_code_hash(fs_addr);
+    scarlet_scene_markers(fs_addr);
     fkey.sharp_scene = sharp_dof_variant(fs_hash);
     fkey.hair_isotropic = hair_lighting_variant(fs_hash);
-    fkey.ring_neutral_grade = schoolyard_grade_variant(fs_hash);
+    fkey.ring_neutral_grade = schoolyard_grade_variant(fs_addr);
     if (fkey.hair_isotropic) {
         static bool reported;
         if (!reported) { reported = true; LOG("[vk] Scarlet hair compatibility enabled by default (material 3 isotropic + albedo chroma preservation)\n"); }
