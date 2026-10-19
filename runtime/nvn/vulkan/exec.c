@@ -1647,11 +1647,9 @@ static void translate_program(void *arg) {
             f = fopen(path, "wb");
             if (f) { fwrite((const void *)(uintptr_t)p->code[0], 1, n, f); fclose(f); }
         }
-        // A rasterizing vertex stage that never exports position can only produce the translator's default
-        // clip position. Treat it as a failed program rather than creating a pipeline that draws collapsed/giant
-        // geometry. Stream-output (xfb) programs are excluded because they may intentionally omit raster position.
-        atomic_store(&p->state, 2);
-        return;
+        // Keep the program alive. Some Scarlet programs reach position through control-flow paths that the
+        // current static diagnostic does not recognize; rejecting them caused hundreds of valid model draws/frame
+        // to disappear. The diagnostic dump remains useful, but it must not change rendering semantics.
     }
 
     log_shader_flow(p->vi, p->code[0], "vs");
