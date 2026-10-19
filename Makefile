@@ -113,6 +113,12 @@ GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | (shasum -a 256
 GENFLAGS_STAMP := $(B)/obj/.genflags-$(GAMELIB_ID)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
+# Runtime objects must track the repository revision. Git checkouts/pulls can
+# preserve mtimes that make make believe old objects are current even when the
+# source content changed. A revision-specific stamp is therefore a prerequisite
+# of every runtime/backend object.
+RT_REV := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo nogit)
+RT_REV_STAMP := $(B)/rt/.rev-$(RT_REV)
 RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(DEPINC)
 
@@ -138,7 +144,12 @@ $(B)/rt/gamebuild.o: $(GAMELIB_SRCS) Makefile
 $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"' -DGAMELIB_CFLAGS='"$(strip $(filter-out -Iruntime,$(GENFLAGS)))"' \
                                 -DGAMELIB_SHARED='"$(GAMELIB_SHARED)"'
 
-$(B)/rt/%.o: runtime/%.c $(RT_HDRS)
+$(RT_REV_STAMP):
+	@mkdir -p $(B)/rt
+	@rm -f $(B)/rt/.rev-*
+	@touch $@
+
+$(B)/rt/%.o: runtime/%.c $(RT_HDRS) $(RT_REV_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(RTFLAGS) -c $< -o $@
 
@@ -151,7 +162,7 @@ $(B)/inc/smaa_hlsl.inc: third_party/smaa/SMAA.hlsl
 $(B)/rt/nvn/smaa_data.o: $(B)/inc/smaa_hlsl.inc
 $(B)/rt/nvn/smaa_data.o: RTFLAGS += -I$(B)/inc -Ithird_party/smaa/Textures
 
-$(B)/rt/%.o: runtime/%.cpp $(RT_HDRS)
+$(B)/rt/%.o: runtime/%.cpp $(RT_HDRS) $(RT_REV_STAMP)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(OSFLAGS) -c $< -o $@
 
