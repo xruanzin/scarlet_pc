@@ -1385,7 +1385,7 @@ static const VkDynamicState DYN[] = {
     VK_DYNAMIC_STATE_CULL_MODE, VK_DYNAMIC_STATE_FRONT_FACE, VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY,
     VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE, VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
     VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_OP, VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE,
-    VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE};
+    VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE, VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE};
 #define NDYN (sizeof DYN / sizeof DYN[0])
 
 // Fixed-function state that isn't part of a pipeline is set explicitly on every bind (it persists across pipelines).
@@ -1407,6 +1407,7 @@ static void dyn_defaults(VkCommandBuffer cb) {
     vkCmdSetStencilOp(cb, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP,
                       VK_COMPARE_OP_ALWAYS);
     vkCmdSetPrimitiveRestartEnable(cb, VK_FALSE);
+    vkCmdSetRasterizerDiscardEnable(cb, VK_FALSE);
 }
 
 typedef struct { uint64_t key; VkPipeline pipe; } PipeEnt;
@@ -1972,7 +1973,7 @@ typedef struct {
     uint32_t attr_mask;
     uint32_t stride[17], divisor[17], used_streams;
     uint8_t blend[8][8];
-    uint8_t blend_on, a2c, topo_class, poly_fill, raster_discard;
+    uint8_t blend_on, a2c, topo_class, poly_fill;
     uint32_t write_mask[8];
 } PipeKey;
 
@@ -2032,7 +2033,7 @@ static void build_pipeline(void *arg) {
                                                  .topology = topo_class_base(k->topo_class)};
     VkPipelineViewportStateCreateInfo vs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
     VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-                                                 .rasterizerDiscardEnable = k->raster_discard || k->prog->vkey.xfb,
+                                                 .rasterizerDiscardEnable = VK_FALSE,
                                                  .polygonMode = k->poly_fill ? VK_POLYGON_MODE_FILL : VK_POLYGON_MODE_LINE, .lineWidth = 1};
     VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
                                                .rasterizationSamples = (VkSampleCountFlagBits)k->samples, .alphaToCoverageEnable = k->a2c};
@@ -2096,9 +2097,25 @@ static bool sharp_dof_variant(uint64_t hash) {
     return e && atoi(e) != 0 && hash == 0xfbff97881854688eull;
 }
 static bool hair_lighting_variant(uint64_t hash) {
-    const char *e = getenv("LARECOMP_HAIR_ISOTROPIC");
-    // Deferred lighting in both academy captures; never select a material draw.
-    return e && atoi(e) != 0 && hash == 0xaa68a5939321c84aull;
+    // The G-buffer capture proved this compatibility path restores Scarlet's
+    // material-3 hair colour. Keep it on by default for the exact deferred
+    // lighting shader; LARECOMP_NO_HAIR_FIX=1 is a diagnostic opt-out.
+    const char *off = getenv("LARECOMP_NO_HAIR_FIX");
+    return !(off && atoi(off) != 0) && hash == 0xaa68a5939321c84aull;
+}
+
+static uint64_t schoolyard_grade_frame = ~0ull;
+static void scarlet_scene_markers(uint64_t fs_hash) {
+    // Large schoolyard/court surface shader, present in the opening ring capture
+    // and absent from the classroom capture.  Keep the marker frame-local.
+    if (fs_hash == 0x3ae37283c5b5471bull)
+        schoolyard_grade_frame = renderer_present_count();
+}
+static bool schoolyard_grade_variant(uint64_t fs_hash) {
+    const char *off = getenv("LARECOMP_NO_RING_GRADE_FIX");
+    return !(off && atoi(off) != 0) &&
+           fs_hash == 0x659b4ff9126251f4ull &&
+           schoolyard_grade_frame == renderer_present_count();
 }
 
 static NvnTexture *snap_tex[8];
@@ -3190,11 +3207,17 @@ static void draw_(CmdRec *r, bool indexed) {
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     uint64_t fs_hash = fragment_code_hash(st.program->stages[1].code_addr);
+    scarlet_scene_markers(fs_hash);
     fkey.sharp_scene = sharp_dof_variant(fs_hash);
     fkey.hair_isotropic = hair_lighting_variant(fs_hash);
+    fkey.ring_neutral_grade = schoolyard_grade_variant(fs_hash);
     if (fkey.hair_isotropic) {
         static bool reported;
-        if (!reported) { reported = true; LOG("[vk] Scarlet hair compatibility enabled (material 3 isotropic + albedo chroma preservation)\n"); }
+        if (!reported) { reported = true; LOG("[vk] Scarlet hair compatibility enabled by default (material 3 isotropic + albedo chroma preservation)\n"); }
+    }
+    if (fkey.ring_neutral_grade) {
+        static bool grade_reported;
+        if (!grade_reported) { grade_reported = true; LOG("[vk] Scarlet opening schoolyard neutral grade enabled\n"); }
     }
     vkey.layer_varying = fkey.layer_varying = lut_slice_active;
     vkey.bindless_storage = fkey.bindless_storage = g_vk.bindless_storage_slots;
@@ -3437,7 +3460,6 @@ static void draw_(CmdRec *r, bool indexed) {
     // disable it for 1-sample targets.
     if (st.ms[0xC] && pass_samples == 1) stat_a2c_1x++;
     k.a2c = st.ms[0xC] != 0 && pass_samples > 1;
-    k.raster_discard = st.raster_discard;
     k.topo_class = cls;
     k.poly_fill = st.poly[2] != 1;
     uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
@@ -3501,6 +3523,7 @@ static void draw_(CmdRec *r, bool indexed) {
     vkCmdSetFrontFace(cb, front_ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
     vkCmdSetPrimitiveTopology(cb, native ? topo : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     vkCmdSetPrimitiveRestartEnable(cb, st.prim_restart && native && (mode == 3 || mode == 5));
+    vkCmdSetRasterizerDiscardEnable(cb, (st.raster_discard || vkey.xfb) ? VK_TRUE : VK_FALSE);
     {
         float f[3] = {0, 0, 0};
         static int off = -1;
