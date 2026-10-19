@@ -3011,12 +3011,19 @@ static void draw_(CmdRec *r, bool indexed) {
             debug_draw(pr, r, indexed);
         }
     }
-    resolve_feedback(pr);
-    snap_reason = "draw-depthwrite";
-    if (st.rt.depth && st.ds[0] && st.ds[1]) snapshots_invalidate(st.rt.depth);
-    snap_reason = "draw-colorwrite";
-    for (int i = 0; i < st.rt.ncolor; i++)
-        if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
+    bool vertex_only_xfb = vkey.xfb;
+    // XFB pipelines are vertex-only and rasterization-discarded. They cannot
+    // sample in a fragment stage or modify color/depth attachments, so avoid
+    // framebuffer feedback copies and attachment invalidation on this very hot
+    // Scarlet path.
+    if (!vertex_only_xfb) {
+        resolve_feedback(pr);
+        snap_reason = "draw-depthwrite";
+        if (st.rt.depth && st.ds[0] && st.ds[1]) snapshots_invalidate(st.rt.depth);
+        snap_reason = "draw-colorwrite";
+        for (int i = 0; i < st.rt.ncolor; i++)
+            if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
+    }
     begin_pass();
     VkCommandBuffer cb = vk_cmd();
 
@@ -3194,13 +3201,15 @@ static void draw_(CmdRec *r, bool indexed) {
     PROF_ADD(prof_sets);
     VkDescriptorImageInfo fii[64];
     uint64_t prof_tx_ = prof ? SDL_GetTicksNS() : 0;
-    for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
-        float sc[2]; uint32_t wh[2];
-        texture_info(1, pr->fi, i, &fii[i], sc, wh);
-        tex_sc[1][i][0] = sc[0]; tex_sc[1][i][1] = sc[1]; tex_wh[1][i][0] = wh[0]; tex_wh[1][i][1] = wh[1];
+    if (!vertex_only_xfb) {
+        for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
+            float sc[2]; uint32_t wh[2];
+            texture_info(1, pr->fi, i, &fii[i], sc, wh);
+            tex_sc[1][i][0] = sc[0]; tex_sc[1][i][1] = sc[1]; tex_wh[1][i][0] = wh[0]; tex_wh[1][i][1] = wh[1];
+        }
     }
     if (prof) prof_tex += SDL_GetTicksNS() - prof_tx_;
-    if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
+    if (!vertex_only_xfb && fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
         // Draws into the swapchain image (see renderer.m): composites fill the window, UI goes in a centred 16:9 box.
         bool reads_scene = false;
         for (int i = 0; i < pr->fi->ntex && i < 64; i++)
@@ -3257,10 +3266,17 @@ static void draw_(CmdRec *r, bool indexed) {
     apply_scissor();
     float rs0[4] = {vp_sx, vp_sy, vp_ox, vp_oy};
     uint64_t prof_t1_ = prof ? SDL_GetTicksNS() : 0;
-    VkDescriptorSet fset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, tint, 0, 0, 0, fii);
+    if (vertex_only_xfb) {
+        // Pipeline stageCount is one for XFB, so set 1 is not statically used.
+        // Binding only the vertex set avoids thousands of fragment descriptor
+        // allocations/updates per second in Scarlet's stream-output passes.
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, 1, &vset, 0, NULL);
+    } else {
+        VkDescriptorSet fset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, tint, 0, 0, 0, fii);
+        VkDescriptorSet sets[2] = {vset, fset};
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, 2, sets, 0, NULL);
+    }
     if (prof) prof_sets += SDL_GetTicksNS() - prof_t1_;
-    VkDescriptorSet sets[2] = {vset, fset};
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, 2, sets, 0, NULL);
 
     uint64_t prof_t2_ = prof ? SDL_GetTicksNS() : 0;
     // ---- indices (copied; the largest index bounds the vertex data copied below)
@@ -3364,9 +3380,9 @@ static void draw_(CmdRec *r, bool indexed) {
     if (!use_index) vkCmdDraw(cb, count, inst, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
     surface_finish_writes(pr->vi);
-    surface_finish_writes(pr->fi);
+    if (!vertex_only_xfb) surface_finish_writes(pr->fi);
     bool surface_write = pr->vi->uses_surface_write || pr->vi->uses_surface_atomic ||
-                         pr->fi->uses_surface_write || pr->fi->uses_surface_atomic;
+                         (!vertex_only_xfb && (pr->fi->uses_surface_write || pr->fi->uses_surface_atomic));
     stat_draws++;
     g_draws_total++;
     cum_draws++;
