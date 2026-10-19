@@ -75,9 +75,29 @@ typedef struct {
 } Sub;
 static Sub subs[SUBS];
 static int cur_sub;
-static uint64_t submit_seq;  // last submitted
+static uint64_t submit_seq;  // last physically submitted timeline value
 static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
+
+// Queue-level batching only: each NVN list still ends in its own primary
+// VkCommandBuffer(s). We merely send two consecutive lists in one
+// vkQueueSubmit2 call. This avoids the AMD crash seen when lists themselves
+// were merged into one command buffer while preserving upload/main order.
+#define QBATCH_MAX_CBS 8
+static VkCommandBufferSubmitInfo qbatch_cbs[QBATCH_MAX_CBS];
+static uint32_t qbatch_ncb, qbatch_lists;
+static uint64_t stat_logical_submits, stat_queue_batches;
+
+static int queue_batch_limit(void) {
+    static int n = -1;
+    if (n < 0) {
+        const char *e = getenv("LARECOMP_QUEUE_BATCH");
+        n = e ? atoi(e) : 2;
+        if (n < 1) n = 1;
+        if (n > 2) n = 2;  // conservative on the AMD Windows driver
+    }
+    return n;
+}
 
 uint64_t vk_completed_seq(void) {
     uint64_t v = 0;
@@ -230,9 +250,47 @@ void vk_gpuprof_report(void) {
     gp_n = 0;
 }
 
-// Submit the pending work (if any). wait/signal: binary semaphores for presentation (may be null).
-void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra) {
-    (void)extra;
+// Finish the current list into the queue batch, but do not submit it yet.
+// The command buffers stay distinct and are appended in exact guest order:
+// upload0, main0, upload1, main1, ...
+static bool qbatch_finish_current(bool force_main) {
+    vk_end_pass();
+    if (tf_barrier_pending) stat_tf_dep_submit++;
+    tf_flush_pending_barrier();
+
+    Sub *s = sub();
+    if (!s->main_begun && !s->upload_begun && !force_main) return false;
+
+    if (s->upload_begun) {
+        vk_full_barrier(s->upload);
+        VK_CHECK(vkEndCommandBuffer(s->upload));
+        if (qbatch_ncb >= QBATCH_MAX_CBS) FATAL("vk: queue batch command-buffer overflow\n");
+        qbatch_cbs[qbatch_ncb++] = (VkCommandBufferSubmitInfo){
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->upload};
+    }
+
+    if (force_main && !s->main_begun) vk_cmd();
+    if (s->main_begun) {
+        if (s->ts)
+            vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                 prof_qp, (uint32_t)cur_sub * 2 + 1);
+        VK_CHECK(vkEndCommandBuffer(s->main));
+        if (qbatch_ncb >= QBATCH_MAX_CBS) FATAL("vk: queue batch command-buffer overflow\n");
+        qbatch_cbs[qbatch_ncb++] = (VkCommandBufferSubmitInfo){
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->main};
+    }
+
+    qbatch_lists++;
+    stat_logical_submits++;
+    cur_sub = (cur_sub + 1) % SUBS;
+    return true;
+}
+
+static void qbatch_submit(VkSemaphore wait, VkSemaphore signal) {
+    if (!qbatch_ncb && !wait && !signal) return;
+
+    // A semaphore-only submit still needs no command buffer, which Vulkan 1.3
+    // permits. Normal present always has the frame command buffer here.
     static _Atomic(uintptr_t) submit_owner;
     static _Atomic(unsigned) submit_active;
     static _Atomic(uint64_t) submit_overlap_count;
@@ -248,67 +306,73 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
         else if (submit_prev != submit_me) {
             uint64_t n = atomic_fetch_add_explicit(&submit_overlap_count, 1, memory_order_relaxed) + 1;
             if (n <= 64 || !(n & 255))
-                LOG("[vk-thread] !!! overlapping vk_submit_extra #%llu: tid=%llx owner=%llx active=%u frame=%llu !!!\n",
+                LOG("[vk-thread] !!! overlapping queue batch #%llu: tid=%llx owner=%llx active=%u frame=%llu !!!\n",
                     (unsigned long long)n, (unsigned long long)submit_me,
                     (unsigned long long)submit_prev, submit_before + 1,
                     (unsigned long long)vk_frame_counter());
         }
     }
-    vk_end_pass();
-    if (tf_barrier_pending) stat_tf_dep_submit++;
-    tf_flush_pending_barrier();
-    Sub *s = sub();
-    if (!s->main_begun && !s->upload_begun && !wait && !signal) {
-        if (submit_diag) {
-            unsigned left = atomic_fetch_sub_explicit(&submit_active, 1, memory_order_acq_rel);
-            if (left == 1) atomic_store_explicit(&submit_owner, 0, memory_order_release);
-        }
-        return;
-    }
-    VkCommandBufferSubmitInfo cbs[2];
-    int n = 0;
-    if (s->upload_begun) {
-        vk_full_barrier(s->upload);  // uploads complete before anything in the main buffer reads them
-        VK_CHECK(vkEndCommandBuffer(s->upload));
-        cbs[n++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->upload};
-    }
-    vk_cmd();  // (an empty main buffer still carries the semaphores)
-    if (s->ts) vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, prof_qp, (uint32_t)cur_sub * 2 + 1);
-    VK_CHECK(vkEndCommandBuffer(s->main));
-    cbs[n++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->main};
-    VkSemaphoreSubmitInfo sig[2] = {{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = g_vk.timeline,
-                                     .value = submit_seq + 1, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT},
-                                    {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = signal,
-                                     .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT}};
-    VkSemaphoreSubmitInfo wt = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = wait,
-                                .stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT};
-    VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = (uint32_t)n, .pCommandBufferInfos = cbs,
-                        .signalSemaphoreInfoCount = signal ? 2 : 1, .pSignalSemaphoreInfos = sig,
-                        .waitSemaphoreInfoCount = wait ? 1 : 0, .pWaitSemaphoreInfos = &wt};
+
+    const uint64_t seq = submit_seq + 1;
+    VkSemaphoreSubmitInfo sig[2] = {
+        {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = g_vk.timeline,
+         .value = seq, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT},
+        {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = signal,
+         .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT}};
+    VkSemaphoreSubmitInfo wt = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = wait,
+        .stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT};
+    VkSubmitInfo2 si = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+        .commandBufferInfoCount = qbatch_ncb, .pCommandBufferInfos = qbatch_cbs,
+        .signalSemaphoreInfoCount = signal ? 2 : 1, .pSignalSemaphoreInfos = sig,
+        .waitSemaphoreInfoCount = wait ? 1 : 0, .pWaitSemaphoreInfos = &wt};
+
     {
         PROF_T0();
-        dl_note("submit %llu", (unsigned long long)submit_seq + 1);
+        dl_note("queue submit %llu: %u lists, %u command buffers",
+                (unsigned long long)seq, qbatch_lists, qbatch_ncb);
         flush_transient_writes();
         VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, VK_NULL_HANDLE);
         if (sr == VK_ERROR_DEVICE_LOST) vk_devlost_dump();
         VK_CHECK(sr);
         PROF_ADD(prof_submit);
     }
+
     pthread_mutex_lock(&seq_lock);
-    submit_seq++;
+    submit_seq = seq;
     pthread_mutex_unlock(&seq_lock);
-    cur_sub = (cur_sub + 1) % SUBS;
     stat_flushes++;
+    stat_queue_batches++;
     cum_submits++;
+    qbatch_ncb = qbatch_lists = 0;
     ring_retire();
     vk_collect_dead();
+
     if (submit_diag) {
         unsigned left = atomic_fetch_sub_explicit(&submit_active, 1, memory_order_acq_rel);
         if (left == 1) atomic_store_explicit(&submit_owner, 0, memory_order_release);
     }
 }
 
-void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
+// Immediate submit path used by presentation, explicit flushes and CPU-visible
+// synchronization. Any deferred list is included before the current work.
+void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra) {
+    (void)extra;
+    qbatch_finish_current(wait || signal);
+    qbatch_submit(wait, signal);
+}
+
+// List-end path: keep each list in its own CB, but amortize the queue call.
+static void renderer_submit_list(void) {
+    if (!qbatch_finish_current(false)) return;
+    if ((int)qbatch_lists >= queue_batch_limit()) qbatch_submit(VK_NULL_HANDLE, VK_NULL_HANDLE);
+}
+
+void renderer_submit(void) {
+    qbatch_finish_current(false);
+    qbatch_submit(VK_NULL_HANDLE, VK_NULL_HANDLE);
+}
 
 void renderer_flush(void) {
     renderer_submit();
@@ -316,6 +380,7 @@ void renderer_flush(void) {
 }
 
 void renderer_sync(void) {
+    renderer_submit();  // QueueFinish must include deferred list-end work.
     pthread_mutex_lock(&seq_lock);
     uint64_t s = submit_seq;
     pthread_mutex_unlock(&seq_lock);
@@ -324,7 +389,7 @@ void renderer_sync(void) {
 
 uint64_t renderer_fence_seq(void) {
     pthread_mutex_lock(&seq_lock);
-    uint64_t q = submit_seq + (subs[cur_sub].main_begun || subs[cur_sub].upload_begun ? 1 : 0);
+    uint64_t q = submit_seq + (qbatch_ncb || subs[cur_sub].main_begun || subs[cur_sub].upload_begun ? 1 : 0);
     pthread_mutex_unlock(&seq_lock);
     return q;
 }
@@ -334,7 +399,13 @@ void renderer_wait_seq(uint64_t seq) {
     pthread_mutex_lock(&seq_lock);
     uint64_t s = submit_seq;
     pthread_mutex_unlock(&seq_lock);
-    vk_wait_seq(seq > s ? s : seq);  // not submitted yet (other thread): everything submitted so far
+    if (seq > s && (qbatch_ncb || subs[cur_sub].main_begun || subs[cur_sub].upload_begun)) {
+        renderer_submit();
+        pthread_mutex_lock(&seq_lock);
+        s = submit_seq;
+        pthread_mutex_unlock(&seq_lock);
+    }
+    vk_wait_seq(seq > s ? s : seq);
 }
 
 VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
@@ -4458,7 +4529,7 @@ void backend_execute(uint64_t handle) {
     static int sync_submit = -1;
     if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
     if (sync_submit) renderer_flush();
-    else renderer_submit();
+    else renderer_submit_list();
     vk_exec_diag_leave(thread_diag);
     vk_big_unlock();
 }
