@@ -1647,6 +1647,11 @@ static void translate_program(void *arg) {
             f = fopen(path, "wb");
             if (f) { fwrite((const void *)(uintptr_t)p->code[0], 1, n, f); fclose(f); }
         }
+        // A rasterizing vertex stage that never exports position can only produce the translator's default
+        // clip position. Treat it as a failed program rather than creating a pipeline that draws collapsed/giant
+        // geometry. Stream-output (xfb) programs are excluded because they may intentionally omit raster position.
+        atomic_store(&p->state, 2);
+        return;
     }
 
     log_shader_flow(p->vi, p->code[0], "vs");
