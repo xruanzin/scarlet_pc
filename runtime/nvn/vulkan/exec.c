@@ -151,6 +151,8 @@ VkCommandBuffer vk_cmd(void) {
     return s->main;
 }
 
+void renderer_submit(void);
+
 VkCommandBuffer vk_upload_cmd(void) {
     // Upload command buffers are submitted before the main command buffer.
     // If a later NVN list uploads after earlier draws while batching is active,
