@@ -155,6 +155,7 @@ enum {
     CMD_DISCARD_DEPTH_STENCIL, CMD_SET_COPY_STRIDES, CMD_DRAW_TEXTURE, CMD_RESOLVE_DEPTH,
     CMD_OBJECT,  // (ours) x[0]: the game object the following draws belong to, 0 = none (frame interpolation)
     CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT, CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT,
+    CMD_SET_RASTERIZER_DISCARD,  // appended: never renumber existing recorded opcodes
     CMD_COUNT
 };
 
