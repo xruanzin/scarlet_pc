@@ -345,7 +345,13 @@ static void builder_layout(uint64_t b, TexLayout *t) {
     // A zero layout is valid for blockHeightLog2=0. Packaged texture data
     // being present distinguishes that from an ordinary builder using defaults.
     bool have_pl = pl != 0 || G(uint64_t, b, 0x48) != 0;
-    if (have_pl) t->block_height_log2 = (uint32_t)pl & 7u;
+    if (have_pl) {
+        uint32_t bh = (uint32_t)pl & 7u;
+        // NVN/Tegra blockHeightLog2 is defined only for 1,2,4,8,16,32 GOBs (0..5).
+        // Packaged-layout flag bits can leak into the low field on titles that use newer BNTX metadata; never let
+        // an invalid 6/7 reach tegra_deswizzle, where it changes offsets and turns BC4/5/7 material data into noise.
+        if (bh <= 5) t->block_height_log2 = bh;
+    }
     if (have_pl && G(uint32_t, b, 0x20) >= 0x4D && G(uint32_t, b, 0x20) <= 0x50 && ((uint32_t)pl & ~7u)) {
         static int told_bc_layout;
         if (told_bc_layout++ < 12)
