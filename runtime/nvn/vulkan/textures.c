@@ -547,6 +547,52 @@ static void upload_pending(TexBackend *b) {
 }
 
 uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn, prof_tex_watch_skips;
+// LARECOMP_DUMP_TEX_RAW=<nvn format>[,<format>...] (or "all"): the still-swizzled level 0 of up to 96 textures to
+// build/texraw/<addr>_<w>x<h>_f<fmt>_bh<log2>.bin, plus one line each in build/texraw/index.txt (layout used, flags,
+// layers, stride, label). Offline, every block height can be tried against the same bytes to find which one gives a
+// coherent image, i.e. whether the layout the runtime chose for a compressed / packaged texture is the real one.
+static void dump_raw_texture(const NvnTexture *t, uint32_t w, uint32_t h, const LevelLayout *l) {
+    static int init, all, nfmt, count;
+    static uint32_t fmts[32];
+    if (!init) {
+        init = 1;
+        const char *e = getenv("LARECOMP_DUMP_TEX_RAW");
+        if (e && !strcmp(e, "all")) all = 1;
+        for (const char *q = e; q && *q && !all && nfmt < 32;) {
+            fmts[nfmt++] = (uint32_t)strtoul(q, (char **)&q, 0);
+            if (*q == ',') q++; else break;
+        }
+    }
+    if (count >= 96 || (!all && !nfmt)) return;
+    bool want = all;
+    for (int i = 0; i < nfmt; i++) want = want || fmts[i] == t->format;
+    if (!want) return;
+    // Size of the largest candidate (block height 5, reduced to fit the level as in tegra.c), clamped to the pool, so
+    // the offline tool can try every block height on the same bytes.
+    TexLayout big = t->layout;
+    big.block_height_log2 = 5;
+    uint64_t size = tegra_level(&big, 1).offset;
+    if (t->pool && t->pool->storage && t->addr + size > t->pool->storage + t->pool->size)
+        size = t->pool->storage + t->pool->size - t->addr;
+    if (!size || size > (64ull << 20) || !t->addr) return;
+    char path[200];
+    mkdir("build/texraw", 0755);
+    snprintf(path, sizeof path, "build/texraw/%llx_%ux%u_f%x_bh%u.bin", (unsigned long long)t->addr, w, h, t->format,
+             t->layout.block_height_log2);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fwrite((const void *)(uintptr_t)t->addr, 1, (size_t)size, f);
+    fclose(f);
+    count++;
+    f = fopen("build/texraw/index.txt", "a");
+    if (f) {
+        fprintf(f, "%s dumped=%llu levels=%u layers=%u bh0=%u bhl0=%u flags=%#x stride=%llu label=\"%s\"\n", path,
+                (unsigned long long)size, t->layout.levels, t->layout.layers, t->layout.block_height_log2,
+                l->block_height_log2, t->flags, (unsigned long long)t->stride, t->label);
+        fclose(f);
+    }
+}
+
 static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (!t->addr || t->target == 10) return;
     uint64_t frame = vk_frame_counter();
@@ -629,6 +675,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     for (uint32_t layer = 0; layer < layers; layer++) {
         for (uint32_t lv = 0; lv < levels; lv++) {
             LevelLayout l = tegra_level(&t->layout, lv);
+            if (lv == 0 && layer == 0) dump_raw_texture(t, l.w, l.h, &l);
             if (b->astc_bw) {  // blocks -> linear block rows -> RGBA8 texels
                 const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
                 uint8_t *blocks = malloc((uint64_t)l.wb * l.hb * 16);
