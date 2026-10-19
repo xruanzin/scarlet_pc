@@ -51,15 +51,15 @@ static bool load_compat_commands(VkDevice dev, uint32_t api, PFN_vkGetDeviceProc
     return true;
 }
 
-// Preserve the native 1.4 policy/explicit 1.3 fallback while negotiating
-// Dozen independently: asking its 1.2 driver for a 1.4 device is not useful.
+// Native Vulkan stays on 1.3 for Scarlet.  Dozen negotiates 1.2 separately.
 static uint32_t instance_api_for(uint32_t loader, bool dozen, bool allow13) {
+    (void)allow13;
     if (dozen) return loader >= VK_API_VERSION_1_2 ? VK_API_VERSION_1_2 : 0;
-    if (loader >= VK_API_VERSION_1_4) return VK_API_VERSION_1_4;
-    return allow13 && loader >= VK_API_VERSION_1_3 ? VK_API_VERSION_1_3 : 0;
+    return loader >= VK_API_VERSION_1_3 ? VK_API_VERSION_1_3 : 0;
 }
 static uint32_t minimum_device_api(bool dozen, bool allow13) {
-    return dozen ? VK_API_VERSION_1_2 : allow13 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_4;
+    (void)allow13;
+    return dozen ? VK_API_VERSION_1_2 : VK_API_VERSION_1_3;
 }
 
 // LARECOMP_VK_VALIDATION=1: Khronos validation layer (MSYS2 package vulkan-validation-layers)
@@ -84,8 +84,8 @@ static void create_instance(void) {
     bool dozen = requested && !strcmp(requested, "directx-dozen");
     g_vk.api_version = instance_api_for(loader_api, dozen, getenv("LARECOMP_VK_ALLOW_13") != NULL);
     if (!g_vk.api_version)
-        FATAL("Vulkan %s loader required (loader exposes %u.%u). Native Vulkan 1.3 fallback needs LARECOMP_VK_ALLOW_13=1.\n",
-            dozen ? "1.2" : "1.4", VK_API_VERSION_MAJOR(loader_api), VK_API_VERSION_MINOR(loader_api));
+        FATAL("Vulkan %s loader required (loader exposes %u.%u).\n",
+            dozen ? "1.2" : "1.3", VK_API_VERSION_MAJOR(loader_api), VK_API_VERSION_MINOR(loader_api));
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
                              .pEngineName = "LARecomp", .apiVersion = g_vk.api_version};
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
@@ -157,14 +157,11 @@ static void pick_device(void) {
         const char *requested = getenv("LARECOMP_GRAPHICS_BACKEND");
         if (requested && !strcmp(requested, "directx-dozen"))
             FATAL("DirectX/Dozen unavailable: no hardware Mesa Dozen device with Vulkan 1.2; native vendor Vulkan devices are intentionally excluded. Check loader diagnostics above.\n");
-        FATAL("no eligible native Vulkan %s device; set LARECOMP_VK_ALLOW_13=1 for Vulkan 1.3 compatibility\n",
-            getenv("LARECOMP_VK_ALLOW_13") ? "1.3+" : "1.4");
+        FATAL("no eligible native Vulkan 1.3 device\n");
     }
     g_vk.phys = pd[best];
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
-    if (g_vk.api_version >= VK_API_VERSION_1_4 && g_vk.props.apiVersion < VK_API_VERSION_1_4)
-        g_vk.api_version = VK_API_VERSION_1_3; // selected under the explicit compatibility policy
     const char *backend = getenv("LARECOMP_GRAPHICS_BACKEND");
     if (backend && !strcmp(backend, "directx-dozen")) {
         VkPhysicalDeviceDriverProperties driver = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
