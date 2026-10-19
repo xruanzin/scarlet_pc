@@ -37,7 +37,11 @@ EXE_NAME  ?= lasrecomp
 CC       := clang $(CROSS)
 CXX      := clang++ $(CROSS)
 IMGUI    := third_party/imgui
-GENFLAGS := -O2 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+# Scarlet is CPU-bound in the lifted guest on crowded academy scenes.  -O3
+# keeps strict FP semantics but lets clang inline/vectorize the generated basic
+# blocks more aggressively; the GAMELIB_ID stamp below forces a one-time clean
+# rebuild so stale -O2 objects cannot be reused.
+GENFLAGS := -O3 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
 
 # The game code (made by `make gen` from your own game files) is its own library next to the app (runtime/gamelib.h);
 # the app itself holds none of it
