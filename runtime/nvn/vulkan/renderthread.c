@@ -232,6 +232,35 @@ void renderthread_present_sync(NvnTexture *tex) {
     queue_and_wait((RenderJob){.kind = RJ_PRESENT, .tex = tex});
 }
 
+// Present without waiting for the frame just queued (LARECOMP_PRESENT_ASYNC=<n>, default 0 = the synchronous path above).
+// The game thread only waits for the present queued <n> presents ago, so it records frame N+1 while this thread
+// translates/presents frame N (CPU and GPU-side work overlap instead of adding up). The present is still a job in the
+// same ordered queue, so no GPU work moves across a frame boundary; fences still gate the guest's buffer reuse.
+// n is clamped to 1..3 frames in flight.
+#define PRESENT_RING 4
+static uint64_t present_tickets[PRESENT_RING];
+static unsigned present_next;
+
+void renderthread_present_async(NvnTexture *tex, int depth) {
+    if (!tex) return;
+    if (!renderthread_active()) {
+        run_job(&(RenderJob){.kind = RJ_PRESENT, .tex = tex});
+        return;
+    }
+    if (depth < 1) depth = 1;
+    if (depth > PRESENT_RING - 1) depth = PRESENT_RING - 1;
+    RenderJob j = {.kind = RJ_PRESENT, .tex = tex};
+    uint64_t ticket = push(j);
+    if (!ticket) {  // the worker could not start: present here, in order
+        run_job(&j);
+        return;
+    }
+    present_tickets[present_next % PRESENT_RING] = ticket;
+    present_next++;
+    // wait for the present `depth` frames back (0 until enough presents have happened)
+    if (present_next > (unsigned)depth) renderthread_wait_ticket(present_tickets[(present_next - 1 - depth) % PRESENT_RING]);
+}
+
 void renderthread_gpu_sync(void) {
     queue_and_wait((RenderJob){.kind = RJ_GPU_SYNC});
 }

@@ -159,6 +159,7 @@ bool renderthread_submit_batch(const uint64_t *resolved, int n);
 uint64_t renderthread_queue_fence(NvnSync *sync);
 void renderthread_wait_ticket(uint64_t ticket);
 void renderthread_present_sync(NvnTexture *tex);
+void renderthread_present_async(NvnTexture *tex, int depth);
 void renderthread_drain(void);
 void renderthread_gpu_sync(void);
 void renderthread_gpu_flush(void);

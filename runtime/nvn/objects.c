@@ -910,7 +910,12 @@ NVN(nvnQueuePresentTexture) {
     g_last_interval = w->interval;
     { extern void fps60_present(void); fps60_present(); }
     present_pace(w->interval);
-    if (i >= 0 && i < w->num) renderthread_present_sync(HOST(NvnTexture, w->textures[i]));
+    if (i >= 0 && i < w->num) {
+        static int async_depth = -1;  // LARECOMP_PRESENT_ASYNC=<frames in flight>, default 0: wait for this frame (old path)
+        if (async_depth < 0) { const char *e = getenv("LARECOMP_PRESENT_ASYNC"); async_depth = e ? atoi(e) : 0; if (async_depth > 3) async_depth = 3; }
+        if (async_depth > 0) renderthread_present_async(HOST(NvnTexture, w->textures[i]), async_depth);
+        else renderthread_present_sync(HOST(NvnTexture, w->textures[i]));
+    }
 }
 
 // ================================================================== small state objects
