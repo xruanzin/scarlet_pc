@@ -512,32 +512,55 @@ if ($Ext -eq ".nsp") {
     }
 }
 
-# NSP Program NCAs normally expose an ExeFS PFS section plus RomFS (and often
-# a second PFS section for logo data). Recognize that shape directly instead of
-# relying only on a recursive find through WinFsp.
+# For NSP, identify the package title from its parsed Application CNMT first.
+# This is more reliable than opening main.npdm through PowerShell/.NET over
+# WinFsp, while still validating that the package really is Scarlet base.
 if (-not $ChosenNpdm -and $Ext -eq ".nsp") {
+    $ExpectedProgramId = [UInt64]0x0100A3D008C5C000
+    $NspProgramId = [UInt64]0
+
     foreach ($RootEntry in @(Get-ChildItem -LiteralPath ($MountPoint + "\") -Force -ErrorAction SilentlyContinue)) {
         if (-not (Test-Path -LiteralPath $RootEntry.FullName -PathType Container)) { continue }
+        $Section0 = Join-Path $RootEntry.FullName "section 0"
+        if (-not (Test-Path -LiteralPath $Section0 -PathType Container)) { continue }
 
-        $ExeSection = Join-Path $RootEntry.FullName "section 0"
-        if (-not (Test-Path -LiteralPath $ExeSection -PathType Container)) { continue }
+        foreach ($Item in @(Get-ChildItem -LiteralPath $Section0 -Force -ErrorAction SilentlyContinue)) {
+            if ($Item.Name -match "(?i)^Application_([0-9a-f]{16})[.]cnmt$") {
+                try { $NspProgramId = [Convert]::ToUInt64($Matches[1], 16) } catch { $NspProgramId = [UInt64]0 }
+                if ($NspProgramId) {
+                    Write-Host ("[scarlet-package] NSP Application CNMT: program_id=0x" + $NspProgramId.ToString("x16")) -ForegroundColor DarkGray
+                }
+                break
+            }
+        }
+        if ($NspProgramId) { break }
+    }
 
-        $SectionEntries = @(Get-ChildItem -LiteralPath $RootEntry.FullName -Force -ErrorAction SilentlyContinue)
-        $HasExeRaw = @($SectionEntries | Where-Object { $_.Name -ieq "section 0.nsp" }).Count -gt 0
-        $HasRomRaw = @($SectionEntries | Where-Object { $_.Name -ieq "section 1.romfs" }).Count -gt 0
-        if (-not $HasExeRaw -or -not $HasRomRaw) { continue }
+    if ($NspProgramId -and $NspProgramId -ne $ExpectedProgramId) {
+        Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue
+        throw ("NSP pertence a outro titulo: program_id=0x" + $NspProgramId.ToString("x16") + ", esperado 0x0100a3d008c5c000.")
+    }
 
-        Write-Host ("[scarlet-package] NSP Program NCA candidato: " + $RootEntry.Name) -ForegroundColor DarkGray
+    if ($NspProgramId -eq $ExpectedProgramId) {
+        foreach ($RootEntry in @(Get-ChildItem -LiteralPath ($MountPoint + "\") -Force -ErrorAction SilentlyContinue)) {
+            if (-not (Test-Path -LiteralPath $RootEntry.FullName -PathType Container)) { continue }
 
-        $NpdmEntry = @(Get-ChildItem -LiteralPath $ExeSection -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -ieq "main.npdm" } | Select-Object -First 1)
-        if (-not $NpdmEntry.Count) { continue }
+            $ExeSection = Join-Path $RootEntry.FullName "section 0"
+            if (-not (Test-Path -LiteralPath $ExeSection -PathType Container)) { continue }
 
-        # WinFsp/FUSE may disagree with PowerShell's PathType Leaf for a file
-        # that is perfectly readable. Get-ProgramId opens it directly.
-        $ProgramId = Get-ProgramId $NpdmEntry[0].FullName
-        Write-Host ("[scarlet-package] ExeFS candidato: " + $ExeSection + " program_id=0x" + $ProgramId.ToString("x16")) -ForegroundColor DarkGray
-        if ($ProgramId -eq [UInt64]0x0100A3D008C5C000) {
+            $ExeEntries = @(Get-ChildItem -LiteralPath $ExeSection -Force -ErrorAction SilentlyContinue)
+            $Names = @($ExeEntries | ForEach-Object { $_.Name.ToLowerInvariant() })
+            if ($Names -notcontains "main.npdm" -or $Names -notcontains "main") { continue }
+            if ($Names -notcontains "sdk" -and $Names -notcontains "subsdk0") { continue }
+
+            $RootNames = @(Get-ChildItem -LiteralPath $RootEntry.FullName -Force -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.Name.ToLowerInvariant() })
+            if ($RootNames -notcontains "section 1.romfs") { continue }
+
+            $NpdmEntry = @($ExeEntries | Where-Object { $_.Name -ieq "main.npdm" } | Select-Object -First 1)
+            if (-not $NpdmEntry.Count) { continue }
+
+            Write-Host ("[scarlet-package] NSP Program NCA: " + $RootEntry.Name + " (ExeFS + RomFS)") -ForegroundColor Green
             $ChosenNpdm = $NpdmEntry[0].FullName
             break
         }
@@ -619,7 +642,8 @@ if (-not $ChosenNpdm) {
 
 $ExeFs = Split-Path -Parent $ChosenNpdm
 $NcaRoot = Split-Path -Parent $ExeFs
-$RomCandidates = @(Get-ChildItem -LiteralPath $NcaRoot -File -Filter "*.romfs" -ErrorAction SilentlyContinue)
+$RomCandidates = @(Get-ChildItem -LiteralPath $NcaRoot -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match "(?i)[.]romfs$" })
 $RomFsImage = $null
 foreach ($Candidate in $RomCandidates) {
     try {
