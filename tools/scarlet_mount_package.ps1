@@ -99,8 +99,8 @@ function Get-PeImports {
     param([string]$Path)
 
     $ObjdumpCandidates = @(
-        "C:\msys64\ucrt64\bin\objdump.exe",
         "C:\msys64\mingw64\bin\objdump.exe",
+        "C:\msys64\ucrt64\bin\objdump.exe",
         "C:\msys64\clang64\bin\objdump.exe",
         "C:\msys64\usr\bin\objdump.exe"
     )
@@ -143,10 +143,20 @@ function Resolve-FuseNxDependencies {
     param([string]$FuseExe)
 
     $ToolDir = Split-Path -Parent $FuseExe
+
+    # The Scarlet helper is compiled with the MSYS2 MINGW64 toolchain. Never
+    # reuse DLLs copied by older runs from UCRT64: identical filenames from the
+    # two CRT environments are not interchangeable and can fail at load time
+    # with STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139).
+    foreach ($Stale in @(Get-ChildItem -LiteralPath $ToolDir -File -Filter "*.dll" -ErrorAction SilentlyContinue)) {
+        if ($Stale.Name -ieq "winfsp-x64.dll") { continue }
+        Remove-Item -LiteralPath $Stale.FullName -Force -ErrorAction SilentlyContinue
+    }
+
     $SearchRoots = @(
         $ToolDir,
-        "C:\msys64\ucrt64\bin",
         "C:\msys64\mingw64\bin",
+        "C:\msys64\ucrt64\bin",
         "C:\msys64\clang64\bin",
         "C:\msys64\usr\bin"
     )
@@ -262,6 +272,11 @@ function Test-FuseNxRuntime {
     }
     if ($p.ExitCode -eq -1073741701) {
         throw "Fuse-Nx nao inicia: Windows STATUS_INVALID_IMAGE_FORMAT (0xC000007B), normalmente DLL de arquitetura errada."
+    }
+    if ($p.ExitCode -eq -1073741511) {
+        $Imports = @(Get-PeImports $FuseExe)
+        $ImportText = if ($Imports.Count) { " Imports: " + ($Imports -join ", ") } else { "" }
+        throw "Fuse-Nx nao inicia: Windows STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139). Verifique mistura de runtimes MINGW64/UCRT64.$ImportText"
     }
     if ($p.ExitCode -ne 0) {
         $Tail = if (Test-Path $ProbeErr) { (Get-Content $ProbeErr -Tail 20) -join [Environment]::NewLine } else { "" }
