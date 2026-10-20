@@ -389,12 +389,19 @@ function Find-MountedMainNpdm {
         }
         if ($Depth -ge 5) { continue }
 
-        $Children = @(Get-ChildItem -LiteralPath $Dir -Directory -ErrorAction SilentlyContinue)
+        # Fuse-Nx v1.1 has a Windows/FUSE quirk: readdir reports child
+        # directories with S_IFREG even though getattr reports S_IFDIR. As a
+        # result PowerShell's -Directory filter hides them. Enumerate every
+        # entry and ask the filesystem for its real type individually.
+        $Children = @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction SilentlyContinue)
         foreach ($Child in $Children) {
-            # Parsed RomFS folders can be enormous and never contain main.npdm.
-            # NCA/ExeFS container folders are shallow and should be traversed.
+            $ChildPath = $Child.FullName
+            if (-not (Test-Path -LiteralPath $ChildPath -PathType Container)) { continue }
+
+            # Parsed RomFS trees are enormous and never contain main.npdm.
+            # NCA/ExeFS/PFS container folders are shallow and should be traversed.
             if ($Child.Name -match "(?i)romfs$") { continue }
-            $Queue.Enqueue([PSCustomObject]@{ Path = $Child.FullName; Depth = $Depth + 1 })
+            $Queue.Enqueue([PSCustomObject]@{ Path = $ChildPath; Depth = $Depth + 1 })
         }
     }
     return $null
@@ -421,10 +428,24 @@ foreach ($SearchRoot in $SearchRoots) {
 # returns the first one. Scarlet base gamecards normally expose only one Program
 # NCA in /secure; title-id validation above prevents booting the wrong program.
 if (-not $ChosenNpdm) {
-    Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue
-    $Top = @(Get-ChildItem -LiteralPath ($MountPoint + "\") -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+    $Top = @(Get-ChildItem -LiteralPath ($MountPoint + "\") -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
     $TopText = if ($Top.Count) { $Top -join ", " } else { "(vazio)" }
-    throw "O XCI foi montado, mas nao encontrei main.npdm do Pokemon Scarlet (0100A3D008C5C000). Raiz virtual: $TopText"
+
+    # Capture a shallow diagnostic tree before unmounting; this makes the next
+    # failure actionable without asking the user to browse the transient drive.
+    $Diag = New-Object System.Collections.Generic.List[string]
+    foreach ($RootName in @("secure","normal","update")) {
+        $RootPath = Join-Path ($MountPoint + "\") $RootName
+        if (-not (Test-Path -LiteralPath $RootPath -PathType Container)) { continue }
+        foreach ($Entry in @(Get-ChildItem -LiteralPath $RootPath -Force -ErrorAction SilentlyContinue | Select-Object -First 20)) {
+            $Kind = if (Test-Path -LiteralPath $Entry.FullName -PathType Container) { "dir" } else { "file" }
+            $Diag.Add("$RootName/$($Entry.Name) [$Kind]")
+        }
+    }
+    $DiagText = if ($Diag.Count) { $Diag -join ", " } else { "(sem entradas diagnosticaveis)" }
+
+    Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue
+    throw "O XCI foi montado, mas nao encontrei main.npdm do Pokemon Scarlet (0100A3D008C5C000). Raiz virtual: $TopText. Arvore: $DiagText"
 }
 
 $ExeFs = Split-Path -Parent $ChosenNpdm
