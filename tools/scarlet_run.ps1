@@ -182,9 +182,58 @@ try {
         Remove-Item Env:LARECOMP_TF_DIAG_DIR -ErrorAction SilentlyContinue
     }
     if ($Profile) {
+        # A former diagnostic variable named LARECOMP_SLOW_FRAME_MS actually
+        # injected a real SDL_Delay after frame 2600. Never let an inherited
+        # value contaminate a performance capture.
+        Remove-Item Env:LARECOMP_SLOW_FRAME_MS -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_INJECT_FRAME_DELAY_MS -ErrorAction SilentlyContinue
+
+        $PerformanceStamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+        $PerformanceDir = Join-Path $RepoRoot ("build\scarlet-performance-" + $PerformanceStamp)
+        $null = New-Item -ItemType Directory -Path $PerformanceDir -Force
+
         $env:LARECOMP_HLE_PROF = '1'
-        $env:LARECOMP_VK_PROF = "1"
-        Write-Host "[scarlet-run] Perfil Vulkan ativo: tempos de CPU, GPU e apresentacao no log."
+        $env:LARECOMP_VK_PROF = '1'
+        $env:LARECOMP_FRAME_CSV = Join-Path $PerformanceDir 'frames.csv'
+        if (-not $env:LARECOMP_FNPROF) { $env:LARECOMP_FNPROF = '2860:2920' }
+        $env:LARECOMP_FNPROF_OUT = Join-Path $PerformanceDir 'fnprof.txt'
+        if (-not $env:LARECOMP_GPUPROF_AT) { $env:LARECOMP_GPUPROF_AT = '1200,2200,2900,4000' }
+
+        $RunInfo = [ordered]@{
+            StartedUtc = [DateTime]::UtcNow.ToString('o')
+            GitHead = $CurrentHead.Trim()
+            BuiltHead = $BuiltHeadNow
+            Backend = $Backend
+            Performance = [bool]$Performance
+            FunctionFrames = $env:LARECOMP_FNPROF
+            LogicalProcessors = [Environment]::ProcessorCount
+            Environment = [ordered]@{
+                LARECOMP_SCALE = $env:LARECOMP_SCALE
+                LARECOMP_NO_SMAA = $env:LARECOMP_NO_SMAA
+                LARECOMP_PERFORMANCE = $env:LARECOMP_PERFORMANCE
+                LARECOMP_VK_PROF = $env:LARECOMP_VK_PROF
+                LARECOMP_HLE_PROF = $env:LARECOMP_HLE_PROF
+                LARECOMP_FRAME_CSV = $env:LARECOMP_FRAME_CSV
+                LARECOMP_FNPROF = $env:LARECOMP_FNPROF
+                LARECOMP_FNPROF_OUT = $env:LARECOMP_FNPROF_OUT
+                LARECOMP_GPUPROF_AT = $env:LARECOMP_GPUPROF_AT
+            }
+        }
+        $RunInfo | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $PerformanceDir 'run.json') -Encoding UTF8
+
+        $MonitorScript = Join-Path $PSScriptRoot 'scarlet_performance_monitor.ps1'
+        if (Test-Path -LiteralPath $MonitorScript -PathType Leaf) {
+            $MonitorArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$MonitorScript`" -OutputDir `"$PerformanceDir`""
+            try {
+                $PerformanceMonitor = Start-Process -FilePath 'powershell.exe' -ArgumentList $MonitorArgs -WindowStyle Hidden -PassThru
+            }
+            catch {
+                Write-Host "[scarlet-run] Monitor do Windows nao iniciou: $_" -ForegroundColor Yellow
+            }
+        }
+
+        Write-Host "[scarlet-run] Perfil completo ativo: frames, CPU/threads, GPU, HLE e funcoes guest." -ForegroundColor Cyan
+        Write-Host "[scarlet-run] Captura: $PerformanceDir" -ForegroundColor Cyan
     }
     else {
         # Do not inherit profiling from an older PowerShell session. GPU timestamp
