@@ -105,7 +105,8 @@ typedef struct NvnWindow {
 
 typedef struct NvnSync {
     volatile int signaled;
-    volatile uint64_t seq;  // GPU submission this fence belongs to (renderer_fence_seq), 0 = none
+    volatile uint64_t seq;     // physical GPU submission this fence belongs to, 0 = none yet
+    volatile uint64_t ticket;  // async render-thread job that must run before seq is valid
 } NvnSync;
 
 // ---- command recording (stored in guest command memory)
@@ -149,6 +150,20 @@ typedef struct {
 // Pass that returned value to unpin(); the guest slot itself may be recycled.
 uint64_t nvn_cmdstream_pin(uint64_t handle);
 void nvn_cmdstream_unpin(uint64_t resolved);
+
+// Optional asynchronous Vulkan command-list executor. Scarlet's generated game
+// can keep doing CPU work while the renderer translates already-submitted NVN
+// lists. LARECOMP_RENDER_THREAD=0 restores the fully synchronous path.
+bool renderthread_active(void);
+bool renderthread_submit_batch(const uint64_t *resolved, int n);
+uint64_t renderthread_queue_fence(NvnSync *sync);
+void renderthread_wait_ticket(uint64_t ticket);
+void renderthread_present_sync(NvnTexture *tex);
+void renderthread_drain(void);
+void renderthread_gpu_sync(void);
+void renderthread_gpu_flush(void);
+void renderthread_gpu_wait_seq(uint64_t seq);
+void renderthread_reset(void);
 
 enum {
     CMD_END = 0, CMD_JUMP, CMD_CALL,

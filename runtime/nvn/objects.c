@@ -123,30 +123,27 @@ NVN(nvnQueueSubmitCommands) {
     const uint64_t *handles = AP(2);
     if (n <= 0 || !handles) return;
 
-    // Pin the complete submit batch before executing the first list. Scarlet
-    // records command buffers on worker threads; another worker may hand the
-    // same guest command-memory range back to NVN while this submit is still
-    // walking later handles. On real NVN the submit consumes a stable command
-    // stream. Keep our expanded host records equally stable for the whole batch.
+    // Pin the complete submit batch before handing any list to another host
+    // thread. Scarlet reuses command-memory slots aggressively; the render
+    // worker owns these references until it has consumed every list.
     uint64_t stack_resolved[256];
     uint64_t *resolved = n <= 256 ? stack_resolved : malloc((size_t)n * sizeof *resolved);
     if (!resolved) FATAL("nvn: failed to pin %d submitted command lists\n", n);
-
     for (int i = 0; i < n; i++) resolved[i] = nvn_cmdstream_pin(handles[i]);
 
-    for (int i = 0; i < n; i++) backend_execute(resolved[i]);
-
-    // pin() returns the stable host-chain start.  Unpin that exact value: the
-    // guest command-memory slot may already have been recycled/re-written by a
-    // recording worker by the time this submit completes.  Unpinning the guest
-    // handle leaked one ref per submitted list and made the host command pool
-    // grow until the 1 GiB safety cap.
-    for (int i = n - 1; i >= 0; i--) nvn_cmdstream_unpin(resolved[i]);
-
+    bool queued = renderthread_active() && renderthread_submit_batch(resolved, n);
+    if (!queued) {
+        // Thread creation/allocation failure falls back to the old path rather
+        // than losing GPU work. Drain first so ordering stays deterministic.
+        if (renderthread_active()) renderthread_drain();
+        for (int i = 0; i < n; i++) backend_execute(resolved[i]);
+        for (int i = n - 1; i >= 0; i--) nvn_cmdstream_unpin(resolved[i]);
+    }
+    // On success ownership of every pin moved to renderthread.c.
     if (resolved != stack_resolved) free(resolved);
 }
 NVN(nvnQueueFlush) { (void)c; }
-NVN(nvnQueueFinish) { (void)c; renderer_sync(); }
+NVN(nvnQueueFinish) { (void)c; renderthread_gpu_sync(); }
 
 static NvnSync *sync_of(uint64_t guest) {
     NvnSync *s = HOST(NvnSync, guest);
@@ -155,13 +152,28 @@ static NvnSync *sync_of(uint64_t guest) {
 }
 uint64_t renderer_fence_seq(void);
 void renderer_wait_seq(uint64_t seq);
-NVN(nvnQueueFenceSync) { NvnSync *s = sync_of(A(1)); s->signaled = 1; s->seq = renderer_fence_seq(); }
-void nvn_sync_set_seq(uint64_t guest, uint64_t seq) { NvnSync *s = sync_of(guest); s->signaled = 1; s->seq = seq; }
+NVN(nvnQueueFenceSync) {
+    NvnSync *s = sync_of(A(1));
+    s->signaled = 1;
+    if (renderthread_active()) {
+        s->seq = 0;
+        s->ticket = renderthread_queue_fence(s);
+    } else {
+        s->ticket = 0;
+        s->seq = renderer_fence_seq();
+    }
+}
+void nvn_sync_set_seq(uint64_t guest, uint64_t seq) {
+    NvnSync *s = sync_of(guest);
+    s->signaled = 1;
+    s->ticket = 0;
+    s->seq = seq;
+}
 NVN(nvnQueueWaitSync) { RET(1); }
 
 // ================================================================== sync / event
 NVN(nvnSyncInitialize) { SET_HOST(A(0), calloc(1, sizeof(NvnSync))); RET(1); }
-NVN(nvnSyncFinalize) { free(HOST(NvnSync, A(0))); SET_HOST(A(0), 0); }
+NVN(nvnSyncFinalize) { renderthread_drain(); free(HOST(NvnSync, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnSyncSetDebugLabel) { (void)c; }
 void renderer_flush(void);
 NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
@@ -171,9 +183,14 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     if (getenv("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
     static int whole = -1;  // LARECOMP_SYNC_ALL=1: old behaviour, wait for all submitted work
     if (whole < 0) whole = getenv("LARECOMP_SYNC_ALL") ? 1 : 0;
-    if (flush) renderer_flush();
-    else if (whole) renderer_sync();
-    else renderer_wait_seq(sync_of(A(0))->seq);  // only the submission that holds this fence
+    if (flush) renderthread_gpu_flush();
+    else if (whole) renderthread_gpu_sync();
+    else {
+        NvnSync *s = sync_of(A(0));
+        if (s->ticket) renderthread_wait_ticket(s->ticket);
+        else if (renderthread_active() && !s->seq) renderthread_drain();  // a CMD_FENCE_SYNC has not executed yet
+        renderthread_gpu_wait_seq(s->seq);
+    }
     RET(0);
 }
 NVN(nvnSyncCreateGLSync) { RET(0); }
@@ -220,7 +237,7 @@ NVN(nvnMemoryPoolInitialize) {
 }
 // Objects the game destroys (frame interpolation, exec.c: a recorded frame that may reference them is not replayed)
 uint64_t g_nvn_destroyed;
-NVN(nvnMemoryPoolFinalize) { g_nvn_destroyed++; free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); }
+NVN(nvnMemoryPoolFinalize) { renderthread_drain(); g_nvn_destroyed++; free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnMemoryPoolSetDebugLabel) { (void)c; }
 NVN(nvnMemoryPoolMap) { RET(HOST(NvnPool, A(0))->storage); }
 NVN(nvnMemoryPoolGetBufferAddress) { RET(HOST(NvnPool, A(0))->storage); }  // GPU address == CPU address
@@ -421,6 +438,7 @@ static void forget_texture_descriptors(NvnTexture *texture) {
 }
 
 NVN(nvnTextureFinalize) {
+    renderthread_drain();
     g_nvn_destroyed++;
     NvnTexture *t = HOST(NvnTexture, A(0));
     if (t) { forget_texture_descriptors(t); backend_texture_destroyed(t); free(t); }
@@ -638,7 +656,7 @@ NVN(nvnSamplerInitialize) {
     SET_HOST(A(0), d);
     RET(1);
 }
-NVN(nvnSamplerFinalize) { free(HOST(NvnSamplerDesc, A(0))); SET_HOST(A(0), 0); }
+NVN(nvnSamplerFinalize) { renderthread_drain(); free(HOST(NvnSamplerDesc, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnSamplerSetDebugLabel) { (void)c; }
 #define SMP HOST(NvnSamplerDesc, A(0))
 NVN(nvnSamplerGetMinMagFilter) { *(uint32_t *)AP(1) = SMP->min_filter; *(uint32_t *)AP(2) = SMP->mag_filter; }
@@ -722,6 +740,7 @@ NvnDescPool *nvn_find_pool(NvnDescPool **reg, uint64_t guest_pool) {
 // ================================================================== programs
 NVN(nvnProgramInitialize) { SET_HOST(A(0), calloc(1, sizeof(NvnProgram))); RET(1); }
 NVN(nvnProgramFinalize) {
+    renderthread_drain();
     NvnProgram *p = HOST(NvnProgram, A(0));
     if (p) for (int i = 0; i < 6; i++) nvn_diag_shader_release(&p->stages[i]);
     g_nvn_destroyed++; free(p); SET_HOST(A(0), 0);
@@ -891,7 +910,7 @@ NVN(nvnQueuePresentTexture) {
     g_last_interval = w->interval;
     { extern void fps60_present(void); fps60_present(); }
     present_pace(w->interval);
-    if (i >= 0 && i < w->num) backend_present(HOST(NvnTexture, w->textures[i]));
+    if (i >= 0 && i < w->num) renderthread_present_sync(HOST(NvnTexture, w->textures[i]));
 }
 
 // ================================================================== small state objects
