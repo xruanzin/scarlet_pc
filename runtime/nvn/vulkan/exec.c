@@ -2731,10 +2731,15 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         }
     }
 
-    // LARECOMP_VK_UBO_DIRECT=1 (experiment X3): bind the range in place in the imported guest heap, read when the GPU
-    // runs - as on the console - in case compute shaders write it after this point. Counted: direct vs copied.
+    // Bind aligned guest uniform buffers directly from the imported host heap.
+    // This matches the console's GPU-visible memory model and removes a hot per-draw
+    // guest_copy/transient allocation path.  The old snapshot path remains available
+    // with LARECOMP_VK_COPY_UBO=1 for A/B correctness diagnostics.
     static int direct = -1;
-    if (direct < 0) direct = getenv("LARECOMP_VK_UBO_DIRECT") ? atoi(getenv("LARECOMP_VK_UBO_DIRECT")) : 0;
+    if (direct < 0) {
+        const char *force = getenv("LARECOMP_VK_UBO_DIRECT");
+        direct = force ? atoi(force) != 0 : getenv("LARECOMP_VK_COPY_UBO") == NULL;
+    }
     if (direct) {
         extern bool vk_guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off);
         VkBuffer gb;
