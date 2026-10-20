@@ -3153,6 +3153,9 @@ static uint64_t descriptor_writes_hash(uint64_t seed, VkDescriptorSetLayout layo
 
 static VkDescriptorSet descriptor_reuse_lookup(VkDescriptorSetLayout layout, const VkWriteDescriptorSet *w, int n,
                                                 uint64_t *h1_out, uint64_t *h2_out) {
+    static int off = -1;
+    if (off < 0) off = getenv("LARECOMP_NO_DESC_REUSE") != NULL;
+    if (off) { *h1_out = *h2_out = 0; return VK_NULL_HANDLE; }
     uint64_t h1 = descriptor_writes_hash(0xcbf29ce484222325ull, layout, w, n);
     uint64_t h2 = descriptor_writes_hash(0x9e3779b97f4a7c15ull, layout, w, n);
     DescReuse *e = &sub()->desc_reuse[(uint32_t)(h1 ^ (h1 >> 32)) & (DESC_REUSE_CACHE - 1)];
@@ -3165,6 +3168,7 @@ static VkDescriptorSet descriptor_reuse_lookup(VkDescriptorSetLayout layout, con
 }
 
 static void descriptor_reuse_store(VkDescriptorSetLayout layout, VkDescriptorSet set, uint64_t h1, uint64_t h2) {
+    if (!h1) return;
     DescReuse *e = &sub()->desc_reuse[(uint32_t)(h1 ^ (h1 >> 32)) & (DESC_REUSE_CACHE - 1)];
     *e = (DescReuse){h1, h2, layout, set};
 }
