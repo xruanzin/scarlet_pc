@@ -114,6 +114,30 @@ function Get-PeImports {
     } | Where-Object { $_ } | Select-Object -Unique)
 }
 
+function Install-FuseNxCryptoRuntime {
+    $Bash = "C:\msys64\usr\bin\bash.exe"
+    if (-not (Test-Path -LiteralPath $Bash -PathType Leaf)) {
+        throw "MSYS2 nao encontrado em C:\msys64; nao consigo instalar automaticamente libgcrypt."
+    }
+
+    Write-Host "[scarlet-package] Instalando runtime criptografico do Fuse-Nx pelo MSYS2..." -ForegroundColor Cyan
+    $Cmd = "export PATH='/c/msys64/mingw64/bin:/c/msys64/usr/bin':\$PATH; pacman -S --needed --noconfirm mingw-w64-x86_64-libgcrypt"
+    & $Bash -lc $Cmd
+    if ($LASTEXITCODE -ne 0) {
+        throw "MSYS2 pacman falhou ao instalar mingw-w64-x86_64-libgcrypt (exit $LASTEXITCODE)."
+    }
+
+    $Required = @(
+        "C:\msys64\mingw64\bin\libgcrypt-20.dll",
+        "C:\msys64\mingw64\bin\libgpg-error-0.dll"
+    )
+    foreach ($Path in $Required) {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+            throw "Pacote instalado, mas a DLL esperada nao apareceu: $Path"
+        }
+    }
+}
+
 function Resolve-FuseNxDependencies {
     param([string]$FuseExe)
 
@@ -191,6 +215,15 @@ function Resolve-FuseNxDependencies {
     }
 
     if ($Missing.Count) {
+        $CryptoMissing = @($Missing | Where-Object { $_ -in @("libgcrypt-20.dll","libgpg-error-0.dll") })
+        if ($CryptoMissing.Count -gt 0 -and -not $script:FuseCryptoInstallAttempted) {
+            $script:FuseCryptoInstallAttempted = $true
+            Install-FuseNxCryptoRuntime
+
+            # Retry from scratch now that pacman populated mingw64\bin.
+            Resolve-FuseNxDependencies $FuseExe
+            return
+        }
         throw ("Dependencias do Fuse-Nx ausentes: " + ($Missing -join ", "))
     }
 
