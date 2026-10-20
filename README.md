@@ -410,3 +410,16 @@ seus autores, a quem vão todos os créditos. Testada com a versão 3.1 da tradu
 
 A documentação interna do projeto (histórico de cada correção, depuração, compilação) está em português, na pasta
 [docs/](docs).
+
+
+### Boot direto de XCI / NSP no Windows
+
+O runner do Scarlet aceita um dump próprio em `.xci` ou `.nsp` no lugar da pasta extraída. Na primeira execução ele usa `hactool` para preparar `exefs` e `romfs` em `build/package-cache`; os boots seguintes reutilizam o cache.
+
+```powershell
+.\tools\scarlet_run.ps1 -GameRoot "D:\Games\Pokemon Scarlet.xci"
+# ou:
+.\tools\scarlet_run.ps1 -Package "D:\Games\Pokemon Scarlet.nsp"
+```
+
+Coloque `hactool.exe` em `tools\hactool.exe` (ou use `-HactoolPath`) e use o seu próprio `prod.keys` em `%USERPROFILE%\.switch\prod.keys` (ou `-KeysPath`). NSPs com title rights podem precisar de `title.keys` ao lado de `prod.keys`. Nenhum jogo ou chave é incluído no projeto.

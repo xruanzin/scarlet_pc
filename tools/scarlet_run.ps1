@@ -15,6 +15,27 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+
+# GameRoot can be an extracted root (exefs/ + romfs/) or the user\'s own .xci/.nsp.
+$OriginalGameInput = $GameRoot
+if (Test-Path -LiteralPath $GameRoot -PathType Leaf) {
+    $Ext = [System.IO.Path]::GetExtension($GameRoot).ToLowerInvariant()
+    if ($Ext -notin @(".xci", ".nsp")) { throw "Arquivo de jogo nao suportado: $GameRoot. Use uma pasta extraida, .xci ou .nsp." }
+    $PrepareScript = Join-Path $PSScriptRoot "scarlet_prepare_package.ps1"
+    if (-not (Test-Path -LiteralPath $PrepareScript -PathType Leaf)) { throw "Preparador XCI/NSP ausente: $PrepareScript" }
+    $PrepareArgs = @{ PackagePath = (Resolve-Path -LiteralPath $GameRoot).Path }
+    if ($KeysPath) { $PrepareArgs.KeysPath = $KeysPath }
+    if ($HactoolPath) { $PrepareArgs.HactoolPath = $HactoolPath }
+    if ($PackageForceExtract) { $PrepareArgs.Force = $true }
+    Write-Host "[scarlet-run] Preparando pacote $Ext: $GameRoot" -ForegroundColor Cyan
+    $Prepared = @(& $PrepareScript @PrepareArgs)
+    if (-not $Prepared -or -not $Prepared[-1]) { throw "A preparacao do pacote nao retornou a pasta extraida." }
+    $GameRoot = [string]$Prepared[-1]
+    Write-Host "[scarlet-run] Pacote pronto: $GameRoot" -ForegroundColor Green
+} elseif (-not (Test-Path -LiteralPath $GameRoot -PathType Container)) {
+    throw "GameRoot nao encontrado: $GameRoot"
+}
+
 . (Join-Path $PSScriptRoot "scarlet_graphics_backend.ps1")
 if (-not $DirectXDirectory) { $DirectXDirectory = Join-Path $RepoRoot "tools\directx\mesa" }
 $Exe = Join-Path $RepoRoot "build\ScarletRecomp.exe"
@@ -39,20 +60,30 @@ if (Test-Path -LiteralPath $Exe -PathType Leaf) {
         Write-Host "[scarlet-run] Auto-build desativado por LARECOMP_SKIP_AUTO_BUILD=$env:LARECOMP_SKIP_AUTO_BUILD" -ForegroundColor Yellow
     }
     elseif (-not $BuiltHead -or $BuiltHead -ne $Head) {
-        Write-Host "[scarlet-run] EXE nao corresponde ao HEAD atual; recompilando runtime..." -ForegroundColor Yellow
-        $BuildScript = Join-Path $PSScriptRoot "scarlet_build_windows.ps1"
-        $ThinLtoMarker = Join-Path $RepoRoot "build\.thinlto_enabled"
-        if (Test-Path -LiteralPath $ThinLtoMarker -PathType Leaf) {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO
+        $NeedNativeBuild = $true
+        if ($BuiltHead -and $Head) {
+            & git -C $RepoRoot cat-file -e "$BuiltHead^{commit}" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $Changed = @(& git -C $RepoRoot diff --name-only $BuiltHead $Head 2>$null)
+                if ($LASTEXITCODE -eq 0) {
+                    $NativeChanged = @($Changed | Where-Object {
+                        $_ -match "^(runtime/|generated/)" -or $_ -match "^Makefile$" -or $_ -match "^tools/(gen[.]py|patches[.]py|gamelib_entry[.]c)$"
+                    })
+                    $NeedNativeBuild = $NativeChanged.Count -gt 0
+                }
+            }
         }
-        else {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime
+        if (-not $NeedNativeBuild) {
+            Write-Host "[scarlet-run] HEAD mudou apenas em scripts/docs; mantendo EXE/DLL ja compilados." -ForegroundColor DarkGray
+        } else {
+            Write-Host "[scarlet-run] EXE nao corresponde ao codigo nativo atual; recompilando runtime..." -ForegroundColor Yellow
+            $BuildScript = Join-Path $PSScriptRoot "scarlet_build_windows.ps1"
+            $ThinLtoMarker = Join-Path $RepoRoot "build\.thinlto_enabled"
+            if (Test-Path -LiteralPath $ThinLtoMarker -PathType Leaf) { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO }
+            else { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime }
+            if ($LASTEXITCODE -ne 0) { throw "Build do runtime falhou (exit $LASTEXITCODE). Envie scarlet_build.log." }
         }
-        if ($LASTEXITCODE -ne 0) {
-            throw "Build do runtime falhou (exit $LASTEXITCODE). Envie scarlet_build.log."
-        }
-    }
-}
+    }}
 
 foreach ($P in @($Exe, $GameDll, (Join-Path $ExeFs "main"), (Join-Path $ExeFs "main.npdm"))) {
     if (-not (Test-Path -LiteralPath $P)) {
@@ -111,6 +142,7 @@ if (Test-Path -LiteralPath $Log) {
 }
 
 Write-Host "[scarlet-run] Primeiro boot do Scarlet..." -ForegroundColor Cyan
+Write-Host "[scarlet-run] Game input: $OriginalGameInput"
 Write-Host "[scarlet-run] Game root: $GameRoot"
 Write-Host "[scarlet-run] Log: $Log"
 $CurrentHead = (& git -C $RepoRoot rev-parse HEAD 2>$null)
