@@ -257,12 +257,21 @@ static void hostseg_chain_append_locked(NvnCmdBuf *cb, int idx) {
     cb->host_chain_tail = idx;
 }
 
-static uint64_t hostseg_take(NvnCmdBuf *cb, uint32_t need, uint32_t *actual_size) {
+static uint64_t hostseg_take(NvnCmdBuf *cb, uint32_t need, uint32_t *actual_size, uint64_t replace_slot) {
     static uint64_t total;
     uint8_t *mem = NULL;
     int pick = -1;
     uint32_t want = hostseg_alloc_size(need);
     pthread_mutex_lock(&g_hostseg_lock);
+
+    // BeginRecording overwrites exactly one tiny guest CMD_JUMP slot. Recycle
+    // the previous stream for that slot while we already hold the allocator
+    // lock, then immediately reuse a free segment below. This replaces two
+    // lock acquisitions + a separate range walk on every recorded list.
+    if (replace_slot) {
+        int old_head = hostseg_head_from_slot_locked(replace_slot);
+        if (old_head >= 0) hostseg_release_chain_locked(old_head);
+    }
 
     pick = hostseg_best_free_locked(want);
     // Reclaim stale chains before growing a large backing pool. This is deliberately
@@ -452,10 +461,12 @@ NVN(nvnCommandBufferAddCommandMemory) {
     if (A(1) && size) mem = HOST(NvnPool, A(1))->storage + A(2);
 
     if (mem && size) {
-        // Reusing guest command memory makes every host segment hanging from
-        // that range dead as well. Do not reclaim while a recording is still
-        // being built; that recording may itself be backed by one of them.
-        if (!cb->recording) hostseg_release_range(mem, mem + size);
+        // Do not scan/recycle the whole guest command-memory grant here.
+        // Scarlet calls AddCommandMemory over a million times in a few minutes
+        // and only one 80-byte handle slot is actually overwritten by each
+        // BeginRecording. BeginRecording now recycles that exact slot under the
+        // same allocator lock used to take its replacement segment. Intact old
+        // handles remain valid until their slot is really overwritten.
         cb->guest_mem = mem;
         cb->guest_size = size;
         cb->used = 0;
@@ -501,7 +512,7 @@ static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
 
     if (!cb->mem || !cb->host_segment || cb->chunk_used + size + JUMP_RESERVE > cb->size) {
         uint32_t seg_size = 0;
-        uint64_t next = hostseg_take(cb, size + JUMP_RESERVE, &seg_size);
+        uint64_t next = hostseg_take(cb, size + JUMP_RESERVE, &seg_size, 0);
         if (cb->mem && cb->host_segment) {
             CmdRec *j = raw_rec(cb->mem + cb->chunk_used, CMD_JUMP, sizeof(CmdRec));
             j->x[0] = next;
@@ -599,11 +610,10 @@ NVN(nvnCommandBufferBeginRecording) {
     // per-list handle instead of our much larger CmdRec representation.
     if (have_slot) {
         uint64_t slot = cb->guest_mem + cb->used;
-        hostseg_release_range(slot, slot + sizeof(CmdRec));
         cb->host_origin_lo = slot;
         cb->host_origin_hi = slot + sizeof(CmdRec);
         uint32_t host_size = 0;
-        uint64_t host = hostseg_take(cb, JUMP_RESERVE, &host_size);
+        uint64_t host = hostseg_take(cb, JUMP_RESERVE, &host_size, slot);
         CmdRec *j = raw_rec(slot, CMD_JUMP, sizeof(CmdRec));
         j->x[0] = host;
         cb->used += sizeof(CmdRec);
@@ -618,7 +628,7 @@ NVN(nvnCommandBufferBeginRecording) {
         // is what previously exhausted the 256 MB host-segment pool.
         if (cb->guest_mem) cb->used = cb->guest_size;
         uint32_t host_size = 0;
-        uint64_t host = hostseg_take(cb, JUMP_RESERVE, &host_size);
+        uint64_t host = hostseg_take(cb, JUMP_RESERVE, &host_size, 0);
         cb->start = host;
         cb->mem = host;
         cb->size = host_size;
