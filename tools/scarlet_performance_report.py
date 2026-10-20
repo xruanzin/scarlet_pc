@@ -122,6 +122,34 @@ def summarize(directory):
             lines += [f'|{addr}|{count}|{lr}|']
     else:
         lines += ['Sem contagem: janela nao terminou, coleta desativada ou processo interrompido.']
+
+    hot = []
+    for m in re.finditer(r'\[fnprof-hot\]\s+(\d+)\s+([0-9a-fA-F]+)\s+(.+?)\s+<-\s+([0-9a-fA-F]+)\s+(.+)    (d/'renderer-timeline.txt').write_text('\n'.join(selected)+'\n',encoding='utf-8')
+    alerts = [line for line in log.splitlines() if re.search(r'FATAL|\[hang\]|no frame|no present|\[shader-slow\]|\[build-timeout\]|UNIMPLEMENTED|\[nvn-unimplemented\]|underrun',line,re.I)]
+    (d/'alerts.txt').write_text('\n'.join(alerts)+'\n',encoding='utf-8')
+    lines += ['', '## Renderizacao, esperas e alertas', '',
+              '- renderer-timeline.txt: CPU do backend por categoria (desenho, descritores, texturas, uploads, pipelines), GPU por intervalo e capturas esparsas de passes, conforme disponibilidade do runtime.',
+              '- alerts.txt: erros, travamentos, shaders lentos e chamadas nao implementadas encontradas no log.',
+              '- scarlet_boot.log: fonte completa, incluindo carregamento, servicos e mensagens do kernel.',
+              f'- Alertas encontrados: {len(alerts)}.', '',
+              'Limites: nao coleta stacks de CPU, uso de cada instrucao, VRAM por recurso ou todas as chamadas com argumentos. Para atribuicao exata de CPU por funcao sera necessario um perfil por amostragem no Windows. Nao conclua gargalo apenas pela maior contagem.', '']
+    (d/'report.md').write_text('\n'.join(lines),encoding='utf-8')
+    (d/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
+    return summary
+
+if __name__ == '__main__':
+    summarize(sys.argv[1])
+    print('Report:', Path(sys.argv[1])/'report.md')
+, log, re.M):
+        hot.append((int(m.group(1)), m.group(2), m.group(3), m.group(4), m.group(5)))
+    if hot:
+        lines += ['', '### Hotspots guest resolvidos', '',
+                  'Nomes vindos das tabelas de simbolos NSO quando disponiveis; main pode estar parcialmente stripped.', '',
+                  '|Entradas|Endereco|Funcao/simbolo|Caller LR|Caller/simbolo|',
+                  '|---|---|---|---|---|']
+        for count,addr,name,lr,caller in hot[:50]:
+            lines += [f'|{count}|{addr}|{name}|{lr}|{caller}|']
+
     selected = [line for line in log.splitlines() if line.startswith(('[vk] t=','[gpuprof]','[fnprof]'))]
     (d/'renderer-timeline.txt').write_text('\n'.join(selected)+'\n',encoding='utf-8')
     alerts = [line for line in log.splitlines() if re.search(r'FATAL|\[hang\]|no frame|no present|\[shader-slow\]|\[build-timeout\]|UNIMPLEMENTED|\[nvn-unimplemented\]|underrun',line,re.I)]
