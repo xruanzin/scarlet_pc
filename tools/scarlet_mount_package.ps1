@@ -34,25 +34,26 @@ function Find-ProdKeys {
 
 function Ensure-FuseNx {
     param([string]$Requested)
-    $Candidates = @()
-    if ($Requested) { $Candidates += $Requested }
-    if ($env:SCARLET_FUSENX) { $Candidates += $env:SCARLET_FUSENX }
-    $Candidates += @((Join-Path $RepoRoot "tools\fuse-nx\fuse-nx.exe"), (Join-Path $RepoRoot "tools\fuse-nx.exe"))
-    foreach ($Candidate in $Candidates) {
-        if ($Candidate -and (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return (Resolve-Path -LiteralPath $Candidate).Path }
-    }
-    $Cmd = Get-Command fuse-nx.exe -ErrorAction SilentlyContinue
-    if ($Cmd) { return $Cmd.Source }
 
-    $Dir = Join-Path $RepoRoot "tools\fuse-nx"
-    $Exe = Join-Path $Dir "fuse-nx.exe"
-    $Url = "https://github.com/averne/Fuse-Nx/releases/download/v1.1/fuse-nx.exe"
-    Write-Host "[scarlet-package] Fuse-Nx nao encontrado; baixando o executavel oficial v1.1 para Windows..." -ForegroundColor Cyan
-    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Exe
-    if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "Download do Fuse-Nx falhou." }
-    return $Exe
+    if ($Requested) {
+        if (-not (Test-Path -LiteralPath $Requested -PathType Leaf)) { throw "Fuse-Nx informado nao existe: $Requested" }
+        return (Resolve-Path -LiteralPath $Requested).Path
+    }
+    if ($env:SCARLET_FUSENX -and (Test-Path -LiteralPath $env:SCARLET_FUSENX -PathType Leaf)) {
+        return (Resolve-Path -LiteralPath $env:SCARLET_FUSENX).Path
+    }
+
+    $Patched = Join-Path $RepoRoot "tools\fuse-nx\fuse-nx-scarlet.exe"
+    if (-not (Test-Path -LiteralPath $Patched -PathType Leaf)) {
+        $Builder = Join-Path $PSScriptRoot "scarlet_build_fusenx.ps1"
+        if (-not (Test-Path -LiteralPath $Builder -PathType Leaf)) { throw "Builder Fuse-Nx ausente: $Builder" }
+        Write-Host "[scarlet-package] Preparando Fuse-Nx corrigido para NCAs modernos..." -ForegroundColor Cyan
+        $Built = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Builder)
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $Patched -PathType Leaf)) {
+            throw "Nao foi possivel preparar o Fuse-Nx corrigido. Veja build\fuse-nx-build.log."
+        }
+    }
+    return $Patched
 }
 
 function Ensure-WinFsp {
