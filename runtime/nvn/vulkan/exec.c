@@ -71,12 +71,22 @@ void vk_collect_dead(void);
 // Two batches of slots: recording a full batch must never wrap to one of its
 // already-ended, not-yet-submitted command buffers.
 #define SUBS (MAX_QUEUE_LISTS * 2)
+#define DESC_BATCH 16
+#define DESC_LAYOUT_CACHE 8
+typedef struct {
+    VkDescriptorSetLayout layout;
+    VkDescriptorSet set[DESC_BATCH];
+    uint8_t next, count;
+} DescBatch;
+
 typedef struct {
     VkCommandBuffer main, upload;
     bool main_begun, upload_begun, ts;  // ts: GPU timestamps written (profiling)
     uint64_t seq;
     VkDescriptorPool pools[16];
     int npools, cur_pool;
+    DescBatch desc_cache[DESC_LAYOUT_CACHE];
+    uint8_t desc_replace;
 } Sub;
 static Sub subs[SUBS];
 static int cur_sub;
@@ -90,6 +100,7 @@ _Static_assert(SUBS > MAX_QUEUE_LISTS, "queue batch must not wrap the slot ring"
 static VkCommandBufferSubmitInfo qbatch_cbs[QBATCH_MAX_CBS];
 static uint32_t qbatch_ncb, qbatch_lists;
 static uint64_t stat_logical_submits, stat_queue_batches;
+static uint64_t stat_desc_sets, stat_desc_alloc_calls;
 
 static int queue_batch_limit(void) {
     static int n = -1;
@@ -143,6 +154,8 @@ static Sub *sub(void) {
         }
         for (int i = 0; i < s->npools; i++) vkResetDescriptorPool(g_vk.dev, s->pools[i], 0);
         s->cur_pool = 0;
+        memset(s->desc_cache, 0, sizeof s->desc_cache);
+        s->desc_replace = 0;
         s->seq = submit_seq + 1;
         s->main_begun = s->upload_begun = false;
     }
@@ -558,6 +571,30 @@ void renderer_wait_seq(uint64_t seq) {
 
 VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
     Sub *s = sub();
+
+    // Reuse a preallocated set for this layout before entering the Vulkan
+    // driver again. Vertex/fragment layouts repeat thousands of times in a
+    // Scarlet frame, so batching turns up to 16 vkAllocateDescriptorSets calls
+    // into one without changing descriptor contents or lifetime.
+    DescBatch *slot = NULL;
+    for (int i = 0; i < DESC_LAYOUT_CACHE; i++) {
+        DescBatch *d = &s->desc_cache[i];
+        if (d->layout == layout) {
+            if (d->next < d->count) {
+                stat_desc_sets++;
+                return d->set[d->next++];
+            }
+            slot = d;
+            break;
+        }
+        if (!slot && !d->layout) slot = d;
+    }
+    if (!slot) {
+        slot = &s->desc_cache[s->desc_replace++ % DESC_LAYOUT_CACHE];
+        slot->layout = VK_NULL_HANDLE;
+        slot->next = slot->count = 0;
+    }
+
     for (;;) {
         if (s->cur_pool == s->npools) {
             if (s->npools == 16) FATAL("descriptor pools exhausted\n");
@@ -569,11 +606,26 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
                                              .poolSizeCount = 6, .pPoolSizes = sizes};
             VK_CHECK(vkCreateDescriptorPool(g_vk.dev, &ci, NULL, &s->pools[s->npools++]));
         }
-        VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-                                          .descriptorPool = s->pools[s->cur_pool], .descriptorSetCount = 1, .pSetLayouts = &layout};
-        VkDescriptorSet set;
-        VkResult r = vkAllocateDescriptorSets(g_vk.dev, &ai, &set);
-        if (r == VK_SUCCESS) return set;
+
+        VkDescriptorSetLayout layouts[DESC_BATCH];
+        for (int i = 0; i < DESC_BATCH; i++) layouts[i] = layout;
+        VkDescriptorSetAllocateInfo ai = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = s->pools[s->cur_pool],
+            .descriptorSetCount = DESC_BATCH,
+            .pSetLayouts = layouts
+        };
+        stat_desc_alloc_calls++;
+        VkResult r = vkAllocateDescriptorSets(g_vk.dev, &ai, slot->set);
+        if (r == VK_SUCCESS) {
+            slot->layout = layout;
+            slot->next = 1;
+            slot->count = DESC_BATCH;
+            stat_desc_sets++;
+            return slot->set[0];
+        }
+        // A batch may not fit at the tail of an otherwise usable pool. Move
+        // on exactly as the old single-set allocator did on allocation failure.
         s->cur_pool++;
     }
 }
@@ -1233,6 +1285,10 @@ const char *renderer_stats(void) {
         snprintf(stats_text + n, sizeof stats_text - n, ", qbatch %llu lists/%llu queue",
                  (unsigned long long)stat_logical_submits,
                  (unsigned long long)stat_queue_batches);
+        n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n, " desc %llu/%llu alloc",
+                 (unsigned long long)stat_desc_sets,
+                 (unsigned long long)stat_desc_alloc_calls);
     }
     {
         uint32_t bf[4] = {0}; uint64_t bc[4] = {0};
@@ -1336,6 +1392,7 @@ const char *renderer_stats(void) {
     stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = stat_raster_discard_sets = stat_raster_discard_on = stat_a2c_1x = 0;
     stat_vkbar_full = stat_vkbar_graphics = stat_vkbar_compute = stat_vkbar_transfer = stat_vkbar_upload = 0;
     stat_logical_submits = stat_queue_batches = 0;
+    stat_desc_sets = stat_desc_alloc_calls = 0;
     stat_tf_dep_vbuf = stat_tf_dep_cbuf = stat_tf_dep_sbuf = stat_tf_dep_gmem = stat_tf_dep_op = stat_tf_dep_submit = stat_tf_dep_rt = 0;
     return stats_text;
 }
