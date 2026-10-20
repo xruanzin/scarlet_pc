@@ -505,7 +505,7 @@ NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; }
 // Reserve one expanded host record. Real NVN commands are much smaller than
 // CmdRec, so exhausting a host segment must never call the game's command-memory
 // callback: that callback budgets for Maxwell command bytes, not our structures.
-static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
+static CmdRec *rec_uninit(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     (void)c;
     uint64_t total = sizeof(CmdRec) + (uint64_t)extra + 7;
     if (total > UINT32_MAX) FATAL("nvn: expanded command record too large (%llu bytes)\n",
@@ -525,8 +525,18 @@ static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
         cb->host_segment = true;
     }
 
-    CmdRec *r = raw_rec(cb->mem + cb->chunk_used, op, size);
+    CmdRec *r = (CmdRec *)(uintptr_t)(cb->mem + cb->chunk_used);
+    r->op = op;
+    r->size = size;
     cb->chunk_used += size;
+    return r;
+}
+
+// BARRIER/END/OBJECT are tiny control records whose handlers expect omitted
+// fields to be zero. Keep that guarantee only for those uncommon records.
+static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
+    CmdRec *r = rec_uninit(c, cb, op, extra);
+    memset(r->x, 0, sizeof r->x + sizeof r->f);
     return r;
 }
 
@@ -682,7 +692,9 @@ static Snap snap(Cpu *c) {
     return s;
 }
 static CmdRec *record(Cpu *c, uint32_t op, uint32_t extra, Snap *s) {
-    CmdRec *r = rec(c, cb_of(s->x[0]), op, extra);
+    // s->x[1..7] and s->f[0..3] overwrite the entire fixed payload, so do
+    // not pre-zero 72 bytes for every recorded NVN command.
+    CmdRec *r = rec_uninit(c, cb_of(s->x[0]), op, extra);
     memcpy(r->x, s->x + 1, sizeof r->x);
     memcpy(r->f, s->f, sizeof r->f);
     return r;
