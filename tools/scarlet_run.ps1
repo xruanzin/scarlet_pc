@@ -236,10 +236,15 @@ try {
         Write-Host "[scarlet-run] Captura: $PerformanceDir" -ForegroundColor Cyan
     }
     else {
-        # Do not inherit profiling from an older PowerShell session. GPU timestamp
-        # queries and per-frame profiling are useful for diagnostics, not normal play.
+        # Do not inherit profiling or old delay injection from an earlier
+        # PowerShell session. These are diagnostics, never normal-play options.
         Remove-Item Env:LARECOMP_VK_PROF -ErrorAction SilentlyContinue
         Remove-Item Env:LARECOMP_HLE_PROF -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_FRAME_CSV -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_FNPROF -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_FNPROF_OUT -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_GPUPROF_AT -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_SLOW_FRAME_MS -ErrorAction SilentlyContinue
     }
     $Code = Invoke-ScarletGraphicsBackend -Backend $Backend -DirectXDirectory $DirectXDirectory `
         -Log $Log -NoFallback:$NoBackendFallback -Run {
