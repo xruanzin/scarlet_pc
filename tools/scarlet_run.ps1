@@ -131,8 +131,26 @@ if (Test-Path -LiteralPath $Exe -PathType Leaf) {
         $NeedNativeBuild = $true
         $RuntimeOnlyBuild = $false
         if ($BuiltHead -and $Head) {
-            & git -C $RepoRoot cat-file -e "$BuiltHead^{commit}" 2>$null
-            if ($LASTEXITCODE -eq 0) {
+            # The local checkout may be shallow while .runtime_build_head still
+            # points at an older commit. Avoid revision syntax such as ^{commit}
+            # here (PowerShell/native argument handling is fragile around the
+            # braces) and validate the raw object id instead.
+            $ObjectType = @(& git -C $RepoRoot cat-file -t $BuiltHead 2>$null)
+            $ObjectOk = ($LASTEXITCODE -eq 0 -and $ObjectType -contains "commit")
+
+            if (-not $ObjectOk) {
+                Write-Host "[scarlet-run] Commit do EXE nao esta no clone local; buscando $BuiltHead..." -ForegroundColor DarkGray
+                & git -C $RepoRoot fetch --no-tags --depth=1 origin $BuiltHead 2>$null
+                $FetchCode = $LASTEXITCODE
+                $ObjectType = @(& git -C $RepoRoot cat-file -t $BuiltHead 2>$null)
+                $ObjectOk = ($LASTEXITCODE -eq 0 -and $ObjectType -contains "commit")
+
+                if (-not $ObjectOk) {
+                    Write-Host "[scarlet-run] Nao foi possivel recuperar o commit antigo (fetch exit $FetchCode); usando build completo por seguranca." -ForegroundColor Yellow
+                }
+            }
+
+            if ($ObjectOk) {
                 $Changed = @(& git -C $RepoRoot diff --name-only $BuiltHead $Head 2>$null)
                 if ($LASTEXITCODE -eq 0) {
                     $NativeChanged = @($Changed | Where-Object {
