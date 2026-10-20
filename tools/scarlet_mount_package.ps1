@@ -302,8 +302,12 @@ function Test-FuseNxRuntime {
 
 function Get-ProgramId {
     param([string]$Npdm)
-    if (-not (Test-Path -LiteralPath $Npdm -PathType Leaf)) { return [UInt64]0 }
-    $Fs = [System.IO.File]::Open($Npdm, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    $Fs = $null
+    try {
+        $Fs = [System.IO.File]::Open($Npdm, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    } catch {
+        return [UInt64]0
+    }
     try {
         $Meta = New-Object byte[] 0x80
         if ($Fs.Read($Meta,0,$Meta.Length) -ne $Meta.Length) { return [UInt64]0 }
@@ -497,9 +501,8 @@ if ($Ext -eq ".nsp") {
         foreach ($Virtual in $VirtualMatches) {
             if (-not $Virtual) { continue }
             $HostPath = To-HostPath $MountPoint ([string]$Virtual)
-            if (-not (Test-Path -LiteralPath $HostPath -PathType Leaf)) { continue }
-
             $ProgramId = Get-ProgramId $HostPath
+            if ($ProgramId -eq [UInt64]0) { continue }
             Write-Host ("[scarlet-package] NSP candidato: " + $Virtual + " program_id=0x" + $ProgramId.ToString("x16")) -ForegroundColor DarkGray
             if ($ProgramId -eq [UInt64]0x0100A3D008C5C000) {
                 $ChosenNpdm = $HostPath
@@ -517,11 +520,12 @@ if (-not $ChosenNpdm -and $Ext -eq ".nsp") {
         if (-not (Test-Path -LiteralPath $RootEntry.FullName -PathType Container)) { continue }
 
         $ExeSection = Join-Path $RootEntry.FullName "section 0"
-        $ExeRaw = Join-Path $RootEntry.FullName "section 0.nsp"
-        $RomRaw = Join-Path $RootEntry.FullName "section 1.romfs"
         if (-not (Test-Path -LiteralPath $ExeSection -PathType Container)) { continue }
-        if (-not (Test-Path -LiteralPath $ExeRaw -PathType Leaf)) { continue }
-        if (-not (Test-Path -LiteralPath $RomRaw -PathType Leaf)) { continue }
+
+        $SectionEntries = @(Get-ChildItem -LiteralPath $RootEntry.FullName -Force -ErrorAction SilentlyContinue)
+        $HasExeRaw = @($SectionEntries | Where-Object { $_.Name -ieq "section 0.nsp" }).Count -gt 0
+        $HasRomRaw = @($SectionEntries | Where-Object { $_.Name -ieq "section 1.romfs" }).Count -gt 0
+        if (-not $HasExeRaw -or -not $HasRomRaw) { continue }
 
         Write-Host ("[scarlet-package] NSP Program NCA candidato: " + $RootEntry.Name) -ForegroundColor DarkGray
 
@@ -529,6 +533,8 @@ if (-not $ChosenNpdm -and $Ext -eq ".nsp") {
             Where-Object { $_.Name -ieq "main.npdm" } | Select-Object -First 1)
         if (-not $NpdmEntry.Count) { continue }
 
+        # WinFsp/FUSE may disagree with PowerShell's PathType Leaf for a file
+        # that is perfectly readable. Get-ProgramId opens it directly.
         $ProgramId = Get-ProgramId $NpdmEntry[0].FullName
         Write-Host ("[scarlet-package] ExeFS candidato: " + $ExeSection + " program_id=0x" + $ProgramId.ToString("x16")) -ForegroundColor DarkGray
         if ($ProgramId -eq [UInt64]0x0100A3D008C5C000) {
