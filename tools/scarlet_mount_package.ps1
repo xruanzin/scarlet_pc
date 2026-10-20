@@ -121,7 +121,7 @@ function Install-FuseNxCryptoRuntime {
     }
 
     Write-Host "[scarlet-package] Instalando runtime criptografico do Fuse-Nx pelo MSYS2..." -ForegroundColor Cyan
-    $Cmd = "export PATH='/c/msys64/mingw64/bin:/c/msys64/usr/bin':\$PATH; pacman -S --needed --noconfirm mingw-w64-x86_64-libgcrypt"
+    $Cmd = "export PATH='/c/msys64/mingw64/bin:/c/msys64/usr/bin':`$PATH; pacman -S --needed --noconfirm mingw-w64-x86_64-libgcrypt"
     & $Bash -lc $Cmd
     if ($LASTEXITCODE -ne 0) {
         throw "MSYS2 pacman falhou ao instalar mingw-w64-x86_64-libgcrypt (exit $LASTEXITCODE)."
