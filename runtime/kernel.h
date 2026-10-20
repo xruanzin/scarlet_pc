@@ -32,6 +32,8 @@ struct KThread {
     uint32_t wait_tag, wait_result;
     KThread *wnext;
     KThread *snext;        // in WaitSynchronization (g_syncwaiters)
+    const uint32_t *sync_hs;  // wait handles, valid only while linked; g_klock
+    int32_t sync_n;
     pthread_cond_t cond;   // each thread sleeps on its own condition; wakers signal it directly
     // in-place reboot (kernel_stop_threads): thread_main's setjmp point, where the thread unwinds to and ends
     jmp_buf unwind;
