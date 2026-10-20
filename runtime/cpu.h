@@ -31,8 +31,8 @@ _Static_assert(offsetof(Cpu, v) == 512, "v");
 
 typedef void (*GuestFn)(Cpu *);
 
-// WindowSmash-style monomorphic inline cache for one indirect guest branch
-// site. The generated DLL keeps one tiny cache next to each hot BLR/BR. A
+// WindowSmash-style monomorphic inline cache for one indirect guest call
+// site. The generated DLL keeps one tiny cache next to each hot BLR. A
 // hit avoids the shared dispatch hash/table entirely; misses still go through
 // dispatch.c, which deliberately never puts HLE/native overrides in this cache.
 typedef struct {
