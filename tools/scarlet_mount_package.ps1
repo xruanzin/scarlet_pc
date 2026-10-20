@@ -512,58 +512,76 @@ if ($Ext -eq ".nsp") {
     }
 }
 
-# For NSP, identify the package title from its parsed Application CNMT first.
-# This is more reliable than opening main.npdm through PowerShell/.NET over
-# WinFsp, while still validating that the package really is Scarlet base.
+# NSP: avoid PowerShell/WinFsp type probes entirely. Fuse-Nx already
+# enumerates the virtual tree correctly, so identify Scarlet from the ticket
+# rights-id prefix and identify the Program NCA from the ExeFS/RomFS shape.
 if (-not $ChosenNpdm -and $Ext -eq ".nsp") {
-    $ExpectedProgramId = [UInt64]0x0100A3D008C5C000
-    $NspProgramId = [UInt64]0
+    $ExpectedProgramHex = "0100a3d008c5c000"
+    $RootNow = @(Get-ChildItem -LiteralPath ($MountPoint + "\") -Force -ErrorAction SilentlyContinue)
+    $RootNames = @($RootNow | ForEach-Object { $_.Name.ToLowerInvariant() })
 
-    foreach ($RootEntry in @(Get-ChildItem -LiteralPath ($MountPoint + "\") -Force -ErrorAction SilentlyContinue)) {
-        if (-not (Test-Path -LiteralPath $RootEntry.FullName -PathType Container)) { continue }
-        $Section0 = Join-Path $RootEntry.FullName "section 0"
-        if (-not (Test-Path -LiteralPath $Section0 -PathType Container)) { continue }
-
-        foreach ($Item in @(Get-ChildItem -LiteralPath $Section0 -Force -ErrorAction SilentlyContinue)) {
-            if ($Item.Name -match "(?i)^Application_([0-9a-f]{16})[.]cnmt$") {
-                try { $NspProgramId = [Convert]::ToUInt64($Matches[1], 16) } catch { $NspProgramId = [UInt64]0 }
-                if ($NspProgramId) {
-                    Write-Host ("[scarlet-package] NSP Application CNMT: program_id=0x" + $NspProgramId.ToString("x16")) -ForegroundColor DarkGray
-                }
+    $TitleConfirmed = $false
+    foreach ($Name in $RootNames) {
+        if ($Name -match "^([0-9a-f]{16})[0-9a-f]{16}[.]tik$") {
+            $TicketProgram = $Matches[1]
+            Write-Host ("[scarlet-package] NSP ticket: program_id=0x" + $TicketProgram) -ForegroundColor DarkGray
+            if ($TicketProgram -eq $ExpectedProgramHex) {
+                $TitleConfirmed = $true
                 break
             }
         }
-        if ($NspProgramId) { break }
     }
 
-    if ($NspProgramId -and $NspProgramId -ne $ExpectedProgramId) {
-        Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue
-        throw ("NSP pertence a outro titulo: program_id=0x" + $NspProgramId.ToString("x16") + ", esperado 0x0100a3d008c5c000.")
+    # Some ticketless NSPs still expose Application_<programid>.cnmt. Search
+    # one shallow level using only enumeration, not PathType.
+    if (-not $TitleConfirmed) {
+        foreach ($RootEntry in $RootNow) {
+            $Children = @()
+            try { $Children = @(Get-ChildItem -LiteralPath $RootEntry.FullName -Force -ErrorAction Stop) } catch { continue }
+            foreach ($Child in $Children) {
+                if ($Child.Name -ne "section 0") { continue }
+                $Grand = @()
+                try { $Grand = @(Get-ChildItem -LiteralPath $Child.FullName -Force -ErrorAction Stop) } catch { continue }
+                foreach ($Item in $Grand) {
+                    if ($Item.Name -match "(?i)^Application_([0-9a-f]{16})[.]cnmt$") {
+                        $CnmtProgram = $Matches[1].ToLowerInvariant()
+                        Write-Host ("[scarlet-package] NSP Application CNMT: program_id=0x" + $CnmtProgram) -ForegroundColor DarkGray
+                        if ($CnmtProgram -eq $ExpectedProgramHex) { $TitleConfirmed = $true }
+                        break
+                    }
+                }
+                if ($TitleConfirmed) { break }
+            }
+            if ($TitleConfirmed) { break }
+        }
     }
 
-    if ($NspProgramId -eq $ExpectedProgramId) {
-        foreach ($RootEntry in @(Get-ChildItem -LiteralPath ($MountPoint + "\") -Force -ErrorAction SilentlyContinue)) {
-            if (-not (Test-Path -LiteralPath $RootEntry.FullName -PathType Container)) { continue }
+    if ($TitleConfirmed) {
+        foreach ($RootEntry in $RootNow) {
+            # Raw .nca/.tik/.cert entries are files; parsed NCA containers use
+            # the same hash without the extension. Simply try enumerating.
+            if ($RootEntry.Name -match "[.](nca|tik|cert)$") { continue }
+
+            $NcaEntries = @()
+            try { $NcaEntries = @(Get-ChildItem -LiteralPath $RootEntry.FullName -Force -ErrorAction Stop) } catch { continue }
+            $NcaNames = @($NcaEntries | ForEach-Object { $_.Name.ToLowerInvariant() })
+            if ($NcaNames -notcontains "section 0") { continue }
+            if ($NcaNames -notcontains "section 1.romfs") { continue }
 
             $ExeSection = Join-Path $RootEntry.FullName "section 0"
-            if (-not (Test-Path -LiteralPath $ExeSection -PathType Container)) { continue }
+            $ExeEntries = @()
+            try { $ExeEntries = @(Get-ChildItem -LiteralPath $ExeSection -Force -ErrorAction Stop) } catch { continue }
+            $ExeNames = @($ExeEntries | ForEach-Object { $_.Name.ToLowerInvariant() })
 
-            $ExeEntries = @(Get-ChildItem -LiteralPath $ExeSection -Force -ErrorAction SilentlyContinue)
-            $Names = @($ExeEntries | ForEach-Object { $_.Name.ToLowerInvariant() })
-            if ($Names -notcontains "main.npdm" -or $Names -notcontains "main") { continue }
-            if ($Names -notcontains "sdk" -and $Names -notcontains "subsdk0") { continue }
+            if ($ExeNames -notcontains "main" -or $ExeNames -notcontains "main.npdm") { continue }
+            if ($ExeNames -notcontains "sdk" -and $ExeNames -notcontains "subsdk0") { continue }
 
-            $RootNames = @(Get-ChildItem -LiteralPath $RootEntry.FullName -Force -ErrorAction SilentlyContinue |
-                ForEach-Object { $_.Name.ToLowerInvariant() })
-            if ($RootNames -notcontains "section 1.romfs") { continue }
-
-            $NpdmEntry = @($ExeEntries | Where-Object { $_.Name -ieq "main.npdm" } | Select-Object -First 1)
-            if (-not $NpdmEntry.Count) { continue }
-
-            Write-Host ("[scarlet-package] NSP Program NCA: " + $RootEntry.Name + " (ExeFS + RomFS)") -ForegroundColor Green
-            $ChosenNpdm = $NpdmEntry[0].FullName
+            $ChosenNpdm = Join-Path $ExeSection "main.npdm"
+            Write-Host ("[scarlet-package] NSP Program NCA: " + $RootEntry.Name + " (main/main.npdm + RomFS)") -ForegroundColor Green
             break
         }
+    } else {
+        Write-Host "[scarlet-package] NSP nao confirmou o Title ID do Scarlet pelo ticket/CNMT." -ForegroundColor DarkGray
     }
 }
 
@@ -642,10 +660,28 @@ if (-not $ChosenNpdm) {
 
 $ExeFs = Split-Path -Parent $ChosenNpdm
 $NcaRoot = Split-Path -Parent $ExeFs
+$RomFsImage = $null
+
+# Program NSPs expose RomFS as section 1.romfs next to section 0 ExeFS.
+# Prefer the exact path and open it directly; do not trust WinFsp file-type
+# classification.
+if ($Ext -eq ".nsp") {
+    $DirectRom = Join-Path $NcaRoot "section 1.romfs"
+    try {
+        $DirectStream = [IO.File]::Open($DirectRom,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+        try {
+            $DirectHeader = New-Object byte[] 8
+            if ($DirectStream.Read($DirectHeader,0,8) -eq 8 -and [BitConverter]::ToUInt64($DirectHeader,0) -eq 0x50) {
+                $RomFsImage = $DirectRom
+            }
+        } finally { $DirectStream.Dispose() }
+    } catch {}
+}
+
 $RomCandidates = @(Get-ChildItem -LiteralPath $NcaRoot -Force -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match "(?i)[.]romfs$" })
-$RomFsImage = $null
 foreach ($Candidate in $RomCandidates) {
+    if ($RomFsImage) { break }
     try {
         $Stream = [IO.File]::Open($Candidate.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
         try {
@@ -659,7 +695,12 @@ if (-not $RomFsImage) {
     throw "Program NCA encontrado, mas nenhuma secao RomFS virtual valida foi exposta."
 }
 $RomFsDir = Join-Path $NcaRoot ([IO.Path]::GetFileNameWithoutExtension($RomFsImage))
-if (-not (Test-Path -LiteralPath $RomFsDir -PathType Container)) {
+$RomTreeVisible = $false
+try {
+    $null = @(Get-ChildItem -LiteralPath $RomFsDir -Force -ErrorAction Stop | Select-Object -First 1)
+    $RomTreeVisible = $true
+} catch {}
+if (-not $RomTreeVisible) {
     Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue
     throw "A arvore RomFS virtual nao foi exposta em $RomFsDir"
 }
