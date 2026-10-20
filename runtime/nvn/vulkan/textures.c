@@ -157,9 +157,30 @@ uint64_t renderer_present_count(void);
 
 static bool tex_scalable(const NvnTexture *t) {
     if (getenv("LARECOMP_NO_SCALE")) return false;
-    if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width < 32 || t->height < 16) return false;
+    if (t->target != 1 || t->samples > 1 || t->width < 32 || t->height < 16) return false;
     float a = (float)t->width / (float)t->height;
-    return a > 1.74f && a < 1.81f;
+    if (!(a > 1.74f && a < 1.81f)) return false;
+
+    if (t->flags & 8) return true;
+
+    // Scarlet's principal HDR lighting target is a 1920x1080 B10G11R11
+    // surface (guest format 0x3f). The guest does not set the generic scalable
+    // usage bit on this target, so Performance mode previously left the most
+    // expensive full-screen deferred-lighting pass at 1080p while the rest of
+    // the colour chain ran at 960x540. GPU captures show that single pass can
+    // consume 4.5-10.8 ms on Vega 7. It is a colour render target sampled by
+    // later post-process passes, so the existing rscale machinery is sufficient
+    // to keep its logical 1920x1080 coordinates while allocating it at the
+    // selected internal resolution. Scope the override to Performance mode and
+    // the exact HDR shape/format; normal mode preserves guest allocation rules.
+    bool perf_hdr = getenv("LARECOMP_PERFORMANCE") &&
+                    t->format == 0x3f && t->width == 1920 && t->height == 1080;
+    if (perf_hdr) {
+        static int logged;
+        if (!logged++) LOG("[vk] Performance mode: scaling Scarlet 1920x1080 HDR lighting target\n");
+        return true;
+    }
+    return false;
 }
 
 bool renderer_texture_first_write(NvnTexture *t) {
