@@ -24,7 +24,38 @@ function Find-Hactool {
     $Cmd = Get-Command hactool.exe -ErrorAction SilentlyContinue
     if (-not $Cmd) { $Cmd = Get-Command hactool -ErrorAction SilentlyContinue }
     if ($Cmd) { return $Cmd.Source }
-    throw "hactool nao encontrado. Coloque hactool.exe em tools\hactool.exe ou informe -HactoolPath."
+
+    # Windows convenience: fetch the official prebuilt release from SciresM when
+    # the user has not installed hactool yet. This downloads only the open-source
+    # tool; game files and keys are never downloaded or bundled by this project.
+    if ($env:OS -eq "Windows_NT") {
+        $ToolDir = Join-Path $RepoRoot "tools\hactool"
+        $ToolExe = Join-Path $ToolDir "hactool.exe"
+        $Zip = Join-Path $ToolDir "hactool-1.4.0-win.zip"
+        $Tmp = Join-Path $ToolDir "_extract"
+        $Url = "https://github.com/SciresM/hactool/releases/download/1.4.0/hactool-1.4.0-win.zip"
+        try {
+            Write-Host "[scarlet-package] hactool nao encontrado; baixando a build oficial 1.4.0 para Windows..." -ForegroundColor Cyan
+            New-Item -ItemType Directory -Force -Path $ToolDir | Out-Null
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Zip
+            Remove-Item -LiteralPath $Tmp -Recurse -Force -ErrorAction SilentlyContinue
+            Expand-Archive -LiteralPath $Zip -DestinationPath $Tmp -Force
+            $Downloaded = Get-ChildItem -LiteralPath $Tmp -Recurse -File -Filter "hactool.exe" | Select-Object -First 1
+            if (-not $Downloaded) { throw "o ZIP oficial nao continha hactool.exe" }
+            Copy-Item -LiteralPath $Downloaded.FullName -Destination $ToolExe -Force
+            Remove-Item -LiteralPath $Tmp -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $Zip -Force -ErrorAction SilentlyContinue
+            Write-Host "[scarlet-package] hactool instalado em $ToolExe" -ForegroundColor Green
+            return $ToolExe
+        } catch {
+            Remove-Item -LiteralPath $Tmp -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $Zip -Force -ErrorAction SilentlyContinue
+            throw "Nao consegui baixar/extrair o hactool oficial automaticamente: $($_.Exception.Message). Informe -HactoolPath se ja tiver uma copia."
+        }
+    }
+
+    throw "hactool nao encontrado. Informe -HactoolPath."
 }
 
 function Find-ProdKeys {

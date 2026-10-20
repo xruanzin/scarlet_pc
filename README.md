@@ -422,4 +422,4 @@ O runner do Scarlet aceita um dump próprio em `.xci` ou `.nsp` no lugar da past
 .\tools\scarlet_run.ps1 -Package "D:\Games\Pokemon Scarlet.nsp"
 ```
 
-Coloque `hactool.exe` em `tools\hactool.exe` (ou use `-HactoolPath`) e use o seu próprio `prod.keys` em `%USERPROFILE%\.switch\prod.keys` (ou `-KeysPath`). NSPs com title rights podem precisar de `title.keys` ao lado de `prod.keys`. Nenhum jogo ou chave é incluído no projeto.
+No Windows, se `hactool.exe` não estiver instalado, o runner baixa automaticamente a build oficial 1.4.0 publicada por SciresM e a guarda em `tools\hactool\hactool.exe`. Também é possível usar `-HactoolPath`. Use o seu próprio `prod.keys` em `%USERPROFILE%\.switch\prod.keys` (ou `-KeysPath`). NSPs com title rights podem precisar de `title.keys` ao lado de `prod.keys`. Nenhum jogo ou chave é incluído no projeto.
