@@ -139,6 +139,7 @@ static Hh hh_all[MAX_HH_THREADS];
 static _Atomic unsigned hh_nall;
 static __thread Hh hh_fallback;
 static __thread Hh *hh_current;
+static bool hh_enabled;  // expensive recent-HLE history is opt-in
 
 static void hhist_push(const char *name, Cpu *c) {
     if (!hh_current) {
@@ -181,6 +182,10 @@ static void hhist_print(const HhSnapshot *h, int last) {
     }
 }
 static void hhist_dump(void) {
+    if (!hh_enabled) {
+        fprintf(stderr, "recent HLE history disabled (set LARECOMP_HLE_HISTORY=1 for diagnostics)\n");
+        return;
+    }
     HhSnapshot h;
     if (!hhist_snapshot(hh_current, &h)) return;
     fprintf(stderr, "last %u host calls:\n", h.n < HHIST ? (unsigned)h.n : HHIST);
@@ -291,6 +296,8 @@ void *hle_alloc(uint64_t size) {
 
 void dispatch_init(void) {  // (after gamelib_load)
     const GameLibTables *g = gamelib_tables();
+    hh_enabled = getenv("LARECOMP_HLE_HISTORY") != NULL;
+    if (hh_enabled) LOG("[dispatch] recent-HLE history enabled (diagnostic overhead active)\n");
     memset(dcache, 0, sizeof dcache);
     if (!exact_tab) exact_tab = calloc(EXACT_TAB, sizeof *exact_tab);
     else memset(exact_tab, 0, EXACT_TAB * sizeof *exact_tab);
@@ -340,7 +347,7 @@ static GuestFn dispatch_slow(Cpu *c, RtCallCache *site) {
         rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)
         int i = (int)((pc - HLE_BASE) / 16);
         if (i < hle_count) {
-            hhist_push(hle_slots[i].name, c);
+            if (__builtin_expect(hh_enabled, 0)) hhist_push(hle_slots[i].name, c);
             if (hle_slots[i].fn) {
                 static __thread int profile = -1;
                 if (profile < 0) profile = getenv("LARECOMP_HLE_PROF") != NULL;
