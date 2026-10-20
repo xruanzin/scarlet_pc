@@ -1,4 +1,5 @@
 // NSO loading, relocation, and symbol resolution.
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -37,22 +38,41 @@ static size_t lz4_decompress(const uint8_t *src, size_t srclen, uint8_t *dst, si
     return d - dst;
 }
 
+static int g_read_errno;
+static size_t g_read_got;
+
 static uint8_t *read_file(const char *path, size_t *len) {
+    g_read_errno = 0;
+    g_read_got = 0;
     FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
+    if (!f) { g_read_errno = errno; return NULL; }
     fseek(f, 0, SEEK_END);
-    *len = ftell(f);
+    long n = ftell(f);
     fseek(f, 0, SEEK_SET);
-    uint8_t *p = malloc(*len);
-    fread(p, 1, *len, f);
+    if (n < 0) { g_read_errno = errno; fclose(f); return NULL; }
+    *len = (size_t)n;
+    uint8_t *p = malloc(*len ? *len : 1);
+    if (!p) { g_read_errno = ENOMEM; fclose(f); return NULL; }
+    g_read_got = fread(p, 1, *len, f);
+    if (g_read_got != *len) {  // short read (e.g. a virtual/network volume): fail loudly instead of parsing garbage
+        g_read_errno = ferror(f) ? errno : EIO;
+        fclose(f);
+        free(p);
+        return NULL;
+    }
     fclose(f);
     return p;
 }
 
 static void load_nso(Module *m, const char *path, uint64_t base) {
-    size_t len;
+    size_t len = 0;
     uint8_t *raw = read_file(path, &len);
-    if (!raw || memcmp(raw, "NSO0", 4)) FATAL("cannot load %s\n", path);
+    if (!raw)
+        FATAL("cannot read %s: %s (errno %d, %zu of %zu bytes read)\n", path, strerror(g_read_errno), g_read_errno,
+              g_read_got, len);
+    if (len < 4 || memcmp(raw, "NSO0", 4))
+        FATAL("cannot load %s: not an NSO (size %zu, first bytes %02x %02x %02x %02x; NSO0 expected: a wrong or "
+              "still-encrypted program NCA?)\n", path, len, raw[0], raw[1], raw[2], raw[3]);
     uint32_t flags = *(uint32_t *)(raw + 0xC);
     uint32_t seg[3][3];  // file_off, mem_off, size
     for (int i = 0; i < 3; i++) memcpy(seg[i], raw + 0x10 + i * 0x10, 12);
