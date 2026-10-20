@@ -91,7 +91,23 @@ function Ensure-WinFsp {
     }
 
     $LocalDll = Join-Path (Split-Path -Parent $FuseExe) "winfsp-x64.dll"
-    Copy-Item -LiteralPath $Dll -Destination $LocalDll -Force
+    if (-not (Test-Path -LiteralPath $LocalDll -PathType Leaf)) {
+        Copy-Item -LiteralPath $Dll -Destination $LocalDll -Force
+    } else {
+        # A previous Fuse-Nx process may still have this DLL mapped. There is
+        # no reason to overwrite a working local copy on every launch.
+        try {
+            $LocalInfo = Get-Item -LiteralPath $LocalDll -ErrorAction Stop
+            $SourceInfo = Get-Item -LiteralPath $Dll -ErrorAction Stop
+            if ($LocalInfo.Length -ne $SourceInfo.Length) {
+                try {
+                    Copy-Item -LiteralPath $Dll -Destination $LocalDll -Force -ErrorAction Stop
+                } catch {
+                    Write-Host "[scarlet-package] WinFsp local em uso; mantendo a copia existente." -ForegroundColor DarkGray
+                }
+            }
+        } catch {}
+    }
     Write-Host "[scarlet-package] WinFsp runtime: $Dll" -ForegroundColor DarkGray
 }
 
@@ -309,6 +325,28 @@ function To-HostPath {
 
 $Keys = Find-ProdKeys $KeysPath
 $FuseNx = Ensure-FuseNx $FuseNxPath
+
+function Stop-StaleFuseNxProcesses {
+    param([string]$ExePath)
+
+    $Resolved = $null
+    try { $Resolved = (Resolve-Path -LiteralPath $ExePath -ErrorAction Stop).Path.ToLowerInvariant() } catch { return }
+
+    foreach ($P in @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like "fuse-nx*" })) {
+        $Path = $null
+        try { $Path = $P.Path } catch {}
+        if (-not $Path) { continue }
+
+        try { $Path = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path.ToLowerInvariant() } catch { continue }
+        if ($Path -ne $Resolved) { continue }
+
+        Write-Host "[scarlet-package] Encerrando montagem Fuse-Nx antiga (PID $($P.Id))..." -ForegroundColor DarkGray
+        Stop-Process -Id $P.Id -Force -ErrorAction SilentlyContinue
+        try { Wait-Process -Id $P.Id -Timeout 5 -ErrorAction SilentlyContinue } catch {}
+    }
+}
+
+Stop-StaleFuseNxProcesses $FuseNx
 Ensure-WinFsp $FuseNx
 Resolve-FuseNxDependencies $FuseNx
 Test-FuseNxRuntime $FuseNx
@@ -334,6 +372,18 @@ function Quote-Arg([string]$Value) { return ([char]34) + $Value + ([char]34) }
 $Arguments = "-k " + (Quote-Arg $Keys) + " mount -r " + (Quote-Arg $PackagePath) + " " + (Quote-Arg $MountPoint)
 Write-Host "[scarlet-package] Montando diretamente em $MountPoint (zero extracao)..." -ForegroundColor Cyan
 $Proc = Start-Process -FilePath $FuseNx -ArgumentList $Arguments -RedirectStandardOutput $MountOut -RedirectStandardError $MountErr -WindowStyle Hidden -PassThru
+
+# From this point on, any terminating error must release the transient WinFsp
+# mount. The parent runner only receives ProcessId after this helper succeeds,
+# so failures inside this script otherwise leave fuse-nx.exe and its DLLs locked.
+trap {
+    $Failure = $_
+    if ($Proc -and -not $Proc.HasExited) {
+        Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue
+        try { Wait-Process -Id $Proc.Id -Timeout 5 -ErrorAction SilentlyContinue } catch {}
+    }
+    throw $Failure
+}
 
 $Mounted = $false
 $RootEntries = @()
