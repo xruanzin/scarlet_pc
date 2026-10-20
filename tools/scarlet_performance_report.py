@@ -100,6 +100,53 @@ def summarize(directory):
     else:
         lines += ['Contadores GPU indisponiveis ou sem amostras. Consulte monitor-errors.txt e os timestamps Vulkan no log.']
     log = (d/'scarlet_boot.log').read_text(encoding='utf-8-sig',errors='replace') if (d/'scarlet_boot.log').exists() else ''
+    sync = defaultdict(lambda: {'wall_ms': 0.0, 'calls': 0})
+    vk_barriers = {'full': 0, 'scoped_calls': 0, 'image_dependencies': 0, 'windows': 0}
+    for line in log.splitlines():
+        if line.startswith('[sync-prof]'):
+            for name, ms, count in re.findall(r'([a-z-]+)=([\d.]+)ms/(\d+)', line):
+                value = number(ms)
+                if value is not None:
+                    sync[name]['wall_ms'] += value
+                    sync[name]['calls'] += int(count)
+        if line.startswith('[vk-sync]'):
+            m = re.search(r'full=(\d+) scoped-calls=(\d+) image-dependencies=(\d+)', line)
+            if m:
+                for key, value in zip(('full', 'scoped_calls', 'image_dependencies'), m.groups()):
+                    vk_barriers[key] += int(value)
+                vk_barriers['windows'] += 1
+    summary['synchronization'] = dict(sync)
+    summary['vulkan_barriers'] = vk_barriers if vk_barriers['windows'] else None
+    lines += ['', '## Sincronizacao e apresentacao', '',
+              'Tempos inclusivos de parede em intervalos concluidos, nao CPU ativa. Escopos se sobrepoem; nao some as linhas. A ultima janela pode faltar ao encerrar.', '']
+    descriptions = {
+        'big-lock': 'Espera para adquirir a trava global de gravacao',
+        'present-gate': 'Espera por outra apresentacao/reinicio da janela',
+        'interp-sleep': 'Espera deliberada entre imagens interpoladas, com a trava global liberada',
+        'frame-begin': 'Preparacao do frame: slot GPU, swapchain e acquire',
+        'acquire': 'vkAcquireNextImageKHR e eventual recriacao da swapchain',
+        'queue-present': 'Tempo dentro de vkQueuePresentKHR (driver/compositor)',
+        'backend-present': 'Apresentacao completa, incluindo locks e esperas internas',
+        'guest-pace': 'Controle de ritmo pedido pelo jogo antes da fila de renderizacao',
+        'present-ticket': 'Fila e execucao do present; inclui trabalhos anteriores e o backend',
+        'gpu-wait': 'Espera de CPU pelo semaforo timeline da GPU',
+    }
+    if sync:
+        lines += ['|Escopo|Parede registrada ms|Chamadas|Significado|', '|---|---|---|---|']
+        for name, value in sorted(sync.items(), key=lambda item: item[1]['wall_ms'], reverse=True):
+            lines += [f"|{name}|{value['wall_ms']:.3f}|{value['calls']}|{descriptions.get(name, 'Escopo do runtime')}|"]
+        lines += ['', 'Contadores concorrentes podem cair em janelas vizinhas. GPU ociosa e tempo alto de present, sozinhos, nao identificam a causa.', '']
+    else:
+        lines += ['Sem contadores de espera separados: runtime antigo, perfil desligado ou janela incompleta. Nao equivale a tempo zero.', '']
+    if vk_barriers['windows']:
+        lines += [f"Barreiras dos helpers instrumentados em {vk_barriers['windows']} janelas: "
+                  f"{vk_barriers['full']} completas; {vk_barriers['scoped_calls']} chamadas com escopo de imagem "
+                  f"({vk_barriers['image_dependencies']} dependencias de imagens).",
+                  'Transicoes de layout e outras barreiras locais fora desses helpers nao entram nesse total.', '']
+    else:
+        lines += ['Sem contagem das barreiras Vulkan emitidas pelos helpers nesta versao.', '']
+    lines += ['`nvn-barrier-flags` (antigo `barrier`) conta comandos NVN e suas flags; flags zero nao chamam `vk_full_barrier` neste executor.',
+              '`rdiscard` conta o estado de rasterizer discard, usado por transform feedback; nao mede passes jogados fora.', '']
     hle = defaultdict(lambda:[0.,0])
     for ms, count, name in re.findall(r'\[hle-prof\] ([\d.]+) ms (\d+) calls (\S+)',log):
         hle[name][0] += float(ms); hle[name][1] += int(count)
@@ -189,12 +236,12 @@ def summarize(directory):
                     except ValueError: pass
             lines += [f'- {pf.name}: {len(top)} entradas de topo preservadas; veja o arquivo completo e fnprof-inspect.txt.']
 
-    selected = [line for line in log.splitlines() if line.startswith(('[vk] t=','[gpuprof]','[fnprof]','[fnprof-auto]'))]
+    selected = [line for line in log.splitlines() if line.startswith(('[vk] t=','[gpuprof]','[fnprof]','[fnprof-auto]','[sync-prof]','[vk-sync]','[vk-sync-mode]'))]
     (d/'renderer-timeline.txt').write_text('\n'.join(selected)+'\n',encoding='utf-8')
     alerts = [line for line in log.splitlines() if re.search(r'FATAL|\[hang\]|no frame|no present|\[shader-slow\]|\[build-timeout\]|UNIMPLEMENTED|\[nvn-unimplemented\]|underrun|\*\*\* exception',line,re.I)]
     (d/'alerts.txt').write_text('\n'.join(alerts)+'\n',encoding='utf-8')
     lines += ['', '## Renderizacao, esperas e alertas', '',
-              '- renderer-timeline.txt: CPU do backend por categoria, GPU por intervalo e capturas esparsas de passes.',
+              '- renderer-timeline.txt: tempos do backend por categoria, esperas, barreiras instrumentadas, GPU por intervalo e capturas esparsas de passes.',
               '- alerts.txt: erros, excecoes, travamentos, shaders lentos e chamadas nao implementadas encontradas no log.',
               '- fnprof-inspect.txt: simbolos e disassembly dos hotspots mais frequentes quando a coleta terminou.',
               '- scarlet_boot.log: fonte completa.',

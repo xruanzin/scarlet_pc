@@ -3,9 +3,9 @@
 // views), exec.c (command execution: passes, draws, clears, copies, compute), shaders.c (GLSL -> SPIR-V, programs,
 // pipelines). Mirrors the Metal backend's behaviour; differences are noted where they happen.
 //
-// Synchronisation model: every image lives in VK_IMAGE_LAYOUT_GENERAL, and a full memory barrier separates
-// render passes, copies and dispatches (Metal tracks these hazards itself). Submissions are numbered; a timeline
-// semaphore signals each number, which is what NVN fences (renderer_fence_seq / renderer_wait_seq) wait for.
+// Synchronisation model: game images live in VK_IMAGE_LAYOUT_GENERAL. Known image consumers use scoped
+// dependencies; guest render passes and compute retain full barriers for bindless/SSBO inputs. A timeline semaphore
+// signals each numbered submission, which is what NVN fences (renderer_fence_seq / renderer_wait_seq) wait for.
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
@@ -61,6 +61,7 @@ uint64_t vk_pending_seq(void);        // number the pending submission will get
 uint64_t vk_completed_seq(void);
 void vk_wait_seq(uint64_t seq);
 void vk_full_barrier(VkCommandBuffer cb);
+void vk_scoped_image_barriers(VkCommandBuffer cb, uint32_t n, const VkImageMemoryBarrier2 *barriers);
 void vk_end_pass(void);
 void vk_big_lock(void);    // serializes renderer recording / present across threads (exec.c)
 void vk_big_unlock(void);
@@ -124,3 +125,6 @@ VkShaderModule vk_builtin_shader(const char *name);  // internal shaders (clear,
 
 // ---- device / window (device.c)
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h);
+
+// Outside a rendering instance: prepare a known image for fragment sampling.
+void vk_sample_image(VkCommandBuffer cb, TexBackend *b);

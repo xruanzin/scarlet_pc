@@ -18,6 +18,8 @@
 #include "storage_ranges.h"
 #include "../indirect.h"
 #include "vk.h"
+#include "sync_scope.h"
+#include "sync_profile.h"
 #include "../renderer.h"
 #include "../../settings.h"
 
@@ -116,7 +118,9 @@ void vk_wait_seq(uint64_t seq) {
     VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_vk.timeline,
                               .pValues = &seq};
     uint64_t t0 = SDL_GetTicksNS();
+    uint64_t sync_start = vk_sync_profile_begin();
     VkResult r = vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
+    vk_sync_profile_end(SYNC_GPU_WAIT, sync_start);
     stat_wait_ns += SDL_GetTicksNS() - t0;
     cum_wait += SDL_GetTicksNS() - t0;
     if (r == VK_TIMEOUT) LOG("[vk] GPU did not finish submission %llu within 10 s (device lost?)\n", (unsigned long long)seq);
@@ -181,12 +185,55 @@ VkCommandBuffer vk_upload_cmd(void) {
     return s->upload;
 }
 
+static uint64_t stat_full_barriers, stat_image_dependencies, stat_scoped_barrier_calls;
+
 void vk_full_barrier(VkCommandBuffer cb) {
+    stat_full_barriers++;
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                            .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                            .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
     vkCmdPipelineBarrier2(cb, &di);
+}
+
+// Only use these for consumers whose images are all enumerated. Guest render
+// passes / bindless compute retain the full fallback: an attachment list alone
+// does not describe their texture, SSBO, indirect or transform-feedback inputs.
+void vk_scoped_image_barriers(VkCommandBuffer cb, uint32_t n, const VkImageMemoryBarrier2 *barriers) {
+    static int legacy = -1;
+    if (legacy < 0) { const char *e = getenv("LARECOMP_FULL_BARRIERS"); legacy = e && atoi(e) != 0; }
+    if (!n) return;
+    if (legacy) { vk_full_barrier(cb); return; }
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = n, .pImageMemoryBarriers = barriers};
+    vkCmdPipelineBarrier2(cb, &di);
+    stat_scoped_barrier_calls++;
+    stat_image_dependencies += n;
+}
+
+static VkImageMemoryBarrier2 image_access(TexBackend *b, VkPipelineStageFlags2 stage, VkAccessFlags2 access) {
+    VkImageSubresourceRange range = {b->aspect, 0, b->levels, 0, b->layers};
+    return vk_image_dependency(b->image, range, stage, access);
+}
+
+static void transfer_images(VkCommandBuffer cb, TexBackend *src, TexBackend *dst) {
+    VkImageMemoryBarrier2 barriers[2];
+    uint32_t n = 0;
+    // Copy, blit and resolve are all covered by ALL_TRANSFER. Full subresources
+    // preserve depth/stencil and array/mip dependencies when views alias.
+    if (src && dst && src->image == dst->image) {
+        barriers[n++] = image_access(src, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    } else {
+        if (src) barriers[n++] = image_access(src, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        if (dst) barriers[n++] = image_access(dst, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    }
+    vk_scoped_image_barriers(cb, n, barriers);
+}
+
+void vk_sample_image(VkCommandBuffer cb, TexBackend *b) {
+    VkImageMemoryBarrier2 barrier = image_access(b, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    vk_scoped_image_barriers(cb, 1, &barrier);
 }
 
 static void ring_retire(void);
@@ -1040,6 +1087,11 @@ static void save_pipeline_cache(void *a) {
 }
 
 const char *renderer_stats(void) {
+    vk_sync_profile_report();
+    LOG("[vk-sync] emitted full=%llu scoped-calls=%llu image-dependencies=%llu (NVN barrier flags are separate guest commands)\n",
+        (unsigned long long)stat_full_barriers, (unsigned long long)stat_scoped_barrier_calls,
+        (unsigned long long)stat_image_dependencies);
+    stat_full_barriers = stat_scoped_barrier_calls = stat_image_dependencies = 0;
     if (getenv("LARECOMP_HLE_PROF")) rt_hle_profile_report();
     // The pipeline cache was written only at a clean exit: a crash or a killed process lost every pipeline built in
     // the session, and the next one popped in again. Save it on a worker once a burst of new pipelines settles
@@ -1104,7 +1156,7 @@ const char *renderer_stats(void) {
         }
         if (bc[0]) {
             size_t n = strlen(stats_text);
-            snprintf(stats_text + n, sizeof stats_text - n, " [barrier");
+            snprintf(stats_text + n, sizeof stats_text - n, " [nvn-barrier-flags");
             for (int k = 0; k < 4 && bc[k]; k++) {
                 n = strlen(stats_text);
                 snprintf(stats_text + n, sizeof stats_text - n, " %#x:%llu", bf[k], (unsigned long long)bc[k]);
@@ -1203,6 +1255,9 @@ static void st_defaults(void) {
 }
 
 void vk_exec_init(void) {
+    vk_sync_profile_init();
+    const char *full = getenv("LARECOMP_FULL_BARRIERS");
+    LOG("[vk-sync-mode] scoped-images=%s\n", full && atoi(full) ? "off" : "on");
     prof = getenv("LARECOMP_VK_PROF") != NULL;
     if (prof) {
         prof_up_ns = 0;
@@ -2357,7 +2412,7 @@ static void resolve_feedback(Prog *pr) {
             vk_end_pass();
             TexBackend *dst = snapshot_image(t, src);
             VkCommandBuffer cb = vk_cmd();
-            vk_full_barrier(cb);
+            transfer_images(cb, src, dst);
             gp_mark(cb, "feedback snapshot %ux%u fmt %d", src->width, src->height, src->format);
             // VkImageSubresourceLayers permits only one aspect per copy region.
             // Both planes must survive: the lighting pass reads stencil material
@@ -4179,7 +4234,7 @@ static void copy_buffer_to_texture(uint64_t src, const TexRefRec *dst) {
     uint32_t out_bpb = fi->bpb == 3 ? 4 : fi->bpb;
     uint32_t nz = (uint32_t)rg[5];
     VkCommandBuffer cb = vk_cmd();
-    vk_full_barrier(cb);
+    transfer_images(cb, NULL, b);
     uint64_t out_row = (uint64_t)wb * out_bpb;
     VkSpan s = vk_transient(out_row * hb * nz, 16);
     for (uint32_t z = 0; z < nz; z++)
@@ -4211,6 +4266,8 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     float tsx, tsy;
     renderer_texture_scale(t, &tsx, &tsy);
     VkCommandBuffer cb = vk_cmd();
+    // Readbacks reuse one shared buffer. Keep its ordering as well as the
+    // image dependency until that buffer's hazards have their own tracker.
     vk_full_barrier(cb);
     VkImage srcimg = b->image;
     VmaAllocation small_mem = NULL;
@@ -4225,7 +4282,10 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
         VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)b->width, (int32_t)b->height, 1}},
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)t->width, (int32_t)t->height, 1}}};
         vkCmdBlitImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, srcimg, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
-        vk_full_barrier(cb);
+        VkImageMemoryBarrier2 ready = vk_image_dependency(srcimg,
+            (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+            VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        vk_scoped_image_barriers(cb, 1, &ready);
     }
     bool array = b->layers > 1 && b->depth == 1;
     uint32_t nz = (uint32_t)rg[5];
@@ -4291,7 +4351,7 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
             dt->height, dt->format, dlv, dr[0], dr[1], dr[3], dr[4], d->width, d->height, sx0, sy0, sw, sh, dx0, dy0, dw, dh,
             (unsigned long long)flags);
     VkCommandBuffer cb = vk_cmd();
-    vk_full_barrier(cb);
+    transfer_images(cb, s, d);
     VkImageAspectFlags sa = s->aspect, da = d->aspect;
     if (s->samples > 1 && d->samples == 1 && sw == dw && sh == dh && s->format == d->format && !(sa & VK_IMAGE_ASPECT_DEPTH_BIT)) {
         VkImageResolve rv = {.srcSubresource = {sa, slv, sly, 1}, .srcOffset = {sx0, sy0, 0}, .dstSubresource = {da, dlv, dly, 1},
@@ -4458,7 +4518,7 @@ static VkImageView post_view(TexBackend *d) {
 }
 
 // SMAA's lookup textures (runtime/nvn/smaa_data.c): 0 = area (160 x 560 R8G8), 1 = search (64 x 16 R8), uploaded once.
-static VkImageView smaa_lut(int i) {
+static TexBackend *smaa_lut(int i) {
     static TexBackend t[2];
     TexBackend *d = &t[i];
     if (!d->image) {
@@ -4479,15 +4539,20 @@ static VkImageView smaa_lut(int i) {
         VkBufferImageCopy c = {.bufferOffset = s.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, h, 1}};
         vkCmdCopyBufferToImage(cb, s.buf, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     }
-    return post_view(d);
+    return d;
 }
 
 // One post pass (outside the window image's rendering): srcs (bindings 0..n-1) -> dst, fragment shader `fs`.
 // clear: start from zero (SMAA's edge pass only writes edge pixels; its weights / output read them).
-static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *srcs, int n, TexBackend *dst, const float pc[8],
+static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *srcs, TexBackend *const *images, int n, TexBackend *dst, const float pc[8],
                       bool clear) {
     VkPipeline pipe = post_pipeline(fs);  // (before the rendering begins: created inside it, the NVIDIA driver crashed)
-    vk_full_barrier(cb);
+    VkImageMemoryBarrier2 barriers[4];
+    for (int i = 0; i < n; i++)
+        barriers[i] = image_access(images[i], VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    barriers[n] = image_access(dst, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    vk_scoped_image_barriers(cb, (uint32_t)n + 1, barriers);
     VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = post_view(dst),
                                     .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
                                     .loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
@@ -4520,6 +4585,7 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
 // size in the window (its crop is drawn into the viewport).
 static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, double oh_d) {
     VkImageView v = raw_view(b);
+    TexBackend *output = b;
     bool smaa = g_settings.antialias == AA_SMAA && getenv("LARECOMP_NO_SMAA") == NULL;
     uint32_t ow = (uint32_t)lround(ow_d), oh = (uint32_t)lround(oh_d);
     if (ow > 16384) ow = 16384;
@@ -4535,11 +4601,15 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
         TexBackend *edges = post_image(0, b->width, b->height), *weights = post_image(1, b->width, b->height);
         TexBackend *out = post_image(2, b->width, b->height);
         VkImageView in[3] = {v};
-        post_pass(cb, "smaa_edge.frag", in, 1, edges, m, true);
-        VkImageView wi[3] = {post_view(edges), smaa_lut(0), smaa_lut(1)};
-        post_pass(cb, "smaa_weight.frag", wi, 3, weights, m, true);
+        TexBackend *in_images[] = {b};
+        post_pass(cb, "smaa_edge.frag", in, in_images, 1, edges, m, true);
+        TexBackend *wi_images[] = {edges, smaa_lut(0), smaa_lut(1)};
+        VkImageView wi[3] = {post_view(edges), post_view(wi_images[1]), post_view(wi_images[2])};
+        post_pass(cb, "smaa_weight.frag", wi, wi_images, 3, weights, m, true);
         VkImageView bi[3] = {v, post_view(weights)};
-        post_pass(cb, "smaa_blend.frag", bi, 2, out, m, false);
+        TexBackend *bi_images[] = {b, weights};
+        post_pass(cb, "smaa_blend.frag", bi, bi_images, 2, out, m, false);
+        output = out;
         v = post_view(out);
     }
     if (fsr) {
@@ -4547,13 +4617,16 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
         TexBackend *e = post_image(3, ow, oh), *r = post_image(4, ow, oh);
         float pe[8] = {iw / ow, ih / oh, 0.5f * iw / ow - 0.5f, 0.5f * ih / oh - 0.5f, iw, ih};
         VkImageView ei[3] = {v};
-        post_pass(cb, "easu.frag", ei, 1, e, pe, false);
+        TexBackend *ei_images[] = {output};
+        post_pass(cb, "easu.frag", ei, ei_images, 1, e, pe, false);
         float pr[8] = {exp2f(-0.2f), 0, 0, 0, (float)ow, (float)oh};  // (sharpness 0.2 stops: AMD's default)
         VkImageView ri_[3] = {post_view(e)};
-        post_pass(cb, "rcas.frag", ri_, 1, r, pr, false);
+        TexBackend *ri_images[] = {e};
+        post_pass(cb, "rcas.frag", ri_, ri_images, 1, r, pr, false);
+        output = r;
         v = post_view(r);
     }
-    vk_full_barrier(cb);
+    vk_sample_image(cb, output);
     vk_frame_resume();
     {
         static uint32_t piw, pih, pow_, poh;
@@ -5040,7 +5113,8 @@ static void vk_exec_diag_leave(bool enabled) {
 // command buffer, pass, descriptor pools, ...) is global: Scarlet's overlapping backend_execute / present calls
 // interleaved commands into one VkCommandBuffer and crashed inside the driver (amdvlk64 null access in
 // vk_frame_begin, called from the UI thread while a render thread was recording). Recursive: present can run
-// exec code. Lock order: vk_big_lock, then g_present_lock.
+// exec code. Present gate (device.c) must be acquired BEFORE vk_big_lock.
+// No executor holding this lock may acquire the present gate.
 static pthread_mutex_t g_vk_big;
 static pthread_once_t g_vk_big_once = PTHREAD_ONCE_INIT;
 static void vk_big_init(void) {
@@ -5052,7 +5126,9 @@ static void vk_big_init(void) {
 }
 void vk_big_lock(void) {
     pthread_once(&g_vk_big_once, vk_big_init);
+    uint64_t t = vk_sync_profile_begin();
     pthread_mutex_lock(&g_vk_big);
+    vk_sync_profile_end(SYNC_BIG_LOCK, t);
 }
 void vk_big_unlock(void) { pthread_mutex_unlock(&g_vk_big); }
 
@@ -5310,11 +5386,11 @@ static TexBackend *ip_hold_copy(TexBackend *src) {
     }
     d->sx = src->sx; d->sy = src->sy; d->scalable = src->scalable;
     VkCommandBuffer cb = vk_cmd();
-    vk_full_barrier(cb);
+    transfer_images(cb, src, d);
     VkImageCopy rg = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                       .extent = {src->width, src->height, 1}};
     vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
-    vk_full_barrier(cb);
+    vk_sample_image(cb, d);
     return d;
 }
 

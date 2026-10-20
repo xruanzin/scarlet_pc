@@ -20,6 +20,8 @@
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
+#include "sync_scope.h"
+#include "sync_profile.h"
 #include "../output_scale.h"
 #include "../renderer.h"
 
@@ -561,11 +563,13 @@ bool vk_frame_begin(const float clear[4]) {
     slot = (slot + 1) % FRAMES;
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
     vk_wait_seq(slot_seq[slot]);
+    uint64_t acquire_start = vk_sync_profile_begin();
     VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreate_swapchain();
         r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
     }
+    vk_sync_profile_end(SYNC_ACQUIRE, acquire_start);
     static unsigned acquire_fails;  // (a window the driver keeps reporting out of date: logged once per 600, not every frame)
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
         if (acquire_fails++ % 600 == 0) LOG("[vk] acquire failed: %d (%u times)\n", r, acquire_fails);
@@ -599,6 +603,14 @@ void vk_frame_suspend(void) {
 void vk_frame_resume(void) {
     if (!cur_frame.ok) return;
     VkCommandBuffer cb = vk_cmd();
+    // The post-processing dependency only covers its sampled output. The
+    // suspended window attachment also needs STORE -> LOAD / write ordering.
+    VkImageMemoryBarrier2 ready = vk_image_dependency(g_vk.sc_images[cur_frame.image],
+        (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    ready.oldLayout = ready.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    vk_scoped_image_barriers(cb, 1, &ready);
     VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_vk.sc_views[cur_frame.image],
                                     .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                     .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
@@ -638,7 +650,9 @@ void vk_frame_end(const char *shot_path) {
     vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
+    uint64_t present_start = vk_sync_profile_begin();
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
+    vk_sync_profile_end(SYNC_QUEUE_PRESENT, present_start);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     cur_frame.ok = false;
     if (shot_path) {
@@ -688,15 +702,44 @@ void backend_represent(void) {
     atomic_store(&g_represent_requested, true);
 }
 
-static void backend_represent_now(void) {
+// Gate before renderer lock everywhere. Holding this gate keeps the two-image
+// presentation and its private hold image exclusive while other recording runs.
+static void present_lock(void) {
+    uint64_t t = vk_sync_profile_begin();
+    pthread_mutex_lock(&g_present_lock);
+    vk_sync_profile_end(SYNC_PRESENT_GATE, t);
     vk_big_lock();
-    if (g_last_presented) backend_present(g_last_presented);
+}
+static void present_unlock(void) {
     vk_big_unlock();
+    pthread_mutex_unlock(&g_present_lock);
+}
+
+// Called only between completed window frames, with the gate held and exactly
+// one renderer lock acquisition. No shared renderer state is read while asleep.
+static void present_wait_until(uint64_t due) {
+    if (due <= SDL_GetTicksNS()) return;
+    vk_big_unlock();
+    uint64_t t = vk_sync_profile_begin();
+    uint64_t now = SDL_GetTicksNS();
+    if (due > now) SDL_DelayPrecise(due - now);
+    vk_sync_profile_end(SYNC_INTERP_SLEEP, t);
+    vk_big_lock();
+    // A worker may have started a guest rendering instance while we slept.
+    vk_end_pass();
+}
+
+static void backend_represent_now(void) {
+    // Resolve the last texture under both locks, without a recursive big-lock
+    // acquisition that would defeat present_wait_until's unlock.
+    backend_present(NULL);
 }
 
 void backend_present(NvnTexture *t) {
-    vk_big_lock();
-    pthread_mutex_lock(&g_present_lock);
+    uint64_t present_start = vk_sync_profile_begin();
+    present_lock();
+    if (!t) t = g_last_presented;
+    if (!t) { present_unlock(); return; }
     g_last_presented = t;
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
@@ -719,12 +762,16 @@ void backend_present(NvnTexture *t) {
     for (int image = two ? 0 : 1; image < 2; image++) {
     bool final = image == 1;
     if (final && two) {
-        uint64_t due = t0 + period / 2, now = SDL_GetTicksNS();
-        if (due > now) SDL_DelayPrecise(due - now);
+        present_wait_until(t0 + period / 2);
         b = hold;
     }
+    // Prepare scanout even when SMAA/FSR are off, before window rendering.
+    vk_sample_image(vk_cmd(), b);
+    uint64_t begin_start = vk_sync_profile_begin();
+    uint64_t begin_ns = SDL_GetTicksNS();
     bool have = vk_frame_begin(black);
-    uint64_t nd = SDL_GetTicksNS() - t0;
+    uint64_t nd = SDL_GetTicksNS() - begin_ns;
+    vk_sync_profile_end(SYNC_FRAME_BEGIN, begin_start);
     if (nd > 30000000) {
         static int warned;
         if (warned++ < 20) LOG("[vk] acquire blocked %llums\n", (unsigned long long)(nd / 1000000));
@@ -919,8 +966,8 @@ void backend_present(NvnTexture *t) {
         frames = 0;
         last_fps_time = now;
     }
-    pthread_mutex_unlock(&g_present_lock);
-    vk_big_unlock();
+    vk_sync_profile_end(SYNC_BACKEND_PRESENT, present_start);
+    present_unlock();
 }
 
 // ================================================================== UI thread
@@ -989,17 +1036,23 @@ void backend_init(void) {
 // ---- in-place reboot (runtime/main.c teardown; main thread, guest threads stopped)
 void backend_reset(void) {
     if (!g_vk.dev) return;
+    present_lock();
     vkDeviceWaitIdle(g_vk.dev);
     extern void vk_textures_reset(void);
     extern void vk_exec_reset(void);
     vk_textures_reset();
     vk_exec_reset();
     g_last_presented = NULL;
+    atomic_store(&g_represent_requested, false);
+    present_unlock();
 }
 void backend_guest_memory_reset(void) {}  // (exec.c re-imports the heap on first use)
 void backend_clear_window(void) {
     static const float black[4] = {0, 0, 0, 1};
+    present_lock();
+    vk_end_pass();
     if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
+    present_unlock();
 }
 
 // Window-title FPS / hang indicator. It runs on the UI thread, so it keeps updating even when the game thread is stuck:
