@@ -3,6 +3,7 @@ param(
     [switch]$Setup,
     [switch]$ForceRuntime,
     [switch]$IncrementalRuntime,
+    [switch]$RuntimeOnly,
     [switch]$ThinLTO,
     [int]$LtoJobs = 4
 )
@@ -75,7 +76,11 @@ if (Test-Path -LiteralPath $Log) {
     Remove-Item -LiteralPath $Log -Force
 }
 
-Write-Host "[scarlet-build] Compilando runtime + codigo gerado com -j$Jobs..." -ForegroundColor Cyan
+if ($RuntimeOnly) {
+    Write-Host "[scarlet-build] Compilando somente ScarletRecomp.exe com -j$Jobs; lasgame.dll sera preservado." -ForegroundColor Cyan
+} else {
+    Write-Host "[scarlet-build] Compilando runtime + codigo gerado com -j$Jobs..." -ForegroundColor Cyan
+}
 Write-Host "[scarlet-build] Repo MSYS2: $RepoPosix"
 Write-Host "[scarlet-build] Log: $Log"
 
@@ -102,7 +107,8 @@ if ($ThinLTO) {
     $PerfMake = " THINLTO=1 LTO_JOBS=$LtoJobs"
     Write-Host "[scarlet-build] ThinLTO ativado para lasgame.dll (primeiro rebuild pode demorar mais)." -ForegroundColor Green
 }
-$Cmd = "set -o pipefail; export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin':`$PATH; cd '$RepoPosix'; make -j$Jobs EXE_NAME=ScarletRecomp$PerfMake build/ScarletRecomp.exe build/lasgame.dll 2>&1 | tee scarlet_build.log"
+$Targets = if ($RuntimeOnly) { "build/ScarletRecomp.exe" } else { "build/ScarletRecomp.exe build/lasgame.dll" }
+$Cmd = "set -o pipefail; export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin':`$PATH; cd '$RepoPosix'; make -j$Jobs EXE_NAME=ScarletRecomp$PerfMake $Targets 2>&1 | tee scarlet_build.log"
 
 & $Bash -lc $Cmd
 $Code = $LASTEXITCODE
@@ -130,11 +136,13 @@ if ($LASTEXITCODE -eq 0 -and $Head) {
 }
 
 $ThinLtoMarker = Join-Path $RepoRoot "build\.thinlto_enabled"
-if ($ThinLTO) {
-    Set-Content -LiteralPath $ThinLtoMarker -Value "1" -Encoding ASCII
-}
-elseif (Test-Path -LiteralPath $ThinLtoMarker) {
-    Remove-Item -LiteralPath $ThinLtoMarker -Force
+if (-not $RuntimeOnly) {
+    if ($ThinLTO) {
+        Set-Content -LiteralPath $ThinLtoMarker -Value "1" -Encoding ASCII
+    }
+    elseif (Test-Path -LiteralPath $ThinLtoMarker) {
+        Remove-Item -LiteralPath $ThinLtoMarker -Force
+    }
 }
 
 Write-Host ""
