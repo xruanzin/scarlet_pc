@@ -69,7 +69,17 @@ static void wake(KThread *t) { pthread_cond_signal(&t->cond); }
 void kernel_signal(KObject *o) {
     // caller holds g_klock
     o->signaled = true;
-    for (KThread *t = g_syncwaiters; t; t = t->snext) wake(t);
+    // Wake only the threads whose WaitSynchronization list holds this object. Waking every waiter made each
+    // signal a thundering herd on g_klock (thousands of events per frame, most waiters going straight back to sleep).
+    for (KThread *t = g_syncwaiters; t; t = t->snext) {
+        bool hit = !t->sync_hs;  // (unknown list: wake, as before)
+        for (int32_t i = 0; i < t->sync_n && !hit; i++) {
+            uint32_t h = t->sync_hs[i];
+            if (!h) continue;
+            if (h == PSEUDO_THREAD || handle_get(h) == o) hit = true;  // (pseudo handle: resolved per caller, so be safe)
+        }
+        if (hit) wake(t);
+    }
 }
 
 // ------------------------------------------------------------------ time
@@ -492,11 +502,15 @@ static uint32_t svc_wait_synchronization(uint64_t handles_ptr, int32_t count, in
         if (g_rt_unwind) { r = R_CANCELLED; goto out; }
         if (timeout == 0) { r = R_TIMEOUT; goto out; }
         t->in_sync_wait = true;
+        t->sync_hs = hs;
+        t->sync_n = count;
         t->snext = g_syncwaiters;
         g_syncwaiters = t;
         bool ok = kwait(timeout < 0 ? -1 : timeout, &ts);
         for (KThread **p = &g_syncwaiters; *p; p = &(*p)->snext)
             if (*p == t) { *p = t->snext; break; }
+        t->sync_hs = NULL;
+        t->sync_n = 0;
         t->in_sync_wait = false;
         if (!ok) { r = R_TIMEOUT; goto out; }
     }
