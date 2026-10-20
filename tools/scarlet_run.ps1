@@ -1,5 +1,9 @@
 param(
+    [Alias("Package","PackagePath")]
     [string]$GameRoot = "D:\Pokemon Scarlet\Extracted\Base",
+    [string]$KeysPath = "",
+    [string]$HactoolPath = "",
+    [switch]$PackageForceExtract,
     [switch]$Profile,
     [switch]$Performance,
     [switch]$LiveLog,
@@ -16,7 +20,7 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 
-# GameRoot can be an extracted root (exefs/ + romfs/) or the user\'s own .xci/.nsp.
+# GameRoot can be an extracted root (exefs/ + romfs/) or the user's own .xci/.nsp.
 $OriginalGameInput = $GameRoot
 if (Test-Path -LiteralPath $GameRoot -PathType Leaf) {
     $Ext = [System.IO.Path]::GetExtension($GameRoot).ToLowerInvariant()
@@ -83,7 +87,8 @@ if (Test-Path -LiteralPath $Exe -PathType Leaf) {
             else { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime }
             if ($LASTEXITCODE -ne 0) { throw "Build do runtime falhou (exit $LASTEXITCODE). Envie scarlet_build.log." }
         }
-    }}
+    }
+}
 
 foreach ($P in @($Exe, $GameDll, (Join-Path $ExeFs "main"), (Join-Path $ExeFs "main.npdm"))) {
     if (-not (Test-Path -LiteralPath $P)) {
