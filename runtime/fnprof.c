@@ -79,6 +79,37 @@ static void fnprof_clear(void) {
     atomic_store_explicit(&first_seq, 0, memory_order_relaxed);
 }
 
+static int auto_inited, auto_consecutive = 3, auto_frames = 60, auto_max_captures = 3, auto_capture_index;
+static double auto_ms, auto_step_ms = 35.0;
+static int auto_slow_run;
+static bool auto_pending, auto_active, auto_done;
+static uint64_t auto_trigger, auto_from, auto_to;
+
+static double auto_threshold(void) {
+    return auto_ms + auto_step_ms * auto_capture_index;
+}
+
+static void fnprof_write_path(const char *path, uint64_t (*rows)[4], int n) {
+    FILE *fp = fopen(path, "w");
+    for (int i = 0; fp && i < n; i++)
+        fprintf(fp, "%llx %llu %llu %llx\n", (unsigned long long)rows[i][0], (unsigned long long)rows[i][1],
+                (unsigned long long)rows[i][2], (unsigned long long)rows[i][3]);
+    if (fp) fclose(fp);
+}
+
+static void fnprof_snapshot_path(char *dst, size_t n, const char *base, int index) {
+    const char *a = strrchr(base, '/'), *b = strrchr(base, '\\');
+    const char *sep = a > b ? a : b;
+    if (!sep) snprintf(dst, n, "fnprof-auto-%02d.txt", index + 1);
+    else {
+        size_t dir = (size_t)(sep - base + 1);
+        if (dir >= n) dir = n - 1;
+        memcpy(dst, base, dir);
+        dst[dir] = 0;
+        snprintf(dst + dir, n - dir, "fnprof-auto-%02d.txt", index + 1);
+    }
+}
+
 static void fnprof_write(uint64_t from, uint64_t to, const char *reason) {
     uint64_t (*rows)[4] = malloc(sizeof(uint64_t[4]) * NSLOT);
     if (!rows) {
@@ -115,37 +146,6 @@ static void fnprof_write(uint64_t from, uint64_t to, const char *reason) {
     free(rows);
     LOG("[fnprof] %d functions, written %s (%s, presents %llu-%llu)\n", n, out,
         reason ? reason : "capture", (unsigned long long)from, (unsigned long long)to);
-}
-
-static int auto_inited, auto_consecutive = 3, auto_frames = 60, auto_max_captures = 3, auto_capture_index;
-static double auto_ms, auto_step_ms = 35.0;
-static int auto_slow_run;
-static bool auto_pending, auto_active, auto_done;
-static uint64_t auto_trigger, auto_from, auto_to;
-
-static double auto_threshold(void) {
-    return auto_ms + auto_step_ms * auto_capture_index;
-}
-
-static void fnprof_write_path(const char *path, uint64_t (*rows)[4], int n) {
-    FILE *fp = fopen(path, "w");
-    for (int i = 0; fp && i < n; i++)
-        fprintf(fp, "%llx %llu %llu %llx\n", (unsigned long long)rows[i][0], (unsigned long long)rows[i][1],
-                (unsigned long long)rows[i][2], (unsigned long long)rows[i][3]);
-    if (fp) fclose(fp);
-}
-
-static void fnprof_snapshot_path(char *dst, size_t n, const char *base, int index) {
-    const char *a = strrchr(base, '/'), *b = strrchr(base, '\\');
-    const char *sep = a > b ? a : b;
-    if (!sep) snprintf(dst, n, "fnprof-auto-%02d.txt", index + 1);
-    else {
-        size_t dir = (size_t)(sep - base + 1);
-        if (dir >= n) dir = n - 1;
-        memcpy(dst, base, dir);
-        dst[dir] = 0;
-        snprintf(dst + dir, n - dir, "fnprof-auto-%02d.txt", index + 1);
-    }
 }
 
 static void fnprof_auto_init(void) {
