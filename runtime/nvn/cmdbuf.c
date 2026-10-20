@@ -594,8 +594,14 @@ NVN(nvnCommandBufferBeginRecording) {
     }
     NvnCmdBuf *cb = cb_of(A(0));
     cb->obj_tag = 0;
-    memset(cb->diag_programs, 0, sizeof cb->diag_programs);
-    cb->diag_tf_active = false;
+    static int diag_state = -1;
+    if (diag_state < 0)
+        diag_state = getenv("LARECOMP_TF_DIAG_DIR") || getenv("LARECOMP_DRAW_CHAINS") ||
+                     getenv("LARECOMP_TRACE_COUNT") ? 1 : 0;
+    if (__builtin_expect(diag_state, 0)) {
+        memset(cb->diag_programs, 0, sizeof cb->diag_programs);
+        cb->diag_tf_active = false;
+    }
     cb->host_origin_lo = cb->host_origin_hi = 0;
     cb->host_chain_head = cb->host_chain_tail = -1;
 
@@ -968,9 +974,12 @@ static bool chains_on(void) {
         from = e ? atol(e) : -1;
         to = e && strchr(e, '-') ? atol(strchr(e, '-') + 1) : from;
     }
+    // Normal execution never enables this diagnostic. Do not call into the
+    // renderer/present counter from every draw just to rediscover "disabled".
+    if (__builtin_expect(from < 0, 1)) return false;
     extern uint64_t renderer_present_count(void);
     long f = (long)renderer_present_count();
-    return from >= 0 && f >= from && f <= to;
+    return f >= from && f <= to;
 }
 static void draw_chain(Cpu *c, const char *kind, uint64_t count) {
     if (!chains_on()) return;
