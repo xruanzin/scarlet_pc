@@ -475,7 +475,43 @@ static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
 enum { ARB_WAIT_LESS = 0, ARB_DEC_WAIT_LESS = 1, ARB_WAIT_EQ = 2 };
 enum { ARB_SIGNAL = 0, ARB_SIGNAL_INC_EQ = 1, ARB_SIGNAL_MOD_EQ = 2 };
 
+// Address-arbiter wait statistics (LARECOMP_HLE_PROF=1): how many waits really block, how long they sleep, and how
+// many a short spin resolved (LARECOMP_ARB_SPIN_US=<n>, default 0 = off). Scarlet's job system signals light events
+// ~10k times per frame in cutscenes; every blocking wait costs g_klock + a condition-variable round trip on the host.
+static _Atomic uint64_t arb_blocked, arb_blocked_ns, arb_spin_hits;
+
+static inline void cpu_relax(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#endif
+}
+
+static bool arb_would_wait(uint32_t type, int32_t cur, int32_t value) {
+    return type == ARB_WAIT_EQ ? cur == value : cur < value;  // (types 0 and 2 only; no side effects)
+}
+
 static uint32_t svc_wait_for_address(uint64_t addr, uint32_t type, int32_t value, int64_t timeout) {
+    static int spin_us = -1;
+    if (spin_us < 0) {
+        const char *e = ENV("LARECOMP_ARB_SPIN_US");
+        spin_us = e ? atoi(e) : 0;
+        if (spin_us < 0) spin_us = 0;
+        if (spin_us > 200) spin_us = 200;
+    }
+    // Spin outside g_klock while the condition still says "wait": a signal that arrives within a few microseconds
+    // then costs no sleep/wake. The authoritative check below still runs under g_klock, so semantics are unchanged.
+    bool spun = false;
+    if (spin_us > 0 && timeout != 0 && (type == ARB_WAIT_LESS || type == ARB_WAIT_EQ)) {
+        uint64_t end = plat_now_ns() + (uint64_t)spin_us * 1000u;
+        for (unsigned i = 0;; i++) {
+            int32_t c = (int32_t)__atomic_load_n(u32p(addr), __ATOMIC_ACQUIRE);
+            if (!arb_would_wait(type, c, value)) { spun = true; break; }
+            cpu_relax();
+            if ((i & 31) == 31 && plat_now_ns() >= end) break;
+        }
+    }
     pthread_mutex_lock(&g_klock);
     int32_t cur = (int32_t)__atomic_load_n(u32p(addr), __ATOMIC_SEQ_CST);
     bool wait;
@@ -485,12 +521,25 @@ static uint32_t svc_wait_for_address(uint64_t addr, uint32_t type, int32_t value
         if (wait) __atomic_store_n(u32p(addr), (uint32_t)(cur - 1), __ATOMIC_SEQ_CST);
     } else if (type == ARB_WAIT_EQ) wait = cur == value;
     else { pthread_mutex_unlock(&g_klock); return R_INVALID_ENUM; }
-    if (!wait) { pthread_mutex_unlock(&g_klock); return R_INVALID_STATE; }
+    if (!wait) {
+        pthread_mutex_unlock(&g_klock);
+        if (spun) atomic_fetch_add_explicit(&arb_spin_hits, 1, memory_order_relaxed);
+        return R_INVALID_STATE;
+    }
     if (timeout == 0) { pthread_mutex_unlock(&g_klock); return R_TIMEOUT; }
     t_cur->wait_kind = WAIT_ARBITER;
     t_cur->wait_addr = addr;
+    uint64_t t0 = ENV("LARECOMP_HLE_PROF") ? plat_now_ns() : 0;
     uint32_t r = block_current(timeout);
     pthread_mutex_unlock(&g_klock);
+    if (t0) {
+        uint64_t n = atomic_fetch_add_explicit(&arb_blocked, 1, memory_order_relaxed) + 1;
+        atomic_fetch_add_explicit(&arb_blocked_ns, plat_now_ns() - t0, memory_order_relaxed);
+        if (n % 50000 == 0)
+            LOG("[arb-prof] %llu blocking waits, avg sleep %.1f us, %llu spin hits (spin=%d us)\n",
+                (unsigned long long)n, (double)atomic_load(&arb_blocked_ns) / (double)n / 1000.0,
+                (unsigned long long)atomic_load(&arb_spin_hits), spin_us);
+    }
     return r;
 }
 
