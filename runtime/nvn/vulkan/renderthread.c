@@ -197,7 +197,9 @@ bool renderthread_submit_batch(const uint64_t *resolved, int n) {
 uint64_t renderthread_queue_fence(NvnSync *sync) {
     if (!renderthread_active() || !sync) return 0;
     RenderJob j = {.kind = RJ_FENCE, .sync = sync};
-    return push(j);
+    uint64_t ticket = push(j);
+    if (!ticket) run_job(&j);  // keep the fence valid if the worker could not start
+    return ticket;
 }
 
 void renderthread_wait_ticket(uint64_t ticket) {
@@ -211,7 +213,7 @@ void renderthread_drain(void) {
     if (!renderthread_active() || !started) return;
     pthread_mutex_lock(&qlock);
     uint64_t target = enqueued;
-    while (finished < target || busy) pthread_cond_wait(&qdone, &qlock);
+    while (finished < target) pthread_cond_wait(&qdone, &qlock);
     pthread_mutex_unlock(&qlock);
 }
 

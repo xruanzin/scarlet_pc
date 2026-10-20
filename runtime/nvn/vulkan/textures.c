@@ -791,12 +791,13 @@ void backend_pool_written(uint64_t addr, uint64_t size) {
 // The async render worker stamps each submitted batch with the guest-write
 // sequence visible at submit time. It must not accidentally consume writes the
 // game made later while that batch was waiting in the host queue.
-static uint64_t g_dirty_limit;
+static _Atomic uint64_t g_dirty_limit;
 uint64_t backend_dirty_seq(void) { return atomic_load_explicit(&g_dirty_seq, memory_order_acquire); }
-void backend_set_dirty_limit(uint64_t seq) { g_dirty_limit = seq; }
+void backend_set_dirty_limit(uint64_t seq) { atomic_store_explicit(&g_dirty_limit, seq, memory_order_release); }
 
 static void dirty_check(NvnTexture *t, TexBackend *b) {
-    uint64_t now = g_dirty_limit ? g_dirty_limit : atomic_load_explicit(&g_dirty_seq, memory_order_acquire);
+    uint64_t limit = atomic_load_explicit(&g_dirty_limit, memory_order_acquire);
+    uint64_t now = limit ? limit : atomic_load_explicit(&g_dirty_seq, memory_order_acquire);
     if (b->dirty_seq == now) return;
     if (!b->dirty_seq) { b->dirty_seq = now; return; }  // (new texture: uploaded from memory anyway)
     uint64_t lo = t->addr, hi = t->addr + texture_cpu_size(t);
