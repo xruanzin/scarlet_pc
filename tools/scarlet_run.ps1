@@ -31,7 +31,7 @@ if (Test-Path -LiteralPath $GameRoot -PathType Leaf) {
     if ($KeysPath) { $PrepareArgs.KeysPath = $KeysPath }
     if ($HactoolPath) { $PrepareArgs.HactoolPath = $HactoolPath }
     if ($PackageForceExtract) { $PrepareArgs.Force = $true }
-    Write-Host "[scarlet-run] Preparando pacote $Ext: $GameRoot" -ForegroundColor Cyan
+    Write-Host "[scarlet-run] Preparando pacote ${Ext}: $GameRoot" -ForegroundColor Cyan
     $Prepared = @(& $PrepareScript @PrepareArgs)
     if (-not $Prepared -or -not $Prepared[-1]) { throw "A preparacao do pacote nao retornou a pasta extraida." }
     $GameRoot = [string]$Prepared[-1]
