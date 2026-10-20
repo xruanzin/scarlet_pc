@@ -3850,60 +3850,61 @@ static void draw_(CmdRec *r, bool indexed) {
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_key += prof_td_ - prof_tk_;
 
-    // ---- depth / stencil (dynamic)
-    static int nodt = -1;
-    if (nodt < 0) nodt = getenv("LARECOMP_NO_DEPTH_TEST") != NULL;
-    bool dt = st.ds[0] && !nodt && pass_depth;
-    vkCmdSetDepthTestEnable(cb, dt);
-    vkCmdSetDepthWriteEnable(cb, dt && st.ds[1]);
-    VkCompareOp dop = dt ? compare_fn(st.ds[2]) : VK_COMPARE_OP_ALWAYS;
-    // EQUAL against a depth pre-pass written by a different vertex shader (foliage, trees) needs both shaders to land
-    // on identical depths. They do since the translator stopped using unpackHalf2x16 (NVIDIA ran the half math after
-    // it in fp16, differently per shader: black slashes in foliage). LARECOMP_VK_EQUAL_TOL=1 brings back the old
-    // workaround: LESS_OR_EQUAL with a few ulps of bias towards the camera, which also let walls paint over the
-    // plants stuck flat on them (beach) - so it is off.
-    static int tol = -1;
-    if (tol < 0) tol = getenv("LARECOMP_VK_EQUAL_TOL") != NULL;
-    bool equal_tol = dop == VK_COMPARE_OP_EQUAL && tol;
-    if (equal_tol) dop = VK_COMPARE_OP_LESS_OR_EQUAL;
-    vkCmdSetDepthCompareOp(cb, dop);
-    bool sten = st.ds[3] && pass_stencil;
-    vkCmdSetStencilTestEnable(cb, sten);
-    if (sten) {
-        uint32_t ops = st.ds[5] | st.ds[6] << 8 | st.ds[7] << 16;
-        for (int f = 0; f < 2; f++) {
-            uint32_t o = f ? ops >> 12 : ops;
-            VkStencilFaceFlags face = f ? VK_STENCIL_FACE_BACK_BIT : VK_STENCIL_FACE_FRONT_BIT;
-            vkCmdSetStencilOp(cb, face, stencil_op(o & 0xF), stencil_op((o >> 8) & 0xF), stencil_op((o >> 4) & 0xF),
-                              compare_fn(f ? st.ds[4] >> 4 : st.ds[4] & 0xF));
-            vkCmdSetStencilCompareMask(cb, face, st.stencil_vmask[f] & 0xFF);
-            vkCmdSetStencilWriteMask(cb, face, st.stencil_mask[f] & 0xFF);
-            vkCmdSetStencilReference(cb, face, st.stencil_ref[f]);
+    // ---- fixed-function dynamic state
+    // XFB skinning is rasterizer-discarded: depth/stencil/blend/cull/front-face
+    // and depth bias cannot affect transform-feedback output. Avoid a large
+    // number of Vulkan driver calls on the hottest character path.
+    bool equal_tol = false;
+    if (!vertex_only_xfb) {
+        static int nodt = -1;
+        if (nodt < 0) nodt = getenv("LARECOMP_NO_DEPTH_TEST") != NULL;
+        bool dt = st.ds[0] && !nodt && pass_depth;
+        vkCmdSetDepthTestEnable(cb, dt);
+        vkCmdSetDepthWriteEnable(cb, dt && st.ds[1]);
+        VkCompareOp dop = dt ? compare_fn(st.ds[2]) : VK_COMPARE_OP_ALWAYS;
+        static int tol = -1;
+        if (tol < 0) tol = getenv("LARECOMP_VK_EQUAL_TOL") != NULL;
+        equal_tol = dop == VK_COMPARE_OP_EQUAL && tol;
+        if (equal_tol) dop = VK_COMPARE_OP_LESS_OR_EQUAL;
+        vkCmdSetDepthCompareOp(cb, dop);
+        bool sten = st.ds[3] && pass_stencil;
+        vkCmdSetStencilTestEnable(cb, sten);
+        if (sten) {
+            uint32_t ops = st.ds[5] | st.ds[6] << 8 | st.ds[7] << 16;
+            for (int f = 0; f < 2; f++) {
+                uint32_t o = f ? ops >> 12 : ops;
+                VkStencilFaceFlags face = f ? VK_STENCIL_FACE_BACK_BIT : VK_STENCIL_FACE_FRONT_BIT;
+                vkCmdSetStencilOp(cb, face, stencil_op(o & 0xF), stencil_op((o >> 8) & 0xF), stencil_op((o >> 4) & 0xF),
+                                  compare_fn(f ? st.ds[4] >> 4 : st.ds[4] & 0xF));
+                vkCmdSetStencilCompareMask(cb, face, st.stencil_vmask[f] & 0xFF);
+                vkCmdSetStencilWriteMask(cb, face, st.stencil_mask[f] & 0xFF);
+                vkCmdSetStencilReference(cb, face, st.stencil_ref[f]);
+            }
+        }
+        vkCmdSetBlendConstants(cb, st.blend_color);
+
+        uint8_t cull = st.poly[0];
+        vkCmdSetCullMode(cb, cull == 1 ? VK_CULL_MODE_FRONT_BIT : cull == 2 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE);
+        bool ccw = st.poly[1] == 1;
+        static int flipw = -1;
+        if (flipw < 0) flipw = getenv("LARECOMP_VK_FLIP_WINDING") != NULL;
+        bool front_ccw = (ccw != vkey.flip_y) != (flipw != 0);
+        vkCmdSetFrontFace(cb, front_ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
+        {
+            float f[3] = {0, 0, 0};
+            static int off = -1;
+            if (off < 0) off = getenv("LARECOMP_NO_DEPTH_BIAS") != NULL;
+            bool on = (st.poly[3] & 4) && !off;
+            if (on) memcpy(f, st.poly_offset, sizeof f);
+            if (equal_tol) { f[1] -= 8; on = true; }
+            vkCmdSetDepthBiasEnable(cb, on);
+            vkCmdSetDepthBias(cb, f[1], f[2], f[0]);
         }
     }
-    vkCmdSetBlendConstants(cb, st.blend_color);
-
-    // ---- rasterizer
-    uint8_t cull = st.poly[0];
-    vkCmdSetCullMode(cb, cull == 1 ? VK_CULL_MODE_FRONT_BIT : cull == 2 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE);
-    bool ccw = st.poly[1] == 1;
-    static int flipw = -1;  // LARECOMP_VK_FLIP_WINDING: invert the front-face mapping (A/B against Metal)
-    if (flipw < 0) flipw = getenv("LARECOMP_VK_FLIP_WINDING") != NULL;
-    bool front_ccw = (ccw != vkey.flip_y) != (flipw != 0);
-    vkCmdSetFrontFace(cb, front_ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
+    // These three states still affect primitive assembly / whether XFB runs.
     vkCmdSetPrimitiveTopology(cb, native ? topo : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     vkCmdSetPrimitiveRestartEnable(cb, st.prim_restart && native && (mode == 3 || mode == 5));
-    vkCmdSetRasterizerDiscardEnable(cb, (st.raster_discard || vkey.xfb) ? VK_TRUE : VK_FALSE);
-    {
-        float f[3] = {0, 0, 0};
-        static int off = -1;
-        if (off < 0) off = getenv("LARECOMP_NO_DEPTH_BIAS") != NULL;
-        bool on = (st.poly[3] & 4) && !off;
-        if (on) memcpy(f, st.poly_offset, sizeof f);
-        if (equal_tol) { f[1] -= 8; on = true; }  // (see the EQUAL comment above: a few depth ulps nearer)
-        vkCmdSetDepthBiasEnable(cb, on);
-        vkCmdSetDepthBias(cb, f[1], f[2], f[0]);
-    }
+    vkCmdSetRasterizerDiscardEnable(cb, (st.raster_discard || vertex_only_xfb) ? VK_TRUE : VK_FALSE);
 
     // ---- textures first (their scales feed the widescreen decision and the rscale table), then the viewport
     float *vp = st.viewport[0];
@@ -3969,7 +3970,7 @@ static void draw_(CmdRec *r, bool indexed) {
             if (g_cur_fs_hash == want) n++;
         }
     }
-    {
+    if (!vertex_only_xfb) {
         float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
         set_viewport(vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf);
         if (g_debug_frame) {
@@ -3979,8 +3980,8 @@ static void draw_(CmdRec *r, bool indexed) {
                 sr.extent.width, sr.extent.height, st.scissor[0][0], st.scissor[0][1], st.scissor[0][2], st.scissor[0][3], pass_w, pass_h,
                 vp_sx, vp_sy);
         }
+        apply_scissor();
     }
-    apply_scissor();
     float rs0[4] = {vp_sx, vp_sy, vp_ox, vp_oy};
     uint64_t prof_t1_ = prof ? SDL_GetTicksNS() : 0;
     if (vertex_only_xfb) {
