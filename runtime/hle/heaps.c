@@ -653,7 +653,7 @@ RT_ON_RESET(stdalloc_reset) {
 
 static void std_init_common(Cpu *c, bool cached) {
     g_std_declared_size = c->x[2] ? c->x[2] : 0x10000000ull;
-    LOG("[heaps] StandardAllocator guest-backed: requested=%#llx pool=%#llx..%#llx cached=%d fast<=%uB/alignment<=256\n",
+    LOG("[heaps] StandardAllocator guest-backed: requested=%#llx pool=%#llx..%#llx cached=%d fast<=%uB/alignment<=4096\n",
         (unsigned long long)g_std_declared_size,
         (unsigned long long)STD_GUEST_BASE,
         (unsigned long long)STD_GUEST_LIMIT,
@@ -693,6 +693,16 @@ HLE_FUNC("_ZN2nn3mem17StandardAllocator10ReallocateEPvm", heap_std_realloc) {
 HLE_FUNC("_ZNK2nn3mem17StandardAllocator9GetSizeOfEPKv", heap_std_sizeof) {
     c->x[0] = std_guest_size(c->x[1]);
 }
+
+// Direct entry points used by generated code when --hle resolves one of these
+// exact SDK functions. HLE_FUNC implementations above remain registered for
+// indirect/import calls; these aliases remove the HLE dispatch/wrapper hop for
+// statically-known calls from main/sdk/subsdk0.
+void hle__ZN2nn3mem17StandardAllocator8AllocateEm(Cpu *c) { heap_std_alloc(c); }
+void hle__ZN2nn3mem17StandardAllocator8AllocateEmm(Cpu *c) { heap_std_alloc_a(c); }
+void hle__ZN2nn3mem17StandardAllocator4FreeEPv(Cpu *c) { heap_std_free(c); }
+void hle__ZN2nn3mem17StandardAllocator10ReallocateEPvm(Cpu *c) { heap_std_realloc(c); }
+void hle__ZNK2nn3mem17StandardAllocator9GetSizeOfEPKv(Cpu *c) { heap_std_sizeof(c); }
 
 HLE_FUNC("_ZNK2nn3mem17StandardAllocator16GetTotalFreeSizeEv", heap_std_free_size) {
     pthread_mutex_lock(&g_std_lock);
