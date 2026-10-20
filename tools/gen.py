@@ -470,24 +470,38 @@ class Module:
             out.append(f'    {sanitize(hle[entry])}(c);')
             out.append('}')
             return out
-        if entry in self.direct_guest:
-            target = self.direct_guest[entry]
-            self._refs = {target}
-            out.append(f'    {fname(target)}(c);')
-            out.append('}')
-            return out
-        out.append(f'    FN_ENTER({hx(entry)});')
-        if resumable:
-            # Normal direct calls always start at entry. Only the runtime's
-            # range lookup calls _resume with an interior c->pc. Keep identical
-            # signatures so fragment transitions remain tail calls.
+
+        # A direct-guest replacement is only an entry fast path. If this
+        # fragment belongs to an indirect-resume interval, keep the original
+        # lifted body as _resume so dispatch_lookup can still enter at an
+        # arbitrary interior PC. This also keeps main_table.c's resume-range
+        # declaration valid instead of leaving an undefined *_resume symbol.
+        direct_target = self.direct_guest.get(entry)
+        if direct_target is not None:
+            if not resumable:
+                self._refs = {direct_target}
+                out.append(f'    {fname(direct_target)}(c);')
+                out.append('}')
+                return out
             out.insert(0, f'void {fname(entry)}_resume(Cpu *c);')
-            out += [f'    c->pc = {hx(entry)};',
-                    f'    __attribute__((musttail)) return {fname(entry)}_resume(c);',
+            out += [f'    {fname(direct_target)}(c);',
                     '}', f'void {fname(entry)}_resume(Cpu *c) {{',
                     '    goto L_dispatch;']
+        else:
+            out.append(f'    FN_ENTER({hx(entry)});')
+            if resumable:
+                # Normal direct calls always start at entry. Only the runtime's
+                # range lookup calls _resume with an interior c->pc. Keep identical
+                # signatures so fragment transitions remain tail calls.
+                out.insert(0, f'void {fname(entry)}_resume(Cpu *c);')
+                out += [f'    c->pc = {hx(entry)};',
+                        f'    __attribute__((musttail)) return {fname(entry)}_resume(c);',
+                        '}', f'void {fname(entry)}_resume(Cpu *c) {{',
+                        '    goto L_dispatch;']
         batch = []
         refs = set()
+        if direct_target is not None:
+            refs.add(direct_target)
         jump_helpers = []
 
         def flush():
