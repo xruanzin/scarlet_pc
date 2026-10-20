@@ -26,12 +26,12 @@ static const uint8_t *romfs_map;
 static uint64_t romfs_map_size;
 #endif
 
-static bool romfs_legacy_layout(int fd) {
+static bool romfs_data_first_layout(int fd) {
     uint64_t h[10] = {0};
     if (pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h) return false;
-    // Old scarlet_pc builder put file data at 0x200 and all metadata after it.
-    // Canonical Horizon RomFS keeps metadata before data, so dir-hash offset
-    // must be below data_offset.
+    // Native Switch RomFS images commonly keep file data at/after 0x200 and
+    // place the hash/metadata tables after the file-data region. The direct
+    // XCI path exposes exactly that decrypted filesystem image via Fuse-Nx.
     return h[0] == 0x50 && h[1] > h[9];
 }
 
@@ -525,14 +525,24 @@ static Service *open_romfs_storage(void) {
         bool direct_package = romfs_image_path(path, sizeof path);
         romfs_fd = open(path, O_RDONLY);
         bool rebuild = false;
-        if (romfs_fd >= 0 && romfs_legacy_layout(romfs_fd)) {
-            if (direct_package)
-                FATAL("direct package RomFS has an unsupported legacy layout: %s\n", path);
-            LOG("[fs] legacy data-first romfs.bin detected; rebuilding canonical image\n");
-            close(romfs_fd);
-            romfs_fd = -1;
-            remove(path);
-            rebuild = true;
+        if (romfs_fd >= 0 && romfs_data_first_layout(romfs_fd)) {
+            if (direct_package) {
+                // Do not rewrite/copy the game's RomFS. This is the native
+                // filesystem image exposed from the NCA and is valid input for
+                // Horizon's IStorage consumer. Validation and indexing below
+                // operate on offsets from the header and support either table
+                // ordering.
+                LOG("[fs] direct package RomFS: native data-first layout accepted\n");
+            } else {
+                // Keep compatibility with existing scarlet_pc local images:
+                // old generated romfs.bin files are rebuilt into the layout
+                // historically used by this runtime.
+                LOG("[fs] legacy local data-first romfs.bin detected; rebuilding project image\n");
+                close(romfs_fd);
+                romfs_fd = -1;
+                remove(path);
+                rebuild = true;
+            }
         }
         if (romfs_fd < 0) {
             if (direct_package)
