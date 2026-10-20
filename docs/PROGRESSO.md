@@ -99,3 +99,6 @@ Cache de despacho corrigido para remover publicação inconsistente e escritas
 concorrentes entre workers. Testes sintéticos passaram; falta comparação no
 Windows no mesmo percurso. Não há confirmação de 30 FPS estáveis.
 Ver `SCARLET-CPU-DISPATCH.md`.
+
+Coletor `scarlet_diagnose.ps1` preparado: gera ZIP por sessao e relatorio de
+frames/CPU/GPU/chamadas. Precisa de validacao no Windows; nao e benchmark neutro.

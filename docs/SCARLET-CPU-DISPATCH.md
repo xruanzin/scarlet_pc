@@ -52,3 +52,42 @@ os shaders, com as mesmas opções nos dois builds. Para medir FPS normal, remov
 ative o modo de diagnóstico durante a comparação. Faça três passagens por build.
 Envie os logs de boot dos dois builds; registre também qualquer crash ou regressão.
 A meta de 30 FPS ainda não foi validada.
+
+## Coleta completa de uma sessao
+
+Rode `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+.\tools\scarlet_diagnose.ps1 -GameRoot "D:\Pokemon Scarlet\Extracted\Base"`.
+Jogue por 2–3 minutos e feche normalmente. O caminho do ZIP aparece no console:
+`build\scarlet-performance-<data-hora>.zip`.
+
+O pacote contem:
+
+- `report.md` / `summary.json`: resumo, percentis de frametime, frames lentos,
+  threads com mais CPU, motores GPU e chamadas HLE registradas;
+- `frames.csv`: todos os intervalos entre presents, backend, esperas GPU,
+  apresentacao, restante, draws, submits e shaders pendentes;
+- `process.csv` / `threads.csv`: CPU ativa do processo e de cada thread
+  observada, memoria privada/residente e numero de threads/handles;
+- `gpu-engines.csv`: utilizacao por motor do Windows, quando suportada;
+- `fnprof.txt`: contagens guest nos frames 600–660 por padrao;
+- `renderer-timeline.txt`: categorias do backend e capturas GPU esparsas nos
+  frames 300, 900, 1800 e 3600; sem as capturas de textura do F9;
+- `run.json` / `result.json`: revisoes, hardware, configuracao, hashes e exit code;
+- log integral e alertas. Falhas de coleta ficam registradas, nunca como uso zero.
+
+`-FunctionFrames '1800:1860'` muda a janela de contagem; `-NoFunctionCounts`
+a desativa. Se fechar antes do fim da janela, nao havera fnprof. A instrumentacao
+adiciona custo, principalmente as contagens atomicas do profiler guest. Use
+`scarlet_run.ps1` sem `-Profile` para comparar desempenho normal.
+
+A amostragem e de aproximadamente um segundo, mais o tempo gasto nas consultas.
+Pode perder threads curtas e nao identifica pilhas ou tempo de CPU por funcao.
+O tempo HLE e inclusivo; so o top 10 de cada intervalo e registrado. Contadores
+GPU nao devem ser somados entre motores. Timestamps Vulkan e contadores Windows
+tem escopos diferentes. O CSV usa o relogio monotono SDL e os contadores Windows
+usam UTC, portanto nao ha alinhamento exato de um frame com uma amostra Windows.
+Uma interrupcao abrupta pode perder a ultima porcao do CSV ainda no buffer.
+
+Validacao: testes sinteticos do CSV e do resumidor, parser de sintaxe PowerShell,
+e teste concorrente de dispatch. A coleta CIM/processos e o build completo ainda
+precisam ser exercitados no Windows. Nao foram enviados binarios do jogo.

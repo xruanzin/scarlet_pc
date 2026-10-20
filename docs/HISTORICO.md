@@ -260,3 +260,10 @@ frontal privado de 16 KiB por thread, tabela exata compartilhada e invalidação
 por geração no boot/override. Teste concorrente e 17 testes de retomada/longjmp
 passaram. Ganho de FPS e build completo Windows ainda não medidos.
 Detalhes: `SCARLET-CPU-DISPATCH.md`.
+
+## 2026-10-20 — Relatorio de desempenho por sessao
+
+Adicionada coleta opt-in de frames, processo, threads e motores GPU, contagem
+guest limitada a uma janela e resumo com percentis e chamadas HLE. O ZIP preserva
+dados brutos e identifica medidas indisponiveis. Testes de CSV e resumo passaram;
+sintaxe PowerShell verificada. Execucao CIM e build completo Windows pendentes.

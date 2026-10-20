@@ -983,6 +983,37 @@ void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
     if (!prof) return;
     static uint64_t last_t, l_exec, l_wait, l_draws, l_subs;
     uint64_t now = SDL_GetTicksNS();
+    // Optional full frame timeline. Batch flushing avoids one disk flush per
+    // draw/frame; a hard crash can lose at most the last ~one second of rows.
+    static FILE *csv;
+    static bool csv_checked;
+    static uint64_t csv_flush, previous_frame;
+    if (!csv_checked) {
+        csv_checked = true;
+        const char *path = getenv("LARECOMP_FRAME_CSV");
+        if (path && *path) {
+            csv = fopen(path, "w");
+            if (csv) {
+                fprintf(csv, "frame,host_ms,frame_ms,backend_ms,gpu_wait_ms,present_ms,other_ms,draws,submits,shader_jobs\n");
+                fflush(csv);
+            } else LOG("[profile] cannot open frame CSV: %s\n", path);
+        }
+    }
+    if (frame <= previous_frame) last_t = 0;  // in-process reboot
+    previous_frame = frame;
+    if (csv && last_t) {
+        uint64_t dt = now - last_t, ex = cum_exec - l_exec, wt = cum_wait - l_wait;
+        fprintf(csv, "%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%d\n",
+                (unsigned long long)frame, now / 1e6, dt / 1e6, ex / 1e6, wt / 1e6,
+                present_ns / 1e6, ((double)dt - ex - present_ns) / 1e6,
+                (unsigned long long)(cum_draws - l_draws),
+                (unsigned long long)(cum_submits - l_subs), atomic_load(&jobs_pending));
+        if (now - csv_flush >= 1000000000ull) { fflush(csv); csv_flush = now; }
+        if (ferror(csv)) {
+            LOG("[profile] frame CSV write failed; collection disabled\n");
+            fclose(csv); csv = NULL;
+        }
+    }
     if (last_t && now - last_t > 50000000) {
         uint64_t dt = now - last_t, ex = cum_exec - l_exec, wt = cum_wait - l_wait;
         LOG("[hitch] frame %llu: %.0f ms = backend exec %.1f (of which GPU waits %.1f) + present %.1f + other %.1f; %llu draws, "
