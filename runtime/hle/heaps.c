@@ -264,9 +264,11 @@ static uint64_t align_up_u64(uint64_t v, uint64_t a) {
 // migrate the block to that thread. Refill grabs g_std_lock only once for a
 // batch, advances the same guest bump frontier and commits ahead as before.
 #define STD_FAST_MAGIC 0x534341524c455446ull /* "SCARLETF" */
-#define STD_FAST_MAX 4096u
+// Trade a small amount of TLS memory for CPU: keep substantially more of
+// Scarlet's transient objects entirely off the global allocator lock.
+#define STD_FAST_MAX 16384u
 #define STD_FAST_SIZE_CLASSES (STD_FAST_MAX / 16u)
-#define STD_FAST_ALIGN_CLASSES 5u /* 16,32,64,128,256 */
+#define STD_FAST_ALIGN_CLASSES 9u /* 16,32,64,128,256,512,1024,2048,4096 */
 #define STD_FAST_CLASSES (STD_FAST_SIZE_CLASSES * STD_FAST_ALIGN_CLASSES)
 
 typedef struct {
@@ -286,8 +288,9 @@ typedef struct {
 } StdFastTls;
 
 static _Thread_local StdFastTls g_std_fast_tls;
+// Reset happens only after all guest threads have stopped, so this generation
+// does not need inter-thread atomics on every allocation/free.
 static uint32_t g_std_fast_generation = 1;
-static uint64_t g_std_fast_allocs, g_std_fast_frees, g_std_fast_refills, g_std_fast_slow;
 
 static unsigned std_log2_pow2(uint64_t v) {
     unsigned n = 0;
@@ -295,9 +298,9 @@ static unsigned std_log2_pow2(uint64_t v) {
     return n;
 }
 
-static void std_fast_tls_sync(void) {
-    uint32_t g = __atomic_load_n(&g_std_fast_generation, __ATOMIC_ACQUIRE);
-    if (g_std_fast_tls.generation == g) return;
+static inline void std_fast_tls_sync(void) {
+    uint32_t g = g_std_fast_generation;
+    if (__builtin_expect(g_std_fast_tls.generation == g, 1)) return;
     memset(&g_std_fast_tls, 0, sizeof g_std_fast_tls);
     g_std_fast_tls.generation = g;
 }
@@ -305,7 +308,7 @@ static void std_fast_tls_sync(void) {
 static int std_fast_class(uint64_t size, uint64_t align, uint32_t *capacity_out, uint64_t *align_out) {
     if (!size) size = 1;
     align = std_align(align);
-    if (align > 256 || size > STD_FAST_MAX) return -1;
+    if (align > 4096 || size > STD_FAST_MAX) return -1;
     uint64_t capacity = align_up_u64(size, 16);
     if (!capacity || capacity > STD_FAST_MAX) return -1;
     unsigned alog = std_log2_pow2(align);
@@ -320,9 +323,9 @@ static int std_fast_class(uint64_t size, uint64_t align, uint32_t *capacity_out,
 static StdFastHdr *std_fast_header(uint64_t addr) {
     if (addr < STD_GUEST_BASE + sizeof(StdFastHdr) || addr >= STD_GUEST_LIMIT) return NULL;
     StdFastHdr *h = (StdFastHdr *)(uintptr_t)(addr - sizeof(StdFastHdr));
-    uint32_t gen = __atomic_load_n(&g_std_fast_generation, __ATOMIC_ACQUIRE);
+    uint32_t gen = g_std_fast_generation;
     if (h->magic != STD_FAST_MAGIC || h->generation != gen || h->cls >= STD_FAST_CLASSES ||
-        !h->capacity || h->capacity > STD_FAST_MAX || h->align_log2 < 4 || h->align_log2 > 8)
+        !h->capacity || h->capacity > STD_FAST_MAX || h->align_log2 < 4 || h->align_log2 > 12)
         return NULL;
     return h;
 }
@@ -353,7 +356,7 @@ static uint64_t std_fast_refill(int cls, uint32_t capacity, uint64_t align, uint
     }
     pthread_mutex_unlock(&g_std_lock);
 
-    uint32_t gen = __atomic_load_n(&g_std_fast_generation, __ATOMIC_ACQUIRE);
+    uint32_t gen = g_std_fast_generation;
     unsigned alog = std_log2_pow2(align);
     uint64_t first = 0;
     for (unsigned i = 0; i < batch; i++) {
@@ -375,7 +378,6 @@ static uint64_t std_fast_refill(int cls, uint32_t capacity, uint64_t align, uint
             g_std_fast_tls.head[cls] = addr;
         }
     }
-    __atomic_fetch_add(&g_std_fast_refills, 1, __ATOMIC_RELAXED);
     return first;
 }
 
@@ -391,12 +393,10 @@ static uint64_t std_fast_alloc(uint64_t size, uint64_t align) {
         g_std_fast_tls.head[cls] = *(uint64_t *)(uintptr_t)addr;
         StdFastHdr *h = (StdFastHdr *)(uintptr_t)(addr - sizeof(StdFastHdr));
         h->requested = (uint32_t)(size ? size : 1);
-        __atomic_fetch_add(&g_std_fast_allocs, 1, __ATOMIC_RELAXED);
         return addr;
     }
 
     addr = std_fast_refill(cls, capacity, norm_align, size ? size : 1);
-    if (addr) __atomic_fetch_add(&g_std_fast_allocs, 1, __ATOMIC_RELAXED);
     return addr;
 }
 
@@ -406,7 +406,6 @@ static bool std_fast_free(uint64_t addr) {
     std_fast_tls_sync();
     *(uint64_t *)(uintptr_t)addr = g_std_fast_tls.head[h->cls];
     g_std_fast_tls.head[h->cls] = addr;
-    __atomic_fetch_add(&g_std_fast_frees, 1, __ATOMIC_RELAXED);
     return true;
 }
 
@@ -441,7 +440,6 @@ static uint64_t std_guest_alloc(uint64_t size, uint64_t align) {
 
     uint64_t fast = std_fast_alloc(size, align);
     if (fast) return fast;
-    __atomic_fetch_add(&g_std_fast_slow, 1, __ATOMIC_RELAXED);
 
     pthread_mutex_lock(&g_std_lock);
 
@@ -611,7 +609,7 @@ static uint64_t std_guest_size(uint64_t addr) {
 }
 
 RT_ON_RESET(stdalloc_reset) {
-    __atomic_add_fetch(&g_std_fast_generation, 1, __ATOMIC_ACQ_REL);
+    if (++g_std_fast_generation == 0) g_std_fast_generation = 1;
     pthread_mutex_lock(&g_std_lock);
     StdAllocRec *r = g_std_recs;
     StdFreeRec *free_bins[STD_FREE_BINS];
