@@ -414,12 +414,14 @@ A documentação interna do projeto (histórico de cada correção, depuração,
 
 ### Boot direto de XCI / NSP no Windows
 
-O runner do Scarlet aceita um dump próprio em `.xci` ou `.nsp` no lugar da pasta extraída. Na primeira execução ele usa `hactool` para preparar `exefs` e `romfs` em `build/package-cache`; os boots seguintes reutilizam o cache.
+O runner aceita um dump próprio em `.xci` ou `.nsp` **sem extrair o jogo**. No Windows ele monta o contêiner em modo somente-leitura com Fuse-Nx/WinFsp; ExeFS e RomFS são expostos virtualmente e o runtime lê/descriptografa os blocos necessários sob demanda. O `lasgame.dll` continua sendo o código previamente recompilado.
 
 ```powershell
-.\tools\scarlet_run.ps1 -GameRoot "D:\Games\Pokemon Scarlet.xci"
-# ou:
+.\tools\scarlet_run.ps1 -Package "D:\Games\Pokemon Scarlet.xci"
+# ou
 .\tools\scarlet_run.ps1 -Package "D:\Games\Pokemon Scarlet.nsp"
 ```
 
-No Windows, se `hactool.exe` não estiver instalado, o runner baixa automaticamente a build oficial 1.4.0 publicada por SciresM e a guarda em `tools\hactool\hactool.exe`. Também é possível usar `-HactoolPath`. Use o seu próprio `prod.keys` em `%USERPROFILE%\.switch\prod.keys` (ou `-KeysPath`). NSPs com title rights podem precisar de `title.keys` ao lado de `prod.keys`. Nenhum jogo ou chave é incluído no projeto.
+Na primeira execução, o runner baixa o executável oficial Fuse-Nx v1.1 se ele não estiver presente. O driver WinFsp precisa estar instalado no Windows; se faltar, o runner baixa o instalador oficial e informa o caminho, mas não instala um driver sem ação explícita do usuário. `prod.keys` deve vir do próprio Switch; o runner procura os locais usuais e também aceita `-KeysPath`.
+
+O modo antigo de extração para cache continua disponível somente como fallback explícito com `-PackageExtract`. Ele não é usado por padrão.
