@@ -212,7 +212,7 @@ if (-not (Test-Path -LiteralPath $MsysBin -PathType Container)) {
 
 $env:Path = "$MsysBin;C:\msys64\usr\bin;$env:Path"
 $env:LARECOMP_NO_LAUNCHER = "1"
-$env:LARECOMP_LOG_HEAPS = "1"
+Remove-Item Env:LARECOMP_LOG_HEAPS -ErrorAction SilentlyContinue
 $env:LARECOMP_LOG_BINDINGS = ""
 if ($Performance) {
     # Vega-class integrated GPUs benefit more from reducing the scalable color

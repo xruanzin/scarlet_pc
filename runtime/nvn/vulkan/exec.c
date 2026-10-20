@@ -1154,11 +1154,18 @@ void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
     }
 
     if (last_t && now - last_t > 50000000) {
-        uint64_t dt = now - last_t, ex = cum_exec - l_exec, wt = cum_wait - l_wait;
-        LOG("[hitch] frame %llu: %.0f ms = backend exec %.1f (of which GPU waits %.1f) + present %.1f + other %.1f; %llu draws, "
-            "%llu submits, shader jobs %d pending\n", (unsigned long long)frame, dt / 1e6, ex / 1e6, wt / 1e6, present_ns / 1e6,
-            ((double)dt - ex - present_ns) / 1e6, (unsigned long long)(cum_draws - l_draws), (unsigned long long)(cum_submits - l_subs),
-            atomic_load(&jobs_pending));
+        static uint64_t hitch_count;
+        static int hitch_all = -1;
+        if (hitch_all < 0) hitch_all = getenv("LARECOMP_HITCH_LOG_ALL") != NULL;
+        uint64_t hn = ++hitch_count;
+        if (hitch_all || hn <= 8 || !(hn % 120)) {
+            uint64_t dt = now - last_t, ex = cum_exec - l_exec, wt = cum_wait - l_wait;
+            LOG("[hitch] #%llu frame %llu: %.0f ms = backend exec %.1f (of which GPU waits %.1f) + present %.1f + other %.1f; %llu draws, "
+                "%llu submits, shader jobs %d pending\n", (unsigned long long)hn, (unsigned long long)frame,
+                dt / 1e6, ex / 1e6, wt / 1e6, present_ns / 1e6,
+                ((double)dt - ex - present_ns) / 1e6, (unsigned long long)(cum_draws - l_draws),
+                (unsigned long long)(cum_submits - l_subs), atomic_load(&jobs_pending));
+        }
     }
     if (last_t) {
         extern void fnprof_note_frame(uint64_t frame, double frame_ms);

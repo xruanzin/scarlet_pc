@@ -354,7 +354,9 @@ static uint64_t hostseg_take(NvnCmdBuf *cb, uint32_t need, uint32_t *actual_size
     pthread_mutex_unlock(&g_hostseg_lock);
     if (!mem) FATAL("nvn: host command segment pool exhausted (%llu MB)\n",
                     (unsigned long long)(hostseg_cap() >> 20));
-    if (n == 1 || !(n & 1023))
+    // This counter advances hundreds of thousands of times. Logging every
+    // 1024 takes creates measurable console/file I/O in CPU-bound scenes.
+    if (n == 1 || !(n & 16383))
         LOG("[nvn] expanded command records -> host segments (take %llu, pool %d, backing %.1f MB, segment %u KB)\n",
             (unsigned long long)n, pool, (double)bytes / (1024.0 * 1024.0), *actual_size >> 10);
     return (uint64_t)(uintptr_t)mem;
