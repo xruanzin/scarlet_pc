@@ -795,9 +795,17 @@ void backend_present(NvnTexture *t) {
     }
     extern void input_frame(uint64_t frame);
     input_frame(total_frames);
-    static long slow_ms = -1;
-    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SLOW_FRAME_MS")) : 0;
-    if (slow_ms > 0 && total_frames > 2600) SDL_Delay((Uint32)slow_ms);
+    // Explicit test-only delay injection. Older diagnostics used the ambiguous
+    // name LARECOMP_SLOW_FRAME_MS and could leave it inherited in PowerShell;
+    // value 50 then added a real 50 ms sleep to every frame after 2600 and made
+    // normal performance runs look dramatically slower. Never honor that old
+    // variable in production runs.
+    static long inject_delay_ms = -1;
+    if (inject_delay_ms < 0)
+        inject_delay_ms = getenv("LARECOMP_INJECT_FRAME_DELAY_MS") ?
+                          atol(getenv("LARECOMP_INJECT_FRAME_DELAY_MS")) : 0;
+    if (inject_delay_ms > 0 && total_frames > 2600)
+        SDL_Delay((Uint32)inject_delay_ms);
     extern void fnprof_frame(uint64_t frame);
     fnprof_frame(total_frames);
     extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (LARECOMP_REBOOT_AT)
