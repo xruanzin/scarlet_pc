@@ -89,20 +89,7 @@ static bool in_pass;
 _Static_assert(SUBS > MAX_QUEUE_LISTS, "queue batch must not wrap the slot ring");
 static VkCommandBufferSubmitInfo qbatch_cbs[QBATCH_MAX_CBS];
 static uint32_t qbatch_ncb, qbatch_lists;
-static uint32_t qbatch_open_lists;  // completed guest lists still recording in the current main CB
-static uint64_t stat_logical_submits, stat_queue_batches, stat_queue_cbs, stat_coalesced_lists;
-
-static bool list_coalesce_enabled(void) {
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("LARECOMP_LIST_COALESCE");
-        on = e ? atoi(e) != 0 : 1;
-        LOG("[vk] guest command-list coalescing: %s\n", on ? "enabled" : "disabled");
-    }
-    return on != 0;
-}
-
-static bool qbatch_finish_current(bool force_main);
+static uint64_t stat_logical_submits, stat_queue_batches;
 
 static int queue_batch_limit(void) {
     static int n = -1;
@@ -111,9 +98,10 @@ static int queue_batch_limit(void) {
         n = e ? atoi(e) : 16;
         if (n < 1) n = 1;
         if (n > MAX_QUEUE_LISTS) n = MAX_QUEUE_LISTS;
-        // Queue calls are amortized across sixteen guest lists. With command-list
-        // coalescing enabled, lists without an intervening upload also share the
-        // same main command buffer/dynamic-rendering instance.
+        // Keep guest lists as distinct command buffers, but amortize queue submission
+        // across sixteen lists. Scarlet still records thousands of logical lists in a
+        // short window; batching 8 cut submit count roughly in half on the Ryzen 4600G,
+        // so extend that same ordered batching without changing guest command order.
     }
     return n;
 }
@@ -190,14 +178,6 @@ VkCommandBuffer vk_cmd(void) {
 
 VkCommandBuffer vk_upload_cmd(void) {
     Sub *s = sub();
-    if (list_coalesce_enabled() && qbatch_open_lists && s->main_begun) {
-        // The previous guest lists are intentionally sharing this main CB.
-        // An upload discovered by the next list must execute after those lists
-        // but before the draw that needs it, so close the shared main chunk
-        // here and continue in a fresh upload/main pair.
-        qbatch_finish_current(false);
-        s = sub();
-    }
     begin_cb(&s->upload, &s->upload_begun);
     return s->upload;
 }
@@ -417,37 +397,39 @@ void vk_gpuprof_report(void) {
 static bool qbatch_finish_current(bool force_main) {
     // Reserve for the worst-case upload/main pair before writing either entry.
     if (qbatch_ncb > QBATCH_MAX_CBS - 2)
-        FATAL("vk: queue batch capacity exhausted before chunk finalization\n");
+        FATAL("vk: queue batch capacity exhausted before list finalization\n");
     vk_end_pass();
 
-    // A CB chunk can contain several completed guest command lists. Keeping
-    // the dynamic-rendering instance open across those list boundaries avoids
-    // an EndRendering/BeginRendering + graphics barrier cycle for every tiny
-    // Scarlet list. Upload discovery, explicit sync/present and the queue-batch
-    // limit still close the chunk in exact execution order.
-    Sub *subp = sub();
-    if (!subp->main_begun && !subp->upload_begun && !force_main) return false;
+    // Do not force a transform-feedback memory barrier merely because one
+    // command buffer/list ends. Commands submitted to the same Vulkan queue
+    // remain ordered across submissions, and tf_pending_used_by_draw()/the
+    // explicit copy/compute/RT paths insert the visibility barrier at the first
+    // real consumer. Flushing here created one barrier per queue batch even when
+    // the captured stream was never read before being overwritten again.
+    Sub *s = sub();
+    if (!s->main_begun && !s->upload_begun && !force_main) return false;
 
-    if (subp->upload_begun) {
-        vk_upload_visibility_barrier(subp->upload);
-        VK_CHECK(vkEndCommandBuffer(subp->upload));
+    if (s->upload_begun) {
+        vk_upload_visibility_barrier(s->upload);
+        VK_CHECK(vkEndCommandBuffer(s->upload));
         if (qbatch_ncb >= QBATCH_MAX_CBS) FATAL("vk: queue batch command-buffer overflow\n");
         qbatch_cbs[qbatch_ncb++] = (VkCommandBufferSubmitInfo){
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = subp->upload};
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->upload};
     }
 
-    if (force_main && !subp->main_begun) vk_cmd();
-    if (subp->main_begun) {
-        if (subp->ts)
-            vkCmdWriteTimestamp2(subp->main, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+    if (force_main && !s->main_begun) vk_cmd();
+    if (s->main_begun) {
+        if (s->ts)
+            vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                  prof_qp, (uint32_t)cur_sub * 2 + 1);
-        VK_CHECK(vkEndCommandBuffer(subp->main));
+        VK_CHECK(vkEndCommandBuffer(s->main));
         if (qbatch_ncb >= QBATCH_MAX_CBS) FATAL("vk: queue batch command-buffer overflow\n");
         qbatch_cbs[qbatch_ncb++] = (VkCommandBufferSubmitInfo){
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = subp->main};
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->main};
     }
 
-    qbatch_open_lists = 0;
+    qbatch_lists++;
+    stat_logical_submits++;
     cur_sub = (cur_sub + 1) % SUBS;
     return true;
 }
@@ -498,7 +480,6 @@ static void qbatch_submit(VkSemaphore wait, VkSemaphore signal) {
         PROF_T0();
         dl_note("queue submit %llu: %u lists, %u command buffers",
                 (unsigned long long)seq, qbatch_lists, qbatch_ncb);
-        stat_queue_cbs += qbatch_ncb;
         flush_transient_writes();
         VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, VK_NULL_HANDLE);
         if (sr == VK_ERROR_DEVICE_LOST) vk_devlost_dump();
@@ -512,7 +493,7 @@ static void qbatch_submit(VkSemaphore wait, VkSemaphore signal) {
     stat_flushes++;
     stat_queue_batches++;
     cum_submits++;
-    qbatch_ncb = qbatch_lists = qbatch_open_lists = 0;
+    qbatch_ncb = qbatch_lists = 0;
     ring_retire();
     vk_collect_dead();
 
@@ -530,32 +511,10 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     qbatch_submit(wait, signal);
 }
 
-// List-end path. By default consecutive guest lists keep recording into the
-// same main CB; LARECOMP_LIST_COALESCE=0 restores the old one-CB-per-list path.
+// List-end path: keep each list in its own CB, but amortize the queue call.
 static void renderer_submit_list(void) {
-    if (!list_coalesce_enabled()) {
-        if (!qbatch_finish_current(false)) return;
-        qbatch_lists++;
-        stat_logical_submits++;
-        if ((int)qbatch_lists >= queue_batch_limit()) qbatch_submit(VK_NULL_HANDLE, VK_NULL_HANDLE);
-        return;
-    }
-
-    Sub *subp = sub();
-    bool have_work = subp->main_begun || subp->upload_begun;
-    if (!have_work && !qbatch_ncb) return;
-
-    qbatch_lists++;
-    stat_logical_submits++;
-    if (have_work) {
-        qbatch_open_lists++;
-        if (qbatch_open_lists > 1) stat_coalesced_lists++;
-    }
-
-    if ((int)qbatch_lists >= queue_batch_limit()) {
-        qbatch_finish_current(false);
-        qbatch_submit(VK_NULL_HANDLE, VK_NULL_HANDLE);
-    }
+    if (!qbatch_finish_current(false)) return;
+    if ((int)qbatch_lists >= queue_batch_limit()) qbatch_submit(VK_NULL_HANDLE, VK_NULL_HANDLE);
 }
 
 void renderer_submit(void) {
@@ -1267,10 +1226,6 @@ const char *renderer_stats(void) {
         snprintf(stats_text + n, sizeof stats_text - n, ", qbatch %llu lists/%llu queue",
                  (unsigned long long)stat_logical_submits,
                  (unsigned long long)stat_queue_batches);
-        n = strlen(stats_text);
-        snprintf(stats_text + n, sizeof stats_text - n, " qcb %llu merged %llu",
-                 (unsigned long long)stat_queue_cbs,
-                 (unsigned long long)stat_coalesced_lists);
     }
     {
         uint32_t bf[4] = {0}; uint64_t bc[4] = {0};
@@ -1373,7 +1328,7 @@ const char *renderer_stats(void) {
     }
     stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = stat_raster_discard_sets = stat_raster_discard_on = stat_a2c_1x = 0;
     stat_vkbar_full = stat_vkbar_graphics = stat_vkbar_compute = stat_vkbar_transfer = stat_vkbar_upload = 0;
-    stat_logical_submits = stat_queue_batches = stat_queue_cbs = stat_coalesced_lists = 0;
+    stat_logical_submits = stat_queue_batches = 0;
     stat_tf_dep_vbuf = stat_tf_dep_cbuf = stat_tf_dep_sbuf = stat_tf_dep_gmem = stat_tf_dep_op = stat_tf_dep_submit = stat_tf_dep_rt = 0;
     return stats_text;
 }
