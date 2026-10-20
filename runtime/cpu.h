@@ -60,13 +60,19 @@ typedef uint8_t __attribute__((may_alias)) u8a;
 // Function-entry profiler (runtime/fnprof.c, LARECOMP_FNPROF): one predictable branch per call when off.
 // Function hooks (runtime/fnhook.c): while any is registered, rt_fnhook may handle the call (returns 1: the guest
 // function returns at once, with the registers the hook left).
-extern volatile int g_fnprof;
+enum { FN_FLAG_PROF = 1u, FN_FLAG_HOOK = 2u };
+extern volatile unsigned g_fn_enter_flags;
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
-extern volatile int g_fnhook;
 int rt_fnhook(Cpu *c, uint64_t addr);
-#define FN_ENTER(a) do {                                                             \
-        if (__builtin_expect(g_fnprof, 0)) fnprof_hit(a, c->x[30], c->x[0]);         \
-        if (__builtin_expect(g_fnhook, 0) && rt_fnhook(c, a)) return;                \
+#define FN_ENTER(a) do {                                                                 \
+        /* Scarlet can enter ~180k lifted functions per frame in crowded scenes.          \
+           Keep diagnostics at one relaxed flag load/branch when both profilers/hooks      \
+           are off instead of two volatile global loads on every guest call. */            \
+        unsigned _ff = __atomic_load_n(&g_fn_enter_flags, __ATOMIC_RELAXED);               \
+        if (__builtin_expect(_ff != 0, 0)) {                                               \
+            if (_ff & FN_FLAG_PROF) fnprof_hit(a, c->x[30], c->x[0]);                     \
+            if ((_ff & FN_FLAG_HOOK) && rt_fnhook(c, a)) return;                          \
+        }                                                                                  \
     } while (0)
 
 #define LD8(a)  (*(const u8a *)(uintptr_t)(a))
