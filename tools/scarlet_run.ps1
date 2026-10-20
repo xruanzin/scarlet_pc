@@ -150,6 +150,9 @@ foreach ($Name in @(
     'LARECOMP_FRAME_CSV',
     'LARECOMP_FNPROF',
     'LARECOMP_FNPROF_OUT',
+    'LARECOMP_FNPROF_AUTO_MS',
+    'LARECOMP_FNPROF_AUTO_CONSEC',
+    'LARECOMP_FNPROF_AUTO_FRAMES',
     'LARECOMP_GPUPROF_AT',
     'LARECOMP_SLOW_FRAME_MS',
     'LARECOMP_INJECT_FRAME_DELAY_MS'
@@ -202,7 +205,14 @@ try {
         $env:LARECOMP_HLE_PROF = '1'
         $env:LARECOMP_VK_PROF = '1'
         $env:LARECOMP_FRAME_CSV = Join-Path $PerformanceDir 'frames.csv'
-        if (-not $env:LARECOMP_FNPROF) { $env:LARECOMP_FNPROF = '2860:2920' }
+        # Function profiling follows actual slowness instead of a brittle absolute frame range.
+        # Three consecutive >=70 ms frames (~14 FPS or worse) arm a short capture of the same slow scene.
+        # Setting LARECOMP_FNPROF=<from>:<to> explicitly still selects the old fixed-window mode.
+        if (-not $env:LARECOMP_FNPROF -and -not $env:LARECOMP_FNPROF_AUTO_MS) {
+            $env:LARECOMP_FNPROF_AUTO_MS = '70'
+            $env:LARECOMP_FNPROF_AUTO_CONSEC = '3'
+            $env:LARECOMP_FNPROF_AUTO_FRAMES = '90'
+        }
         $env:LARECOMP_FNPROF_OUT = Join-Path $PerformanceDir 'fnprof.txt'
         if (-not $env:LARECOMP_GPUPROF_AT) { $env:LARECOMP_GPUPROF_AT = '1200,2200,2900,4000' }
 
@@ -212,7 +222,7 @@ try {
             BuiltHead = $BuiltHeadNow
             Backend = $Backend
             Performance = [bool]$Performance
-            FunctionFrames = $env:LARECOMP_FNPROF
+            FunctionFrames = if ($env:LARECOMP_FNPROF) { $env:LARECOMP_FNPROF } else { "auto-slow" }
             LogicalProcessors = [Environment]::ProcessorCount
             Environment = [ordered]@{
                 LARECOMP_SCALE = $env:LARECOMP_SCALE
@@ -223,6 +233,9 @@ try {
                 LARECOMP_FRAME_CSV = $env:LARECOMP_FRAME_CSV
                 LARECOMP_FNPROF = $env:LARECOMP_FNPROF
                 LARECOMP_FNPROF_OUT = $env:LARECOMP_FNPROF_OUT
+                LARECOMP_FNPROF_AUTO_MS = $env:LARECOMP_FNPROF_AUTO_MS
+                LARECOMP_FNPROF_AUTO_CONSEC = $env:LARECOMP_FNPROF_AUTO_CONSEC
+                LARECOMP_FNPROF_AUTO_FRAMES = $env:LARECOMP_FNPROF_AUTO_FRAMES
                 LARECOMP_GPUPROF_AT = $env:LARECOMP_GPUPROF_AT
             }
         }
@@ -250,6 +263,9 @@ try {
         Remove-Item Env:LARECOMP_FRAME_CSV -ErrorAction SilentlyContinue
         Remove-Item Env:LARECOMP_FNPROF -ErrorAction SilentlyContinue
         Remove-Item Env:LARECOMP_FNPROF_OUT -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_FNPROF_AUTO_MS -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_FNPROF_AUTO_CONSEC -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_FNPROF_AUTO_FRAMES -ErrorAction SilentlyContinue
         Remove-Item Env:LARECOMP_GPUPROF_AT -ErrorAction SilentlyContinue
         Remove-Item Env:LARECOMP_SLOW_FRAME_MS -ErrorAction SilentlyContinue
     }

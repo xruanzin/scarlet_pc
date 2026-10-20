@@ -1025,6 +1025,10 @@ void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
             ((double)dt - ex - present_ns) / 1e6, (unsigned long long)(cum_draws - l_draws), (unsigned long long)(cum_submits - l_subs),
             atomic_load(&jobs_pending));
     }
+    if (last_t) {
+        extern void fnprof_note_frame(uint64_t frame, double frame_ms);
+        fnprof_note_frame(frame, (now - last_t) / 1e6);
+    }
     last_t = now; l_exec = cum_exec; l_wait = cum_wait; l_draws = cum_draws; l_subs = cum_submits;
 }
 
