@@ -166,6 +166,7 @@ class Module:
         # Guest entry -> host HLE symbol. Direct BL sites use this table too,
         # bypassing the generated f_<addr> wrapper when the target is known.
         self.direct_hle = {}
+        self.always_inline_bytes = 96
 
     def in_text(self, a):
         return self.lo <= a < self.hi and a % 4 == 0
@@ -556,7 +557,15 @@ class Module:
         raise Unsupported(k)
 
     def emit_function(self, entry, end, labels, tables, hle, resumable=False):
-        out = [f'void {fname(entry)}(Cpu * restrict c) {{']
+        # Tiny lifted functions are ubiquitous in Scarlet (getters, wrappers,
+        # STL helpers). ThinLTO can see across chunks, but its size heuristic
+        # still leaves a large amount of host call/Cpu-state traffic behind.
+        # Force-inline compact ordinary entries while retaining their external
+        # out-of-line copy for the dispatch table / indirect calls.
+        force_inline = (not resumable and end > entry and
+                        end - entry <= self.always_inline_bytes)
+        attr = '__attribute__((always_inline, hot)) ' if force_inline else ''
+        out = [f'{attr}void {fname(entry)}(Cpu * restrict c) {{']
         if entry in hle:
             out.append(f'    {sanitize(hle[entry])}(c);')
             out.append('}')
@@ -749,6 +758,8 @@ def main():
     ap.add_argument('--chunk', type=int, default=1500)  # functions per file at most
     ap.add_argument('--chunk-bytes', type=int, default=1500000)  # and about this much C (even compile times)
     ap.add_argument('--big-fn', type=int, default=100000)  # bytes of C from which a function gets its own file
+    ap.add_argument('--always-inline-bytes', type=int, default=96,
+                    help='force-inline lifted non-resumable functions up to this many guest text bytes (0 disables)')
     ap.add_argument('--limit', type=int, default=0)
     ap.add_argument('--extra-entry', action='append', default=[],
                     help='additional absolute guest code entry (repeatable; hex accepted)')
@@ -765,6 +776,7 @@ def main():
 
     t0 = time.time()
     m = Module(args.name, args.nso, args.base, args.simd, args.trace_stores)
+    m.always_inline_bytes = max(0, args.always_inline_bytes)
     m.setjmp_targets.update(args.setjmp_target)
     if any(not m.in_text(a) for a in m.setjmp_targets):
         raise SystemExit('setjmp target outside module text')
