@@ -4989,7 +4989,12 @@ static void exec_list(uint64_t handle, int depth) {
             }
             break;
         }
-        case CMD_SET_POLYGON_OFFSET: memcpy(st.poly_offset, r->f, sizeof st.poly_offset); break;
+        case CMD_SET_POLYGON_OFFSET:
+            for (int i = 0; i < 3; i++) {
+                uint32_t bits = (uint32_t)r->x[4 + i];
+                memcpy(&st.poly_offset[i], &bits, sizeof bits);
+            }
+            break;
         case CMD_SET_PRIMITIVE_RESTART: st.prim_restart = r->x[0] != 0; st.restart_index = (uint32_t)r->x[1]; break;
         case CMD_SET_RASTERIZER_DISCARD:
             st.raster_discard = r->x[0] != 0;
@@ -5036,7 +5041,11 @@ static void exec_list(uint64_t handle, int depth) {
             snap_reason = "clear-depth"; snapshots_invalidate(NULL);
             if (st.rt.depth) {
                 bool has_stencil = renderer_format_has_stencil(st.rt.depth->format);
-                clear(-1, 0, NULL, 0, r->x[0] != 0, r->f[0], has_stencil && r->x[2] != 0, (uint32_t)r->x[1], (uint32_t)r->x[2]);
+                uint32_t depth_bits = (uint32_t)r->x[6];
+                float depth_value;
+                memcpy(&depth_value, &depth_bits, sizeof depth_value);
+                clear(-1, 0, NULL, 0, r->x[0] != 0, depth_value, has_stencil && r->x[2] != 0,
+                      (uint32_t)r->x[1], (uint32_t)r->x[2]);
             }
             break;
         case CMD_DISPATCH_INDIRECT: {

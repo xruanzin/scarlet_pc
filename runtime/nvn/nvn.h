@@ -138,8 +138,7 @@ void nvn_diag_tf_state(NvnCmdBuf *cb, const char *name);
 // One recorded command: header, the call's integer and float arguments, then copied data.
 typedef struct {
     uint32_t op, size;  // size includes the header, multiple of 8
-    uint64_t x[7];      // x1..x7 of the call
-    float f[4];         // s0..s3 of the call
+    uint64_t x[7];      // x1..x7; rare float args are bit-packed into unused x slots
     uint8_t extra[];
 } CmdRec;
 

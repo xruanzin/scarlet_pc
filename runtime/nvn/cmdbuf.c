@@ -465,7 +465,7 @@ NVN(nvnCommandBufferAddCommandMemory) {
     if (mem && size) {
         // Do not scan/recycle the whole guest command-memory grant here.
         // Scarlet calls AddCommandMemory over a million times in a few minutes
-        // and only one 80-byte handle slot is actually overwritten by each
+        // and only one fixed-size handle slot is actually overwritten by each
         // BeginRecording. BeginRecording now recycles that exact slot under the
         // same allocator lock used to take its replacement segment. Intact old
         // handles remain valid until their slot is really overwritten.
@@ -536,7 +536,7 @@ static CmdRec *rec_uninit(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
 // fields to be zero. Keep that guarantee only for those uncommon records.
 static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     CmdRec *r = rec_uninit(c, cb, op, extra);
-    memset(r->x, 0, sizeof r->x + sizeof r->f);
+    memset(r->x, 0, sizeof r->x);
     return r;
 }
 
@@ -684,19 +684,18 @@ NVN(nvnCommandBufferEndRecording) {
 NVN(nvnCommandBufferIsRecording) { RET(cb_of(A(0))->recording); }
 
 // ---- generic recorders
-typedef struct { uint64_t x[8]; float f[4]; } Snap;
+typedef struct { uint64_t x[8]; } Snap;
 static Snap snap(Cpu *c) {
     Snap s;
     memcpy(s.x, c->x, sizeof s.x);
-    for (int i = 0; i < 4; i++) s.f[i] = *(float *)&c->v[i];
     return s;
 }
 static CmdRec *record(Cpu *c, uint32_t op, uint32_t extra, Snap *s) {
-    // s->x[1..7] and s->f[0..3] overwrite the entire fixed payload, so do
-    // not pre-zero 72 bytes for every recorded NVN command.
+    // The fixed payload is exactly x1..x7. Float arguments are used by only
+    // two NVN commands and are packed explicitly there instead of bloating
+    // every record and every snapshot.
     CmdRec *r = rec_uninit(c, cb_of(s->x[0]), op, extra);
     memcpy(r->x, s->x + 1, sizeof r->x);
-    memcpy(r->f, s->f, sizeof r->f);
     return r;
 }
 // record with a copy of `len` bytes from the guest pointer in argument `arg`
@@ -862,7 +861,16 @@ NVN(nvnCommandBufferSetStencilValueMask) { Snap s = snap(c); CmdRec *r = record(
 PLAIN(nvnCommandBufferSetPrimitiveRestart, CMD_SET_PRIMITIVE_RESTART)
 PLAIN(nvnCommandBufferSetAlphaRef, CMD_SET_ALPHA_REF)
 PLAIN(nvnCommandBufferSetDepthBounds, CMD_SET_DEPTH_BOUNDS)
-PLAIN(nvnCommandBufferSetPolygonOffsetClamp, CMD_SET_POLYGON_OFFSET)
+NVN(nvnCommandBufferSetPolygonOffsetClamp) {
+    Snap s = snap(c);
+    CmdRec *r = record(c, CMD_SET_POLYGON_OFFSET, 0, &s);
+    // factor/units/clamp arrive in s0..s2. x4..x6 are unused by this opcode.
+    for (int i = 0; i < 3; i++) {
+        uint32_t bits;
+        memcpy(&bits, &c->v[i], sizeof bits);
+        r->x[4 + i] = bits;
+    }
+}
 PLAIN(nvnCommandBufferSetLineWidth, CMD_SET_LINE_WIDTH)
 PLAIN(nvnCommandBufferSetPointSize, CMD_SET_POINT_SIZE)
 PLAIN(nvnCommandBufferSetSampleMask, CMD_SET_SAMPLE_MASK)
@@ -908,7 +916,14 @@ NVN(nvnCommandBufferGetCopyImageStride) { RET(copy_image_stride); }
 NVN(nvnCommandBufferClearColor) { record_copy(c, CMD_CLEAR_COLOR, 2, 16); }
 NVN(nvnCommandBufferClearColori) { CmdRec *r = record_copy(c, CMD_CLEAR_COLOR, 2, 16); r->x[5] = 1; }
 NVN(nvnCommandBufferClearColorui) { CmdRec *r = record_copy(c, CMD_CLEAR_COLOR, 2, 16); r->x[5] = 2; }
-PLAIN(nvnCommandBufferClearDepthStencil, CMD_CLEAR_DEPTH_STENCIL)
+NVN(nvnCommandBufferClearDepthStencil) {
+    Snap s = snap(c);
+    CmdRec *r = record(c, CMD_CLEAR_DEPTH_STENCIL, 0, &s);
+    // depth is the sole FP argument; x6 is unused by the executor otherwise.
+    uint32_t bits;
+    memcpy(&bits, &c->v[0], sizeof bits);
+    r->x[6] = bits;
+}
 // ClearTexture(cmd, texture, view, region, color, mask)
 typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; float color[4]; } ClearTexRec;
 static void clear_texture(Cpu *c, int kind) {
