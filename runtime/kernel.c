@@ -820,7 +820,22 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         // assignment must not be ignored even though host OS affinity is separate.
         if (ideal != -3) {
             if (ideal == -2) ideal = 0;
-            if (ideal < 0 || ideal >= 4 || !(mask & (1ull << ideal))) {
+            if (ideal == -1) {
+                // Horizon -1 means no preferred core inside the allowed mask.
+                // Picking the first bit every time collapses Scarlet's "any core"
+                // worker threads onto virtual core 0 (and therefore the same
+                // Windows ideal processor). Spread them across the allowed
+                // virtual cores while still reporting a valid 0..3 core to the
+                // guest job system.
+                static _Atomic uint32_t any_core_rr;
+                uint32_t start = atomic_fetch_add_explicit(&any_core_rr, 1, memory_order_relaxed) & 3u;
+                int pick = -1;
+                for (int n = 0; n < 4; n++) {
+                    int k = (int)((start + (uint32_t)n) & 3u);
+                    if (mask & (1ull << k)) { pick = k; break; }
+                }
+                ideal = pick;
+            } else if (ideal < 0 || ideal >= 4 || !(mask & (1ull << ideal))) {
                 ideal = -1;
                 for (int k = 0; k < 4; k++)
                     if (mask & (1ull << k)) { ideal = k; break; }
