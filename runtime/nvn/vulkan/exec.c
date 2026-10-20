@@ -72,7 +72,11 @@ void vk_collect_dead(void);
 // already-ended, not-yet-submitted command buffers.
 #define SUBS (MAX_QUEUE_LISTS * 2)
 #define DESC_BATCH 16
-#define DESC_LAYOUT_CACHE 8
+// Scarlet can touch dozens of shader layouts inside one queued submission.
+// Eight entries caused constant eviction: captures showed thousands of
+// vkAllocateDescriptorSets calls despite 16-set batching. 64 entries costs
+// only a few hundred KiB across the submission ring and lets each batch drain.
+#define DESC_LAYOUT_CACHE 64
 typedef struct {
     VkDescriptorSetLayout layout;
     VkDescriptorSet set[DESC_BATCH];
