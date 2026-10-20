@@ -509,8 +509,36 @@ if ($Ext -eq ".nsp") {
     }
 }
 
-# Fallback for XCI and for NSPs whose virtual find traversal did not return a
-# usable mounted path.
+# NSP Program NCAs normally expose an ExeFS PFS section plus RomFS (and often
+# a second PFS section for logo data). Recognize that shape directly instead of
+# relying only on a recursive find through WinFsp.
+if (-not $ChosenNpdm -and $Ext -eq ".nsp") {
+    foreach ($RootEntry in @(Get-ChildItem -LiteralPath ($MountPoint + "\") -Force -ErrorAction SilentlyContinue)) {
+        if (-not (Test-Path -LiteralPath $RootEntry.FullName -PathType Container)) { continue }
+
+        $ExeSection = Join-Path $RootEntry.FullName "section 0"
+        $ExeRaw = Join-Path $RootEntry.FullName "section 0.nsp"
+        $RomRaw = Join-Path $RootEntry.FullName "section 1.romfs"
+        if (-not (Test-Path -LiteralPath $ExeSection -PathType Container)) { continue }
+        if (-not (Test-Path -LiteralPath $ExeRaw -PathType Leaf)) { continue }
+        if (-not (Test-Path -LiteralPath $RomRaw -PathType Leaf)) { continue }
+
+        Write-Host ("[scarlet-package] NSP Program NCA candidato: " + $RootEntry.Name) -ForegroundColor DarkGray
+
+        $NpdmEntry = @(Get-ChildItem -LiteralPath $ExeSection -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ieq "main.npdm" } | Select-Object -First 1)
+        if (-not $NpdmEntry.Count) { continue }
+
+        $ProgramId = Get-ProgramId $NpdmEntry[0].FullName
+        Write-Host ("[scarlet-package] ExeFS candidato: " + $ExeSection + " program_id=0x" + $ProgramId.ToString("x16")) -ForegroundColor DarkGray
+        if ($ProgramId -eq [UInt64]0x0100A3D008C5C000) {
+            $ChosenNpdm = $NpdmEntry[0].FullName
+            break
+        }
+    }
+}
+
+# Fallback for XCI and for unusual NSP layouts.
 if (-not $ChosenNpdm) {
     foreach ($SearchRoot in $SearchRoots) {
         $Candidate = Find-MountedMainNpdm $SearchRoot
@@ -543,8 +571,16 @@ if (-not $ChosenNpdm) {
                 continue
             }
             foreach ($Child in $Children) {
-                $Kind = if (Test-Path -LiteralPath $Child.FullName -PathType Container) { "dir" } else { "file" }
+                $IsDir = Test-Path -LiteralPath $Child.FullName -PathType Container
+                $Kind = if ($IsDir) { "dir" } else { "file" }
                 $Diag.Add("$($Entry.Name)/$($Child.Name) [$Kind]")
+
+                if ($IsDir -and $Child.Name -eq "section 0") {
+                    foreach ($Grand in @(Get-ChildItem -LiteralPath $Child.FullName -Force -ErrorAction SilentlyContinue | Select-Object -First 16)) {
+                        $GrandKind = if (Test-Path -LiteralPath $Grand.FullName -PathType Container) { "dir" } else { "file" }
+                        $Diag.Add("$($Entry.Name)/section 0/$($Grand.Name) [$GrandKind]")
+                    }
+                }
             }
         }
     } else {
