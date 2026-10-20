@@ -40,7 +40,14 @@ if (Test-Path -LiteralPath $Exe -PathType Leaf) {
     }
     elseif (-not $BuiltHead -or $BuiltHead -ne $Head) {
         Write-Host "[scarlet-run] EXE nao corresponde ao HEAD atual; recompilando runtime..." -ForegroundColor Yellow
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "scarlet_build_windows.ps1") -ForceRuntime
+        $BuildScript = Join-Path $PSScriptRoot "scarlet_build_windows.ps1"
+        $ThinLtoMarker = Join-Path $RepoRoot "build\.thinlto_enabled"
+        if (Test-Path -LiteralPath $ThinLtoMarker -PathType Leaf) {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO
+        }
+        else {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime
+        }
         if ($LASTEXITCODE -ne 0) {
             throw "Build do runtime falhou (exit $LASTEXITCODE). Envie scarlet_build.log."
         }
