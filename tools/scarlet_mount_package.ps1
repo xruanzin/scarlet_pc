@@ -299,21 +299,6 @@ Test-FuseNxRuntime $FuseNx
 
 $StateDir = Join-Path $RepoRoot "build\package-direct"
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
-$FindErr = Join-Path $StateDir "find.err.log"
-Remove-Item -LiteralPath $FindErr -Force -ErrorAction SilentlyContinue
-
-Write-Host "[scarlet-package] Localizando ExeFS dentro do ${Ext} sem extrair..." -ForegroundColor Cyan
-$SearchStart = if ($Ext -eq ".xci") { "/secure" } else { "/" }
-# Stop at the first program NPDM. For XCI, search only the secure game
-# partition so the system-update partition is never walked.
-$Found = @(& $FuseNx -k $Keys find -m 1 -d 6 "main.npdm" $PackagePath $SearchStart 2> $FindErr)
-$FindCode = $LASTEXITCODE
-if ($FindCode -ne 0) {
-    $Tail = if (Test-Path $FindErr) { (Get-Content $FindErr -Tail 20) -join [Environment]::NewLine } else { "" }
-    throw "Fuse-Nx nao conseguiu ler o pacote (exit $FindCode). $Tail"
-}
-$VirtualNpdms = @($Found | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match "(^|/)main[.]npdm$" })
-if ($VirtualNpdms.Count -eq 0) { throw "Nenhum main.npdm foi localizado dentro do pacote." }
 
 if (-not $DriveLetter) {
     $Used = @([IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0,1).ToUpperInvariant() })
@@ -347,15 +332,66 @@ if (-not $Mounted) {
     throw "A montagem virtual nao ficou pronta. $Tail"
 }
 
-$ChosenNpdm = $null
-$ChosenVirtual = $null
-foreach ($Virtual in $VirtualNpdms) {
-    $Host = To-HostPath $MountPoint $Virtual
-    if ((Get-ProgramId $Host) -eq [UInt64]0x0100A3D008C5C000) { $ChosenNpdm=$Host; $ChosenVirtual=$Virtual; break }
+function Find-MountedMainNpdm {
+    param([string]$Root)
+
+    # Do a small breadth-first walk over container directories only. ExeFS is
+    # only a few levels below /secure in an XCI (or the PFS root in an NSP);
+    # do not recurse into a parsed RomFS tree with thousands of game files.
+    $Queue = New-Object System.Collections.Generic.Queue[object]
+    $Queue.Enqueue([PSCustomObject]@{ Path = $Root; Depth = 0 })
+    $Seen = @{}
+
+    while ($Queue.Count -gt 0) {
+        $Node = $Queue.Dequeue()
+        $Dir = [string]$Node.Path
+        $Depth = [int]$Node.Depth
+        $Key = $Dir.ToLowerInvariant()
+        if ($Seen.ContainsKey($Key)) { continue }
+        $Seen[$Key] = $true
+
+        $Npdm = Join-Path $Dir "main.npdm"
+        if (Test-Path -LiteralPath $Npdm -PathType Leaf) {
+            return $Npdm
+        }
+        if ($Depth -ge 5) { continue }
+
+        $Children = @(Get-ChildItem -LiteralPath $Dir -Directory -ErrorAction SilentlyContinue)
+        foreach ($Child in $Children) {
+            # Parsed RomFS folders can be enormous and never contain main.npdm.
+            # NCA/ExeFS container folders are shallow and should be traversed.
+            if ($Child.Name -match "(?i)romfs$") { continue }
+            $Queue.Enqueue([PSCustomObject]@{ Path = $Child.FullName; Depth = $Depth + 1 })
+        }
+    }
+    return $null
 }
+
+Write-Host "[scarlet-package] Procurando main.npdm na arvore virtual..." -ForegroundColor Cyan
+$SearchRoots = @()
+if ($Ext -eq ".xci") {
+    $Secure = Join-Path ($MountPoint + "\") "secure"
+    if (Test-Path -LiteralPath $Secure -PathType Container) { $SearchRoots += $Secure }
+}
+$SearchRoots += ($MountPoint + "\")
+
+$ChosenNpdm = $null
+foreach ($SearchRoot in $SearchRoots) {
+    $Candidate = Find-MountedMainNpdm $SearchRoot
+    if ($Candidate -and (Get-ProgramId $Candidate) -eq [UInt64]0x0100A3D008C5C000) {
+        $ChosenNpdm = $Candidate
+        break
+    }
+}
+
+# If an XCI ever contains multiple executable NCAs, Find-MountedMainNpdm
+# returns the first one. Scarlet base gamecards normally expose only one Program
+# NCA in /secure; title-id validation above prevents booting the wrong program.
 if (-not $ChosenNpdm) {
     Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue
-    throw "O pacote abriu, mas nao encontrei o Program NCA do Pokemon Scarlet (0100A3D008C5C000)."
+    $Top = @(Get-ChildItem -LiteralPath ($MountPoint + "\") -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+    $TopText = if ($Top.Count) { $Top -join ", " } else { "(vazio)" }
+    throw "O XCI foi montado, mas nao encontrei main.npdm do Pokemon Scarlet (0100A3D008C5C000). Raiz virtual: $TopText"
 }
 
 $ExeFs = Split-Path -Parent $ChosenNpdm
