@@ -438,7 +438,7 @@ class Module:
         if k == 'blr':
             return [f'{{ static RtCallCache ic; c->pc = {ins.target}; c->x[30] = {hx(a + 4)}; rt_dispatch_cached(c, &ic); }}']
         if k == 'br':
-            return [f'{{ static RtCallCache ic; c->pc = {ins.target}; __attribute__((musttail)) return rt_dispatch_cached(c, &ic); }}']
+            return [f'c->pc = {ins.target}; __attribute__((musttail)) return rt_dispatch(c);']
         if k == 'ret':
             return ['return;']
         raise Unsupported(k)
@@ -563,7 +563,7 @@ class Module:
                     out.append(f'    switch ({ins.target}) {{ {cases} default: break; }}')
                     out.append(f'    c->pc = {ins.target}; goto L_dispatch;')
                     continue
-                out.append(f'    {{ static RtCallCache ic; c->pc = {ins.target}; __attribute__((musttail)) return rt_dispatch_cached(c, &ic); }}')
+                out.append(f'    c->pc = {ins.target}; __attribute__((musttail)) return rt_dispatch(c);')
             elif k == 'ret':
                 out.append('    return;')
             last = k

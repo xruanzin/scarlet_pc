@@ -48,13 +48,14 @@ static inline void rt_dispatch_cached(Cpu *c, RtCallCache *cache) {
     // Guest longjmp returns are recognized by rt_dispatch. Do not let a hot
     // branch-site cache bypass that uncommon control-flow escape.
     if (__builtin_expect(c->pc == c->x[30], 0)) {
-        __attribute__((musttail)) return rt_dispatch(c);
+        rt_dispatch(c);
+        return;
     }
     uint64_t key = atomic_load_explicit(&cache->key, memory_order_acquire);
     uintptr_t hit = atomic_load_explicit(&cache->fn, memory_order_relaxed);
     GuestFn f = hit && (key ^ RT_CALL_CACHE_MIX(hit)) == c->pc
         ? (GuestFn)hit : rt_dispatch_cached_slow(c, cache);
-    __attribute__((musttail)) return f(c);
+    f(c);
 }
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc);
 void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) __attribute__((noreturn));
