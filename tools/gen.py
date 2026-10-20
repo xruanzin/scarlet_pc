@@ -39,6 +39,15 @@ SCARLET_MAIN_DIRECT_HLE = {
     },
 }
 
+# Tail import thunks whose resolved target is a defined SDK function. Calling
+# that lifted SDK function directly keeps its exact implementation but avoids
+# the main PLT/GOT thunk and an indirect dispatcher lookup on every call.
+SCARLET_MAIN_DIRECT_GUEST = {
+    'ca44e7dd62e61a2a': {
+        0x3019B40: 0x70063720D0,  # nn::os::SignalLightEvent
+    },
+}
+
 
 def sext26(w):
     v = w & 0x03FFFFFF
@@ -68,6 +77,7 @@ class Module:
         self.mu = None
         self.setjmp_targets = {base + a for a in SCARLET_SETJMP_THUNKS.get(n.build_id, set())} if name == 'main' else set()
         self.setjmp_sites = {}
+        self.direct_guest = {}
 
     def in_text(self, a):
         return self.lo <= a < self.hi and a % 4 == 0
@@ -460,6 +470,12 @@ class Module:
             out.append(f'    {sanitize(hle[entry])}(c);')
             out.append('}')
             return out
+        if entry in self.direct_guest:
+            target = self.direct_guest[entry]
+            self._refs = {target}
+            out.append(f'    {fname(target)}(c);')
+            out.append('}')
+            return out
         out.append(f'    FN_ENTER({hx(entry)});')
         if resumable:
             # Normal direct calls always start at entry. Only the runtime's
@@ -645,6 +661,8 @@ def main():
     if any(not m.in_text(a) for a in m.setjmp_targets):
         raise SystemExit('setjmp target outside module text')
     bid = m.nso.build_id[:16]
+    if args.name == 'main':
+        m.direct_guest = {args.base + off: target for off, target in SCARLET_MAIN_DIRECT_GUEST.get(bid, {}).items()}
     if args.name == 'main' and bid != EEVEE_100_BUILD:
         # The instruction patches are written for Let's Go Eevee 1.0.0's main: moved to the same instructions of a
         # build with an address table (tools/patches.py), left out of any other (another update has other code there).
