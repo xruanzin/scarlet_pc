@@ -16,8 +16,6 @@
 #include "gamesetup.h"
 #include "hle.h"
 
-volatile int g_fnhook;
-
 typedef int (*FnHook)(Cpu *c, uint64_t addr);
 #define NHOOK 1024
 static struct { uint64_t addr; FnHook fn; } hooks[NHOOK];
@@ -59,7 +57,7 @@ static void add_hook(uint64_t addr, FnHook fn) {
     while (hooks[s].addr && hooks[s].addr != addr) s = (s + 1) & (NHOOK - 1);
     hooks[s].addr = addr;
     hooks[s].fn = fn;
-    g_fnhook = 1;
+    __atomic_fetch_or(&g_fn_enter_flags, FN_FLAG_HOOK, __ATOMIC_RELAXED);
 }
 
 static void reg(uint64_t addr, FnHook fn, bool user) {
@@ -82,7 +80,7 @@ void rt_fnhook_set_build(int build) {
     if (build == g_build) return;
     g_build = build;
     memset(hooks, 0, sizeof hooks);
-    g_fnhook = 0;
+    __atomic_fetch_and(&g_fn_enter_flags, ~FN_FLAG_HOOK, __ATOMIC_RELAXED);
     int n = nregs;
     nregs = 0;
     for (int i = 0; i < n; i++) reg(regs[i].addr, regs[i].fn, regs[i].user);
