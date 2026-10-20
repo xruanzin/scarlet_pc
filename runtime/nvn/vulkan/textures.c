@@ -173,7 +173,7 @@ static bool tex_scalable(const NvnTexture *t) {
     // to keep its logical 1920x1080 coordinates while allocating it at the
     // selected internal resolution. Scope the override to Performance mode and
     // the exact HDR shape/format; normal mode preserves guest allocation rules.
-    bool perf_hdr = getenv("LARECOMP_PERFORMANCE") &&
+    bool perf_hdr = getenv("LARECOMP_PERFORMANCE") && !getenv("LARECOMP_NO_HDR_SCALE") &&
                     t->format == 0x3f && t->width == 1920 && t->height == 1080;
     if (perf_hdr) {
         static int logged;
