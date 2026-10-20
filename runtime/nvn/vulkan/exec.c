@@ -1819,7 +1819,9 @@ static void compile_program(void *arg) {
     size_t nv = 0, nf = 0;
     uint64_t t0 = SDL_GetTicksNS();
     uint32_t *sv = vk_glsl_to_spirv(p->vi->msl, STAGE_VERTEX, "vs", &nv);
-    uint32_t *sf = sv ? vk_glsl_to_spirv(p->fi->msl, STAGE_FRAGMENT, "fs", &nf) : NULL;
+    // Transform-feedback skinning is vertex-only and rasterizer-discarded.
+    // Do not compile a fragment shader that the pipeline will never execute.
+    uint32_t *sf = (!p->vkey.xfb && sv) ? vk_glsl_to_spirv(p->fi->msl, STAGE_FRAGMENT, "fs", &nf) : NULL;
     if (sv && getenv("LARECOMP_RENDERDOC_AT")) {  // which guest shader each SPIR-V is: tools/rdc_skin.py (FNV-1a 64)
         static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
         uint64_t h = 0xcbf29ce484222325ull;
@@ -1829,21 +1831,29 @@ static void compile_program(void *arg) {
         if (f) { fprintf(f, "%016llx vs %llx\n", (unsigned long long)h, (unsigned long long)p->code[0]); fclose(f); }
         pthread_mutex_unlock(&lock);
     }
-    if (!sv || !sf) { free(sv); free(sf); atomic_store(&p->state, 2); return; }
+    if (!sv || (!p->vkey.xfb && !sf)) { free(sv); free(sf); atomic_store(&p->state, 2); return; }
     p->nbinds = vk_reflect(sv, nv, p->binds, MAX_BIND);
-    p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
+    if (!p->vkey.xfb)
+        p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
     p->vs = vk_module(sv, nv);
-    p->fs = vk_module(sf, nf);
+    p->fs = p->vkey.xfb ? VK_NULL_HANDLE : vk_module(sf, nf);
     static _Atomic unsigned module_logs;
-    if (atomic_fetch_add(&module_logs, 1) < 8)
-        LOG("[shader] modules %llx/%llx: vertex=%zu words fragment=%zu words\n",
-            (unsigned long long)p->code[0], (unsigned long long)p->code[1], nv, nf);
+    if (atomic_fetch_add(&module_logs, 1) < 8) {
+        if (p->vkey.xfb)
+            LOG("[shader] XFB vertex-only module %llx: vertex=%zu words\n",
+                (unsigned long long)p->code[0], nv);
+        else
+            LOG("[shader] modules %llx/%llx: vertex=%zu words fragment=%zu words\n",
+                (unsigned long long)p->code[0], (unsigned long long)p->code[1], nv, nf);
+    }
     free(sv);
     free(sf);
-    p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
+    p->layout = p->vkey.xfb
+        ? make_layout(p, 1, VK_SHADER_STAGE_VERTEX_BIT, 0)
+        : make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
     atomic_fetch_add(&stat_spirv_ns, SDL_GetTicksNS() - t0);
     atomic_fetch_add(&stat_compiles, 1);
-    atomic_store(&p->state, p->vs && p->fs ? 1 : 2);
+    atomic_store(&p->state, p->vs && (p->vkey.xfb || p->fs) ? 1 : 2);
 }
 
 static void translate_program(void *arg) {
@@ -1905,7 +1915,9 @@ static void translate_program(void *arg) {
             g_exp_count[3]++;
         }
     }
-    if (p->vi->msl && !p->code[1]) {  // vertex-only program (see get_program): an empty fragment shader
+    if (p->vi->msl && (p->vkey.xfb || !p->code[1])) {
+        // Keep an empty ShaderInfo so common draw bookkeeping can stay branch-light,
+        // but do not translate/compile a fragment stage for vertex-only XFB skinning.
         p->fi = calloc(1, sizeof *p->fi);
         p->fi->stage = STAGE_FRAGMENT;
         p->fi->msl = strdup("#version 460\nvoid main() {}\n");
@@ -2022,14 +2034,16 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
         return NULL;
     }
     uint64_t h = 0xcbf29ce484222325ull;
-    for (int i = 0; i < 2; i++) {
+    int nstages = vkey->xfb ? 1 : 2;
+    for (int i = 0; i < nstages; i++) {
         uint64_t values[] = {np->stages[i].code_addr, np->stages[i].const_offset, np->stages[i].const_size};
         for (size_t j = 0; j < sizeof values / sizeof *values; j++)
             for (int k = 0; k < 8; k++) { h ^= (values[j] >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; }
     }
     const uint8_t *vb = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
-    for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    if (!vkey->xfb)
+        for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
     if (!h) h = 1;
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
@@ -2037,7 +2051,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     Prog *p = calloc(1, sizeof *p);
     prog_tab[slot].key = h;
     prog_tab[slot].prog = p;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < (vkey->xfb ? 1 : 2); i++) {
         p->code[i] = np->stages[i].code_addr;
         p->cmax[i] = np->stages[i].const_offset ? np->stages[i].const_offset : 0x10000;
         if (np->stages[i].const_offset && np->stages[i].const_size) {
