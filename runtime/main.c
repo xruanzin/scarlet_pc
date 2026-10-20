@@ -178,14 +178,29 @@ static void teardown(void) {
     LOG("[reboot] game torn down in %llums (%d reset hooks)\n", (unsigned long long)((plat_now_ns() - t0) / 1000000), n);
 }
 
+static void game_exefs_path(const char *root, char *out, size_t size) {
+    const char *mounted = getenv("LARECOMP_EXEFS_DIR");
+    if (mounted && *mounted) snprintf(out, size, "%s", mounted);
+    else snprintf(out, size, "%s/exefs", root);
+}
+
+static void game_romfs_path(const char *root, char *out, size_t size) {
+    const char *mounted = getenv("LARECOMP_ROMFS_DIR");
+    if (mounted && *mounted) snprintf(out, size, "%s", mounted);
+    else snprintf(out, size, "%s/romfs", root);
+}
+
 static void boot(const char *root) {
     g_boot_started_ns = plat_now_ns();
     LOG("[boot-time] boot start\n");
     char exefs[1024], romfs[1024], npdm_path[1024];
-    snprintf(exefs, sizeof exefs, "%s/exefs", root);
-    snprintf(romfs, sizeof romfs, "%s/romfs", root);
+    game_exefs_path(root, exefs, sizeof exefs);
+    game_romfs_path(root, romfs, sizeof romfs);
     snprintf(npdm_path, sizeof npdm_path, "%s/main.npdm", exefs);
     if (!g_romfs_dir) g_romfs_dir = strdup(romfs);
+    if (getenv("LARECOMP_PACKAGE_STREAM"))
+        LOG("[package] direct container: ExeFS=%s RomFS=%s image=%s\n", exefs, romfs,
+            getenv("LARECOMP_ROMFS_IMAGE") ? getenv("LARECOMP_ROMFS_IMAGE") : "(default)");
 
     char why[512];
     if (!gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
@@ -265,7 +280,7 @@ int main(int argc, char **argv) {
         {  // (runtime/fnhook.c: the runtime's hooks, in the address tables of the known builds)
             extern void rt_fnhook_set_build(int build);
             char exefs[1100];
-            snprintf(exefs, sizeof exefs, "%s/exefs", root);
+            game_exefs_path(root, exefs, sizeof exefs);
             int build = game_build(exefs);
             rt_fnhook_set_build(build);
             extern const char *g_game_version;  // (runtime/services/am.c)

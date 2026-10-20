@@ -1,5 +1,11 @@
 param(
+    [Alias("Package","PackagePath")]
     [string]$GameRoot = "D:\Pokemon Scarlet\Extracted\Base",
+    [string]$KeysPath = "",
+    [string]$FuseNxPath = "",
+    [switch]$PackageExtract,
+    [string]$HactoolPath = "",
+    [switch]$PackageForceExtract,
     [switch]$Profile,
     [switch]$Performance,
     [switch]$LiveLog,
@@ -15,12 +21,95 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+
+$PackageMountPid = 0
+$PackageMountPoint = ""
+$PackageEnvBefore = @{}
+foreach ($Name in @("LARECOMP_EXEFS_DIR","LARECOMP_ROMFS_DIR","LARECOMP_ROMFS_IMAGE","LARECOMP_PACKAGE_STREAM")) {
+    $PackageEnvBefore[$Name] = [Environment]::GetEnvironmentVariable($Name, "Process")
+}
+function Stop-ScarletPackageMount {
+    if ($script:PackageMountPid -gt 0) {
+        $p = Get-Process -Id $script:PackageMountPid -ErrorAction SilentlyContinue
+        if ($p) {
+            Write-Host "[scarlet-package] Desmontando $script:PackageMountPoint ..." -ForegroundColor DarkGray
+            Stop-Process -Id $script:PackageMountPid -Force -ErrorAction SilentlyContinue
+            for ($i=0; $i -lt 30 -and $script:PackageMountPoint -and (Test-Path -LiteralPath ($script:PackageMountPoint + "\")); $i++) {
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        $script:PackageMountPid = 0
+    }
+}
+trap {
+    $Failure = $_
+    Stop-ScarletPackageMount
+    Write-Host "" 
+    Write-Host ("[scarlet-run] ERRO: " + $Failure.Exception.Message) -ForegroundColor Red
+    exit 1
+}
+
+# GameRoot can be an extracted root (exefs/ + romfs/) or the user's own XCI/NSP.
+# Packages default to a read-only virtual mount: no game data is extracted.
+$OriginalGameInput = $GameRoot
+$DirectPackage = $false
+$DirectPackageInfo = $null
+if (Test-Path -LiteralPath $GameRoot -PathType Leaf) {
+    $Ext = [System.IO.Path]::GetExtension($GameRoot).ToLowerInvariant()
+    if ($Ext -notin @(".xci", ".nsp")) {
+        throw "Arquivo de jogo nao suportado: $GameRoot. Use uma pasta extraida, .xci ou .nsp."
+    }
+
+    if ($PackageExtract) {
+        $PrepareScript = Join-Path $PSScriptRoot "scarlet_prepare_package.ps1"
+        if (-not (Test-Path -LiteralPath $PrepareScript -PathType Leaf)) { throw "Preparador XCI/NSP ausente: $PrepareScript" }
+        $PrepareArgs = @{ PackagePath = (Resolve-Path -LiteralPath $GameRoot).Path }
+        if ($KeysPath) { $PrepareArgs.KeysPath = $KeysPath }
+        if ($HactoolPath) { $PrepareArgs.HactoolPath = $HactoolPath }
+        if ($PackageForceExtract) { $PrepareArgs.Force = $true }
+        Write-Host "[scarlet-run] Modo legado: extraindo pacote ${Ext} para cache..." -ForegroundColor Yellow
+        $Prepared = @(& $PrepareScript @PrepareArgs)
+        if (-not $Prepared -or -not $Prepared[-1]) { throw "A preparacao do pacote nao retornou a pasta extraida." }
+        $GameRoot = [string]$Prepared[-1]
+    }
+    else {
+        $MountScript = Join-Path $PSScriptRoot "scarlet_mount_package.ps1"
+        if (-not (Test-Path -LiteralPath $MountScript -PathType Leaf)) { throw "Montador direto XCI/NSP ausente: $MountScript" }
+        $MountArgs = @{ PackagePath = (Resolve-Path -LiteralPath $GameRoot).Path }
+        if ($KeysPath) { $MountArgs.KeysPath = $KeysPath }
+        if ($FuseNxPath) { $MountArgs.FuseNxPath = $FuseNxPath }
+
+        Write-Host "[scarlet-run] Abrindo ${Ext} diretamente, sem extrair..." -ForegroundColor Cyan
+        $MountOutput = @(& $MountScript @MountArgs)
+        $MountJson = @($MountOutput | Where-Object { $_ -is [string] -and $_.Trim().StartsWith("{") } | Select-Object -Last 1)
+        if (-not $MountJson) { throw "O montador XCI/NSP nao retornou os caminhos virtuais." }
+        $DirectPackageInfo = $MountJson[0] | ConvertFrom-Json
+        $PackageMountPid = [int]$DirectPackageInfo.ProcessId
+        $PackageMountPoint = [string]$DirectPackageInfo.MountPoint
+        $DirectPackage = $true
+
+        $env:LARECOMP_EXEFS_DIR = [string]$DirectPackageInfo.ExeFs
+        $env:LARECOMP_ROMFS_DIR = [string]$DirectPackageInfo.RomFsDir
+        $env:LARECOMP_ROMFS_IMAGE = [string]$DirectPackageInfo.RomFsImage
+        $env:LARECOMP_PACKAGE_STREAM = "1"
+        Write-Host "[scarlet-run] XCI/NSP montado virtualmente em $PackageMountPoint; zero extracao." -ForegroundColor Green
+    }
+}
+elseif (-not (Test-Path -LiteralPath $GameRoot -PathType Container)) {
+    throw "GameRoot nao encontrado: $GameRoot"
+}
+
 . (Join-Path $PSScriptRoot "scarlet_graphics_backend.ps1")
 if (-not $DirectXDirectory) { $DirectXDirectory = Join-Path $RepoRoot "tools\directx\mesa" }
 $Exe = Join-Path $RepoRoot "build\ScarletRecomp.exe"
 $GameDll = Join-Path $RepoRoot "build\lasgame.dll"
-$ExeFs = Join-Path $GameRoot "exefs"
-$RomFs = Join-Path $GameRoot "romfs"
+if ($DirectPackage) {
+    $ExeFs = [string]$DirectPackageInfo.ExeFs
+    $RomFs = [string]$DirectPackageInfo.RomFsDir
+} else {
+    $ExeFs = Join-Path $GameRoot "exefs"
+    $RomFs = Join-Path $GameRoot "romfs"
+}
 
 # git pull updates source files, not the already-built EXE. Compare the exact
 # Git revision that produced the runtime; timestamps are unreliable after checkout.
@@ -39,17 +128,66 @@ if (Test-Path -LiteralPath $Exe -PathType Leaf) {
         Write-Host "[scarlet-run] Auto-build desativado por LARECOMP_SKIP_AUTO_BUILD=$env:LARECOMP_SKIP_AUTO_BUILD" -ForegroundColor Yellow
     }
     elseif (-not $BuiltHead -or $BuiltHead -ne $Head) {
-        Write-Host "[scarlet-run] EXE nao corresponde ao HEAD atual; recompilando runtime..." -ForegroundColor Yellow
-        $BuildScript = Join-Path $PSScriptRoot "scarlet_build_windows.ps1"
-        $ThinLtoMarker = Join-Path $RepoRoot "build\.thinlto_enabled"
-        if (Test-Path -LiteralPath $ThinLtoMarker -PathType Leaf) {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO
+        $NeedNativeBuild = $true
+        $RuntimeOnlyBuild = $false
+        if ($BuiltHead -and $Head) {
+            # The local checkout may be shallow while .runtime_build_head still
+            # points at an older commit. Avoid revision syntax such as ^{commit}
+            # here (PowerShell/native argument handling is fragile around the
+            # braces) and validate the raw object id instead.
+            $ObjectType = @(& git -C $RepoRoot cat-file -t $BuiltHead 2>$null)
+            $ObjectOk = ($LASTEXITCODE -eq 0 -and $ObjectType -contains "commit")
+
+            if (-not $ObjectOk) {
+                Write-Host "[scarlet-run] Commit do EXE nao esta no clone local; buscando $BuiltHead..." -ForegroundColor DarkGray
+                & git -C $RepoRoot fetch --no-tags --depth=1 origin $BuiltHead 2>$null
+                $FetchCode = $LASTEXITCODE
+                $ObjectType = @(& git -C $RepoRoot cat-file -t $BuiltHead 2>$null)
+                $ObjectOk = ($LASTEXITCODE -eq 0 -and $ObjectType -contains "commit")
+
+                if (-not $ObjectOk) {
+                    Write-Host "[scarlet-run] Nao foi possivel recuperar o commit antigo (fetch exit $FetchCode); usando build completo por seguranca." -ForegroundColor Yellow
+                }
+            }
+
+            if ($ObjectOk) {
+                $Changed = @(& git -C $RepoRoot diff --name-only $BuiltHead $Head 2>$null)
+                if ($LASTEXITCODE -eq 0) {
+                    $NativeChanged = @($Changed | Where-Object {
+                        $_ -match "^(runtime/|generated/)" -or $_ -match "^Makefile$" -or
+                        $_ -match "^tools/(gen[.]py|lifter[.]py|analyze[.]py|nso[.]py|passes[.]py|patches[.]py|simd_c[.]py|gamelib_entry[.]c)$"
+                    })
+                    $GameCodeChanged = @($Changed | Where-Object {
+                        $_ -match "^generated/" -or $_ -match "^Makefile$" -or
+                        $_ -match "^tools/(gen[.]py|lifter[.]py|analyze[.]py|nso[.]py|passes[.]py|patches[.]py|simd_c[.]py|gamelib_entry[.]c)$" -or
+                        $_ -match "^runtime/(cpu[.]h|simd.*[.]h|gamelib[.]h|hle/hle_symbols[.]txt)$"
+                    })
+                    $NeedNativeBuild = $NativeChanged.Count -gt 0
+                    $RuntimeOnlyBuild = $NeedNativeBuild -and $GameCodeChanged.Count -eq 0
+                }
+            }
         }
-        else {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime
-        }
-        if ($LASTEXITCODE -ne 0) {
-            throw "Build do runtime falhou (exit $LASTEXITCODE). Envie scarlet_build.log."
+        if (-not $NeedNativeBuild) {
+            Write-Host "[scarlet-run] HEAD mudou apenas em scripts/docs; mantendo EXE/DLL ja compilados." -ForegroundColor DarkGray
+        } else {
+            $BuildScript = Join-Path $PSScriptRoot "scarlet_build_windows.ps1"
+            $ThinLtoMarker = Join-Path $RepoRoot "build\.thinlto_enabled"
+            if ($RuntimeOnlyBuild) {
+                Write-Host "[scarlet-run] Mudou apenas o runtime; recompilando ScarletRecomp.exe sem relinkar lasgame.dll..." -ForegroundColor Yellow
+                if (Test-Path -LiteralPath $ThinLtoMarker -PathType Leaf) {
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly -ThinLTO
+                } else {
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly
+                }
+            } else {
+                Write-Host "[scarlet-run] Codigo do jogo/runtime mudou; executando build completo..." -ForegroundColor Yellow
+                if (Test-Path -LiteralPath $ThinLtoMarker -PathType Leaf) {
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO
+                } else {
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime
+                }
+            }
+            if ($LASTEXITCODE -ne 0) { throw "Build do runtime falhou (exit $LASTEXITCODE). Envie scarlet_build.log." }
         }
     }
 }
@@ -61,7 +199,10 @@ foreach ($P in @($Exe, $GameDll, (Join-Path $ExeFs "main"), (Join-Path $ExeFs "m
 }
 
 if (-not (Test-Path -LiteralPath $RomFs -PathType Container)) {
-    throw "RomFS extraido nao encontrado: $RomFs"
+    throw "RomFS nao encontrado: $RomFs"
+}
+if ($DirectPackage -and -not (Test-Path -LiteralPath $env:LARECOMP_ROMFS_IMAGE -PathType Leaf)) {
+    throw "RomFS virtual do pacote nao encontrado: $env:LARECOMP_ROMFS_IMAGE"
 }
 
 $MsysBin = "C:\msys64\ucrt64\bin"
@@ -111,7 +252,13 @@ if (Test-Path -LiteralPath $Log) {
 }
 
 Write-Host "[scarlet-run] Primeiro boot do Scarlet..." -ForegroundColor Cyan
+Write-Host "[scarlet-run] Game input: $OriginalGameInput"
 Write-Host "[scarlet-run] Game root: $GameRoot"
+if ($DirectPackage) {
+    Write-Host "[scarlet-run] Package mode: DIRECT STREAM (sem extracao)" -ForegroundColor Green
+    Write-Host "[scarlet-run] ExeFS virtual: $ExeFs"
+    Write-Host "[scarlet-run] RomFS virtual: $env:LARECOMP_ROMFS_IMAGE"
+}
 Write-Host "[scarlet-run] Log: $Log"
 $CurrentHead = (& git -C $RepoRoot rev-parse HEAD 2>$null)
 $MarkerNow = Join-Path $RepoRoot "build\.runtime_build_head"
@@ -548,4 +695,11 @@ if ($GraphicsDir) {
         Write-Host "[scarlet-run] Falha ao compactar; arquivos disponiveis em $GraphicsDir : $_" -ForegroundColor Yellow
     }
 }
+# Keep the virtual package mounted through post-run diagnostics, then release it.
+Stop-ScarletPackageMount
+foreach ($Name in $PackageEnvBefore.Keys) {
+    if ($null -eq $PackageEnvBefore[$Name]) { Remove-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue }
+    else { Set-Item -LiteralPath "Env:$Name" -Value $PackageEnvBefore[$Name] }
+}
+
 exit $Code

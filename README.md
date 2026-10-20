@@ -410,3 +410,18 @@ seus autores, a quem vão todos os créditos. Testada com a versão 3.1 da tradu
 
 A documentação interna do projeto (histórico de cada correção, depuração, compilação) está em português, na pasta
 [docs/](docs).
+
+
+### Boot direto de XCI / NSP no Windows
+
+O runner aceita um dump próprio em `.xci` ou `.nsp` **sem extrair o jogo**. No Windows ele monta o contêiner em modo somente-leitura com Fuse-Nx/WinFsp; ExeFS e RomFS são expostos virtualmente e o runtime lê/descriptografa os blocos necessários sob demanda. O `lasgame.dll` continua sendo o código previamente recompilado.
+
+```powershell
+.\tools\scarlet_run.ps1 -Package "D:\Games\Pokemon Scarlet.xci"
+# ou
+.\tools\scarlet_run.ps1 -Package "D:\Games\Pokemon Scarlet.nsp"
+```
+
+Na primeira execução, o runner baixa o executável oficial Fuse-Nx v1.1 se ele não estiver presente. O driver WinFsp precisa estar instalado no Windows; se faltar, o runner baixa o instalador oficial e informa o caminho, mas não instala um driver sem ação explícita do usuário. `prod.keys` deve vir do próprio Switch; o runner procura os locais usuais e também aceita `-KeysPath`.
+
+O modo antigo de extração para cache continua disponível somente como fallback explícito com `-PackageExtract`. Ele não é usado por padrão.

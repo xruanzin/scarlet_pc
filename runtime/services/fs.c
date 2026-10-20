@@ -26,12 +26,12 @@ static const uint8_t *romfs_map;
 static uint64_t romfs_map_size;
 #endif
 
-static bool romfs_legacy_layout(int fd) {
+static bool romfs_data_first_layout(int fd) {
     uint64_t h[10] = {0};
     if (pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h) return false;
-    // Old scarlet_pc builder put file data at 0x200 and all metadata after it.
-    // Canonical Horizon RomFS keeps metadata before data, so dir-hash offset
-    // must be below data_offset.
+    // Native Switch RomFS images commonly keep file data at/after 0x200 and
+    // place the hash/metadata tables after the file-data region. The direct
+    // XCI path exposes exactly that decrypted filesystem image via Fuse-Nx.
     return h[0] == 0x50 && h[1] > h[9];
 }
 
@@ -509,20 +509,45 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
     }
 }
 
+static bool romfs_image_path(char *path, size_t size) {
+    const char *mounted = getenv("LARECOMP_ROMFS_IMAGE");
+    if (mounted && *mounted) {
+        snprintf(path, size, "%s", mounted);
+        return true;
+    }
+    snprintf(path, size, "%s.bin", g_romfs_dir);  // sibling of extracted romfs/ directory
+    return false;
+}
+
 static Service *open_romfs_storage(void) {
     if (romfs_fd < 0) {
         char path[1024];
-        snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // sibling of extracted romfs/ directory
+        bool direct_package = romfs_image_path(path, sizeof path);
         romfs_fd = open(path, O_RDONLY);
         bool rebuild = false;
-        if (romfs_fd >= 0 && romfs_legacy_layout(romfs_fd)) {
-            LOG("[fs] legacy data-first romfs.bin detected; rebuilding canonical image\n");
-            close(romfs_fd);
-            romfs_fd = -1;
-            remove(path);
-            rebuild = true;
+        if (romfs_fd >= 0 && romfs_data_first_layout(romfs_fd)) {
+            if (direct_package) {
+                // Do not rewrite/copy the game's RomFS. This is the native
+                // filesystem image exposed from the NCA and is valid input for
+                // Horizon's IStorage consumer. Validation and indexing below
+                // operate on offsets from the header and support either table
+                // ordering.
+                LOG("[fs] direct package RomFS: native data-first layout accepted\n");
+            } else {
+                // Keep compatibility with existing scarlet_pc local images:
+                // old generated romfs.bin files are rebuilt into the layout
+                // historically used by this runtime.
+                LOG("[fs] legacy local data-first romfs.bin detected; rebuilding project image\n");
+                close(romfs_fd);
+                romfs_fd = -1;
+                remove(path);
+                rebuild = true;
+            }
         }
         if (romfs_fd < 0) {
+            if (direct_package)
+                FATAL("cannot open direct package RomFS image: %s (%s)\n", path, strerror(errno));
+
             struct stat sb;
             if (stat(g_romfs_dir, &sb) != 0 || !S_ISDIR(sb.st_mode))
                 FATAL("cannot open %s and extracted RomFS directory is missing: %s\n", path, g_romfs_dir);
@@ -541,13 +566,18 @@ static Service *open_romfs_storage(void) {
         if (!romfs_validate_and_log(romfs_fd))
             FATAL("RomFS structural validation failed: %s\n", path);
 #ifdef _WIN32
-        if (!romfs_map) {
+        // Virtual XCI/NSP files are served by WinFsp/Fuse-Nx. Positional reads
+        // preserve true on-demand decryption and avoid asking Windows to map
+        // the whole virtual RomFS as a section.
+        if (!romfs_map && !getenv("LARECOMP_PACKAGE_STREAM")) {
             romfs_map = plat_map_file_ro(romfs_fd, &romfs_map_size);
             if (romfs_map)
                 LOG("[fs] romfs.bin memory-mapped: %llu MiB virtual, demand-paged\n",
                     (unsigned long long)(romfs_map_size >> 20));
             else
                 LOG("[fs] romfs.bin memory map unavailable; using positional reads\n");
+        } else if (getenv("LARECOMP_PACKAGE_STREAM")) {
+            LOG("[fs] direct package RomFS: streaming positional reads (no extraction, no mmap)\n");
         }
 #endif
         rom_index(romfs_fd);
@@ -567,10 +597,11 @@ static Service *open_romfs_storage(void) {
 bool romfs_image_file(const char *path, int *fd, uint64_t *off, uint64_t *size) {
     if (romfs_fd < 0) {
         char img[1024];
-        snprintf(img, sizeof img, "%s.bin", g_romfs_dir);
+        romfs_image_path(img, sizeof img);
         if ((romfs_fd = open(img, O_RDONLY)) < 0) return false;
 #ifdef _WIN32
-        if (!romfs_map) romfs_map = plat_map_file_ro(romfs_fd, &romfs_map_size);
+        if (!romfs_map && !getenv("LARECOMP_PACKAGE_STREAM"))
+            romfs_map = plat_map_file_ro(romfs_fd, &romfs_map_size);
 #endif
         rom_index(romfs_fd);
     }
