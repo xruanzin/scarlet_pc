@@ -524,7 +524,7 @@ static bool stencil_tex(const Ctx *c, int slot) {
 static void emit_hair_compat(Ctx *c, int dst, int src, const char *control) {
     if (!c->glsl || c->stage != STAGE_FRAGMENT || !c->key || !c->key->hair_isotropic ||
         dst != 62 || src != 47 || strcmp(control, "0x00000303u")) return;
-    sp(&c->body, "    if (r62 == 3u) { r62 = 0u; r6 = 0u; r7 = 0u; r32 = 0u; }\n");
+    sp(&c->body, "    if (r62 == 3u) { scarlet_hair = true; r62 = 0u; r6 = 0u; r7 = 0u; r32 = 0u; }\n");
 }
 
 // Write texture results: component mask selects which of r,g,b,a go to consecutive registers.
@@ -2129,6 +2129,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;\n");
     }
     sp(&s, "void main() {\n");
+    if (stage == STAGE_FRAGMENT && key && key->hair_isotropic)
+        sp(&s, "  bool scarlet_hair = false;\n");
     if (stage == STAGE_FRAGMENT && key && key->sharp_scene && info->ntex >= 3 &&
         key->rt_kind[0] == 0 && info->tex[2].type == TEXTYPE_2D && !info->tex[2].shadow && !stencil_tex(c, 2) &&
         (c->in_attr_mask & 1u) && (c->omap_target & 0xFu) == 0xFu) {
@@ -2226,21 +2228,21 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         // original linear albedo.  This keeps shadows/highlights while avoiding
         // the corrupt colour rotation.  The shader key fingerprints the exact
         // deferred-lighting program, so no other material/pass is affected.
-        if (key && key->hair_isotropic && info->ntex > 4 && stencil_tex(c, 0) &&
+        if (key && key->hair_isotropic && info->ntex > 4 &&
             info->tex[4].type == TEXTYPE_2D && !info->tex[4].shadow && key->rt_kind[0] == 0) {
+            // emit_hair_compat already saw the material ID while the guest
+            // shader had it in r62. Reuse that boolean here instead of
+            // re-fetching the full-resolution stencil texture for every pixel.
             sp(&s,
-               "  { ivec2 hp = ivec2((gl_FragCoord.xy - rscale[0].zw) / rscale[0].xy);\n"
+               "  if (scarlet_hair) {\n"
+               "    ivec2 hp = ivec2((gl_FragCoord.xy - rscale[0].zw) / rscale[0].xy);\n"
                "    hp = max(hp, ivec2(0));\n"
-               "    uint hs = texelFetch(t0, ivec2(rsc(uvec2(hp), rscale[1])), 0).r;\n"
-               "    uint hm = bitfieldExtract(hs, 3, 3);\n"
-               "    if (hm == 3u) {\n"
-               "      vec3 hb = texelFetch(t4, ivec2(rsc(uvec2(hp), rscale[5])), 0).rgb;\n"
-               "      vec3 hl = max(c0.rgb, vec3(0.0));\n"
-               "      float ll = dot(hl, vec3(0.2126, 0.7152, 0.0722));\n"
-               "      float lb = max(dot(hb, vec3(0.2126, 0.7152, 0.0722)), 0.02);\n"
-               "      float hscl = clamp(ll / lb, 0.25, 2.0);\n"
-               "      c0.rgb = hb * hscl;\n"
-               "    }\n"
+               "    vec3 hb = texelFetch(t4, ivec2(rsc(uvec2(hp), rscale[5])), 0).rgb;\n"
+               "    vec3 hl = max(c0.rgb, vec3(0.0));\n"
+               "    float ll = dot(hl, vec3(0.2126, 0.7152, 0.0722));\n"
+               "    float lb = max(dot(hb, vec3(0.2126, 0.7152, 0.0722)), 0.02);\n"
+               "    float hscl = clamp(ll / lb, 0.25, 2.0);\n"
+               "    c0.rgb = hb * hscl;\n"
                "  }\n");
         }
         // Opening schoolyard/court capture: geometry is already correct before
