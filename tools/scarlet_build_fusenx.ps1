@@ -21,6 +21,52 @@ if (-not (Test-Path -LiteralPath $Bash -PathType Leaf)) {
 
 Write-Host "[fuse-nx] Preparando build corrigida para acesso direto a NCA..." -ForegroundColor Cyan
 
+function Ensure-WinFspDeveloper {
+    $Pf86 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+    if (-not $Pf86) { throw "Program Files (x86) nao encontrado." }
+
+    $WinFspRoot = Join-Path $Pf86 "WinFsp"
+    $FuseHeader = Join-Path $WinFspRoot "inc\fuse\fuse.h"
+    $ImportLib = Join-Path $WinFspRoot "lib\winfsp-x64.lib"
+
+    if ((Test-Path -LiteralPath $FuseHeader -PathType Leaf) -and
+        (Test-Path -LiteralPath $ImportLib -PathType Leaf)) {
+        Write-Host "[fuse-nx] WinFsp Developer ja instalado." -ForegroundColor DarkGray
+        return
+    }
+
+    Write-Host "[fuse-nx] WinFsp esta instalado sem o componente Developer; adicionando headers + import library..." -ForegroundColor Yellow
+
+    $InstallerDir = Join-Path $RepoRoot "tools\winfsp"
+    $Msi = Join-Path $InstallerDir "winfsp-2.1.25156.msi"
+    if (-not (Test-Path -LiteralPath $Msi -PathType Leaf)) {
+        New-Item -ItemType Directory -Force -Path $InstallerDir | Out-Null
+        $Url = "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.25156.msi"
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Msi
+    }
+
+    # The official MSI keeps development headers/import libraries in feature
+    # F.Developer (not selected by the default Core-only install).
+    $Args = '/i "' + $Msi + '" ADDLOCAL=F.Main,F.User,F.Developer /qn /norestart'
+    Write-Host "[fuse-nx] O Windows pode pedir permissao de administrador para completar o WinFsp Developer." -ForegroundColor Cyan
+    $Proc = Start-Process -FilePath "msiexec.exe" -Verb RunAs -ArgumentList $Args -Wait -PassThru
+    if ($Proc.ExitCode -notin @(0, 3010)) {
+        throw "WinFsp Developer nao foi instalado (msiexec exit $($Proc.ExitCode))."
+    }
+
+    if (-not (Test-Path -LiteralPath $FuseHeader -PathType Leaf)) {
+        throw "WinFsp Developer terminou, mas fuse.h ainda nao existe em: $FuseHeader"
+    }
+    if (-not (Test-Path -LiteralPath $ImportLib -PathType Leaf)) {
+        throw "WinFsp Developer terminou, mas winfsp-x64.lib ainda nao existe em: $ImportLib"
+    }
+
+    Write-Host "[fuse-nx] WinFsp Developer pronto." -ForegroundColor Green
+}
+
+Ensure-WinFspDeveloper
+
 $Pacman = "pacman -S --needed --noconfirm mingw-w64-x86_64-gcc mingw-w64-x86_64-meson mingw-w64-x86_64-ninja mingw-w64-x86_64-pkgconf mingw-w64-x86_64-libgcrypt mingw-w64-x86_64-re2"
 & $Bash -lc "export PATH='/c/msys64/mingw64/bin:/c/msys64/usr/bin':`$PATH; $Pacman"
 if ($LASTEXITCODE -ne 0) { throw "Falha instalando dependencias do Fuse-Nx (exit $LASTEXITCODE)." }
@@ -68,7 +114,7 @@ if ($RepoPosix -match "^([A-Za-z]):/(.*)$") { $RepoPosix = "/" + $matches[1].ToL
 $SrcPosix = $SrcDir -replace "\\","/"
 if ($SrcPosix -match "^([A-Za-z]):/(.*)$") { $SrcPosix = "/" + $matches[1].ToLowerInvariant() + "/" + $matches[2] }
 
-$Cmd = "set -o pipefail; export PATH='/c/msys64/mingw64/bin:/c/msys64/usr/bin':`$PATH; cd '$SrcPosix'; meson setup build-scarlet -Dcryptobackend=gcrypt 2>&1 | tee '$RepoPosix/build/fuse-nx-build.log'; meson compile -C build-scarlet 2>&1 | tee -a '$RepoPosix/build/fuse-nx-build.log'"
+$Cmd = "set -o pipefail; export PATH='/c/msys64/mingw64/bin:/c/msys64/usr/bin':`$PATH; cd '$SrcPosix'; meson setup build-scarlet -Dcryptobackend=gcrypt 2>&1 | tee '$RepoPosix/build/fuse-nx-build.log' && meson compile -C build-scarlet 2>&1 | tee -a '$RepoPosix/build/fuse-nx-build.log'"
 & $Bash -lc $Cmd
 if ($LASTEXITCODE -ne 0) { throw "Build corrigida do Fuse-Nx falhou. Envie build\fuse-nx-build.log." }
 
