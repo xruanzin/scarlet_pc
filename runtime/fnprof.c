@@ -7,6 +7,7 @@
 
 #include "hle.h"
 #include "platform.h"
+#include "rt.h"
 
 volatile int g_fnprof;
 
@@ -91,6 +92,25 @@ void fnprof_frame(uint64_t frame) {
         fprintf(f, "%llx %llu %llu %llx\n", (unsigned long long)rows[i][0], (unsigned long long)rows[i][1],
                 (unsigned long long)rows[i][2], (unsigned long long)rows[i][3]);
     if (f) fclose(f);
+
+    // Resolve the hottest entries while the original NSO symbol tables are
+    // still live. sdk has rich symbols even when Scarlet's main is mostly
+    // stripped, so the next performance capture can tell us which Nintendo
+    // runtime primitives dominate instead of only giving raw addresses.
+    LOG("[fnprof] hottest guest entries (count, function, first caller):\n");
+    int topn = n < 32 ? n : 32;
+    for (int i = 0; i < topn; i++) {
+        uint64_t off = 0, coff = 0;
+        const char *sym = loader_symbol_at(rows[i][0], &off);
+        const char *caller = loader_symbol_at(rows[i][3], &coff);
+        LOG("[fnprof-hot] %llu %llx %s%s%llx <- %llx %s%s%llx\n",
+            (unsigned long long)rows[i][1],
+            (unsigned long long)rows[i][0],
+            sym ? sym : "?", sym ? "+" : "", (unsigned long long)(sym ? off : 0),
+            (unsigned long long)rows[i][3],
+            caller ? caller : "?", caller ? "+" : "", (unsigned long long)(caller ? coff : 0));
+    }
+
     free(rows);
     LOG("[fnprof] %d functions, written %s (frames %ld-%ld)\n", n, out, from, to);
     from = -1;
