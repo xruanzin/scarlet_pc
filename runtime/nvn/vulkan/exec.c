@@ -26,6 +26,7 @@ static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wai
 static uint64_t stat_tf_merged, stat_tf_barriers, stat_raster_discard_sets, stat_raster_discard_on, stat_a2c_1x;
 static uint64_t stat_tf_dep_vbuf, stat_tf_dep_cbuf, stat_tf_dep_sbuf, stat_tf_dep_gmem, stat_tf_dep_op, stat_tf_dep_submit, stat_tf_dep_rt;
 static uint64_t stat_barrier_flags[256];
+static uint64_t stat_vkbar_full, stat_vkbar_graphics, stat_vkbar_compute, stat_vkbar_transfer, stat_vkbar_upload;
 static uint64_t forensic_barriers_since_draw;
 static uint32_t forensic_last_barrier_flags;
 static uint32_t stat_pass_end_line[4096];
@@ -181,12 +182,146 @@ VkCommandBuffer vk_upload_cmd(void) {
     return s->upload;
 }
 
-void vk_full_barrier(VkCommandBuffer cb) {
-    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
-    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+static void vk_memory_barrier_scoped(VkCommandBuffer cb,
+                                     VkPipelineStageFlags2 src_stage, VkAccessFlags2 src_access,
+                                     VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access,
+                                     uint64_t *counter) {
+    VkMemoryBarrier2 mb = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask = src_stage, .srcAccessMask = src_access,
+        .dstStageMask = dst_stage, .dstAccessMask = dst_access
+    };
+    VkDependencyInfo di = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .memoryBarrierCount = 1, .pMemoryBarriers = &mb
+    };
     vkCmdPipelineBarrier2(cb, &di);
+    if (counter) (*counter)++;
+}
+
+void vk_full_barrier(VkCommandBuffer cb) {
+    vk_memory_barrier_scoped(cb,
+        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+        &stat_vkbar_full);
+}
+
+// Pass-to-pass hazards in Scarlet are overwhelmingly attachment/texture/SSBO
+// dependencies. Keep transfer/compute producers visible, but do not stall host,
+// present, query and unrelated pipeline stages with ALL_COMMANDS -> ALL_COMMANDS.
+static void vk_graphics_barrier(VkCommandBuffer cb) {
+    VkPipelineStageFlags2 src =
+        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    VkAccessFlags2 src_access =
+        VK_ACCESS_2_SHADER_WRITE_BIT |
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+        VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    if (g_vk.transform_feedback) {
+        src |= VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT;
+        src_access |= VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT;
+    }
+    VkPipelineStageFlags2 dst =
+        VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+        VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkAccessFlags2 dst_access =
+        VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT |
+        VK_ACCESS_2_INDEX_READ_BIT |
+        VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT |
+        VK_ACCESS_2_UNIFORM_READ_BIT |
+        VK_ACCESS_2_SHADER_READ_BIT |
+        VK_ACCESS_2_SHADER_WRITE_BIT |
+        VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    vk_memory_barrier_scoped(cb, src, src_access, dst, dst_access, &stat_vkbar_graphics);
+}
+
+static void vk_compute_barrier(VkCommandBuffer cb) {
+    VkPipelineStageFlags2 src =
+        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    VkAccessFlags2 src_access =
+        VK_ACCESS_2_SHADER_WRITE_BIT |
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+        VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    if (g_vk.transform_feedback) {
+        src |= VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT;
+        src_access |= VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT;
+    }
+    vk_memory_barrier_scoped(cb, src, src_access,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+        &stat_vkbar_compute);
+}
+
+static void vk_transfer_barrier(VkCommandBuffer cb) {
+    VkPipelineStageFlags2 src =
+        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    VkAccessFlags2 src_access =
+        VK_ACCESS_2_SHADER_WRITE_BIT |
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+        VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    if (g_vk.transform_feedback) {
+        src |= VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT;
+        src_access |= VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT;
+    }
+    vk_memory_barrier_scoped(cb, src, src_access,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        &stat_vkbar_transfer);
+}
+
+static void vk_upload_visibility_barrier(VkCommandBuffer cb) {
+    vk_memory_barrier_scoped(cb,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+        VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT |
+        VK_ACCESS_2_INDEX_READ_BIT |
+        VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT |
+        VK_ACCESS_2_UNIFORM_READ_BIT |
+        VK_ACCESS_2_SHADER_READ_BIT |
+        VK_ACCESS_2_SHADER_WRITE_BIT |
+        VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+        VK_ACCESS_2_TRANSFER_READ_BIT |
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        &stat_vkbar_upload);
 }
 
 static void ring_retire(void);
@@ -275,7 +410,7 @@ static bool qbatch_finish_current(bool force_main) {
     if (!s->main_begun && !s->upload_begun && !force_main) return false;
 
     if (s->upload_begun) {
-        vk_full_barrier(s->upload);
+        vk_upload_visibility_barrier(s->upload);
         VK_CHECK(vkEndCommandBuffer(s->upload));
         if (qbatch_ncb >= QBATCH_MAX_CBS) FATAL("vk: queue batch command-buffer overflow\n");
         qbatch_cbs[qbatch_ncb++] = (VkCommandBufferSubmitInfo){
@@ -1115,6 +1250,16 @@ const char *renderer_stats(void) {
         memset(stat_barrier_flags, 0, sizeof stat_barrier_flags);
     }
     {
+        size_t n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n,
+                 " [vkbar full:%llu gfx:%llu comp:%llu xfer:%llu upload:%llu]",
+                 (unsigned long long)stat_vkbar_full,
+                 (unsigned long long)stat_vkbar_graphics,
+                 (unsigned long long)stat_vkbar_compute,
+                 (unsigned long long)stat_vkbar_transfer,
+                 (unsigned long long)stat_vkbar_upload);
+    }
+    {
         uint32_t top_line[5] = {0}, top_count[5] = {0};
         for (uint32_t l = 1; l < 4096; l++) {
             uint32_t c = stat_pass_end_line[l];
@@ -1182,6 +1327,7 @@ const char *renderer_stats(void) {
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
     stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = stat_raster_discard_sets = stat_raster_discard_on = stat_a2c_1x = 0;
+    stat_vkbar_full = stat_vkbar_graphics = stat_vkbar_compute = stat_vkbar_transfer = stat_vkbar_upload = 0;
     stat_logical_submits = stat_queue_batches = 0;
     stat_tf_dep_vbuf = stat_tf_dep_cbuf = stat_tf_dep_sbuf = stat_tf_dep_gmem = stat_tf_dep_op = stat_tf_dep_submit = stat_tf_dep_rt = 0;
     return stats_text;
@@ -1285,7 +1431,7 @@ static void begin_pass(void) {
     st.rt_dirty = false;
     debug_mrt_drawn = false;
     VkCommandBuffer cb = vk_cmd();
-    vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
+    vk_graphics_barrier(cb);  // scoped visibility for render/texture/SSBO hazards
     if (tf_barrier_pending) { stat_tf_dep_rt++; tf_pending_clear(); stat_tf_barriers++; }
     {
         NvnTexture *t0n = st.rt.ncolor ? st.rt.color[0] : NULL;
@@ -2293,7 +2439,7 @@ static void debug_save_depth(TexBackend *b, const char *path) {
     uint64_t n = (uint64_t)b->width * b->height;
     VkSpan out = vk_readback(n * 4);
     VkCommandBuffer cb = vk_cmd();
-    vk_full_barrier(cb);
+    vk_transfer_barrier(cb);
     VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1},
                            .imageExtent = {b->width, b->height, 1}};
     vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
@@ -2316,7 +2462,7 @@ static void debug_save_stencil(TexBackend *b, const char *path) {
     uint64_t n = (uint64_t)b->width * b->height;
     VkSpan out = vk_readback(n);
     VkCommandBuffer cb = vk_cmd();
-    vk_full_barrier(cb);
+    vk_transfer_barrier(cb);
     VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1},
                            .imageExtent = {b->width, b->height, 1}};
     vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
@@ -2357,7 +2503,7 @@ static void resolve_feedback(Prog *pr) {
             vk_end_pass();
             TexBackend *dst = snapshot_image(t, src);
             VkCommandBuffer cb = vk_cmd();
-            vk_full_barrier(cb);
+            vk_transfer_barrier(cb);
             gp_mark(cb, "feedback snapshot %ux%u fmt %d", src->width, src->height, src->format);
             // VkImageSubresourceLayers permits only one aspect per copy region.
             // Both planes must survive: the lighting pass reads stencil material
@@ -3118,7 +3264,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
-    vk_full_barrier(cb);
+    vk_compute_barrier(cb);
     gp_mark(cb, "dispatch %ux%ux%u (local %ux%ux%u)", gx, gy, gz, cp->local[0], cp->local[1], cp->local[2]);
     dl_note("dispatch %ux%ux%u cs %llx gmem %d", gx, gy, gz, (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
     nfeedback = 0;
@@ -4179,7 +4325,7 @@ static void copy_buffer_to_texture(uint64_t src, const TexRefRec *dst) {
     uint32_t out_bpb = fi->bpb == 3 ? 4 : fi->bpb;
     uint32_t nz = (uint32_t)rg[5];
     VkCommandBuffer cb = vk_cmd();
-    vk_full_barrier(cb);
+    vk_transfer_barrier(cb);
     uint64_t out_row = (uint64_t)wb * out_bpb;
     VkSpan s = vk_transient(out_row * hb * nz, 16);
     for (uint32_t z = 0; z < nz; z++)
@@ -4211,7 +4357,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     float tsx, tsy;
     renderer_texture_scale(t, &tsx, &tsy);
     VkCommandBuffer cb = vk_cmd();
-    vk_full_barrier(cb);
+    vk_transfer_barrier(cb);
     VkImage srcimg = b->image;
     VmaAllocation small_mem = NULL;
     if ((tsx != 1 || tsy != 1) && level == 0 && !renderer_format_is_depth(t->format)) {
@@ -4225,7 +4371,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
         VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)b->width, (int32_t)b->height, 1}},
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)t->width, (int32_t)t->height, 1}}};
         vkCmdBlitImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, srcimg, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
-        vk_full_barrier(cb);
+        vk_transfer_barrier(cb);
     }
     bool array = b->layers > 1 && b->depth == 1;
     uint32_t nz = (uint32_t)rg[5];
@@ -4291,7 +4437,7 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
             dt->height, dt->format, dlv, dr[0], dr[1], dr[3], dr[4], d->width, d->height, sx0, sy0, sw, sh, dx0, dy0, dw, dh,
             (unsigned long long)flags);
     VkCommandBuffer cb = vk_cmd();
-    vk_full_barrier(cb);
+    vk_transfer_barrier(cb);
     VkImageAspectFlags sa = s->aspect, da = d->aspect;
     if (s->samples > 1 && d->samples == 1 && sw == dw && sh == dh && s->format == d->format && !(sa & VK_IMAGE_ASPECT_DEPTH_BIT)) {
         VkImageResolve rv = {.srcSubresource = {sa, slv, sly, 1}, .srcOffset = {sx0, sy0, 0}, .dstSubresource = {da, dlv, dly, 1},
@@ -4487,7 +4633,7 @@ static VkImageView smaa_lut(int i) {
 static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *srcs, int n, TexBackend *dst, const float pc[8],
                       bool clear) {
     VkPipeline pipe = post_pipeline(fs);  // (before the rendering begins: created inside it, the NVIDIA driver crashed)
-    vk_full_barrier(cb);
+    vk_graphics_barrier(cb);
     VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = post_view(dst),
                                     .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
                                     .loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
@@ -4553,7 +4699,7 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
         post_pass(cb, "rcas.frag", ri_, 1, r, pr, false);
         v = post_view(r);
     }
-    vk_full_barrier(cb);
+    vk_graphics_barrier(cb);
     vk_frame_resume();
     {
         static uint32_t piw, pih, pow_, poh;
@@ -4602,7 +4748,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &img, &mem, NULL));
     VkCommandBuffer cb = vk_cmd();
-    vk_full_barrier(cb);
+    vk_graphics_barrier(cb);
     vk_image_init_layout(cb, img, VK_IMAGE_ASPECT_COLOR_BIT);
     VkImageViewCreateInfo vci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img, .viewType = VK_IMAGE_VIEW_TYPE_2D,
                                  .format = VK_FORMAT_R8G8B8A8_UNORM, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
@@ -4629,7 +4775,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pv);
     vkCmdDraw(cb, 3, 1, 0, 0);
     vkCmdEndRendering(cb);
-    vk_full_barrier(cb);
+    vk_transfer_barrier(cb);
     VkSpan out = vk_readback((uint64_t)w * h * 4);
     VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, h, 1}};
     vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
@@ -5040,7 +5186,8 @@ static void vk_exec_diag_leave(bool enabled) {
 // command buffer, pass, descriptor pools, ...) is global: Scarlet's overlapping backend_execute / present calls
 // interleaved commands into one VkCommandBuffer and crashed inside the driver (amdvlk64 null access in
 // vk_frame_begin, called from the UI thread while a render thread was recording). Recursive: present can run
-// exec code. Lock order: vk_big_lock, then g_present_lock.
+// exec code. device.c serializes presents with g_present_lock before taking this renderer lock; no other
+// renderer path takes g_present_lock.
 static pthread_mutex_t g_vk_big;
 static pthread_once_t g_vk_big_once = PTHREAD_ONCE_INIT;
 static void vk_big_init(void) {
@@ -5310,11 +5457,11 @@ static TexBackend *ip_hold_copy(TexBackend *src) {
     }
     d->sx = src->sx; d->sy = src->sy; d->scalable = src->scalable;
     VkCommandBuffer cb = vk_cmd();
-    vk_full_barrier(cb);
+    vk_transfer_barrier(cb);
     VkImageCopy rg = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                       .extent = {src->width, src->height, 1}};
     vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
-    vk_full_barrier(cb);
+    vk_graphics_barrier(cb);
     return d;
 }
 

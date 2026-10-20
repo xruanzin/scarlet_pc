@@ -3,9 +3,10 @@
 // views), exec.c (command execution: passes, draws, clears, copies, compute), shaders.c (GLSL -> SPIR-V, programs,
 // pipelines). Mirrors the Metal backend's behaviour; differences are noted where they happen.
 //
-// Synchronisation model: every image lives in VK_IMAGE_LAYOUT_GENERAL, and a full memory barrier separates
-// render passes, copies and dispatches (Metal tracks these hazards itself). Submissions are numbered; a timeline
-// semaphore signals each number, which is what NVN fences (renderer_fence_seq / renderer_wait_seq) wait for.
+// Synchronisation model: every image lives in VK_IMAGE_LAYOUT_GENERAL. Render, compute and transfer boundaries
+// use stage/access-scoped memory barriers; the full barrier remains only as a conservative fallback for paths whose
+// hazard cannot yet be classified. Submissions are numbered; a timeline semaphore signals each number, which is what
+// NVN fences (renderer_fence_seq / renderer_wait_seq) wait for.
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>

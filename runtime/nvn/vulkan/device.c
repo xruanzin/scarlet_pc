@@ -689,14 +689,15 @@ void backend_represent(void) {
 }
 
 static void backend_represent_now(void) {
-    vk_big_lock();
     if (g_last_presented) backend_present(g_last_presented);
-    vk_big_unlock();
 }
 
 void backend_present(NvnTexture *t) {
-    vk_big_lock();
+    // Serialize presents first. This ordering lets the renderer-wide lock be
+    // released during deliberate frame pacing without another presenter
+    // holding vk_big_lock while waiting for g_present_lock.
     pthread_mutex_lock(&g_present_lock);
+    vk_big_lock();
     g_last_presented = t;
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
@@ -720,7 +721,20 @@ void backend_present(NvnTexture *t) {
     bool final = image == 1;
     if (final && two) {
         uint64_t due = t0 + period / 2, now = SDL_GetTicksNS();
-        if (due > now) SDL_DelayPrecise(due - now);
+        if (due > now) {
+            uint64_t delay = due - now;
+            // With the ordered render thread active, no later renderer job can
+            // overtake this present. Do not hold the global Vulkan lock while
+            // the thread is intentionally asleep; g_present_lock still prevents
+            // a second present from entering.
+            if (renderthread_active()) {
+                vk_big_unlock();
+                SDL_DelayPrecise(delay);
+                vk_big_lock();
+            } else {
+                SDL_DelayPrecise(delay);
+            }
+        }
         b = hold;
     }
     bool have = vk_frame_begin(black);
@@ -919,8 +933,8 @@ void backend_present(NvnTexture *t) {
         frames = 0;
         last_fps_time = now;
     }
-    pthread_mutex_unlock(&g_present_lock);
     vk_big_unlock();
+    pthread_mutex_unlock(&g_present_lock);
 }
 
 // ================================================================== UI thread
