@@ -262,6 +262,18 @@ try {
     }
 }
 finally {
+    if ($PerformanceDir) {
+        try {
+            Set-Content -LiteralPath (Join-Path $PerformanceDir 'monitor.stop') -Value 'stop' -Encoding ASCII
+            if ($PerformanceMonitor -and -not $PerformanceMonitor.HasExited) {
+                $null = $PerformanceMonitor.WaitForExit(8000)
+                if (-not $PerformanceMonitor.HasExited) { Stop-Process -Id $PerformanceMonitor.Id -Force -ErrorAction SilentlyContinue }
+            }
+        }
+        catch {
+            Write-Host "[scarlet-run] Nao foi possivel encerrar o monitor de desempenho: $_" -ForegroundColor Yellow
+        }
+    }
     if ($LocationPushed) { Pop-Location }
     foreach ($Name in $PreviousDiagnosticEnv.Keys) {
         if ($null -eq $PreviousDiagnosticEnv[$Name]) {
