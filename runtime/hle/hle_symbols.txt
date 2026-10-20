@@ -4,3 +4,6 @@
 # been verified from the SDK code/ThreadType ABI.
 _ZN2nn2os16GetCurrentThreadEv
 _ZN2nn2os11GetTlsValueENS0_7TlsSlotE
+
+memcpy
+strcmp
