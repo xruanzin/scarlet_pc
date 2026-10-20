@@ -31,13 +31,16 @@ _Static_assert(offsetof(Cpu, v) == 512, "v");
 
 typedef void (*GuestFn)(Cpu *);
 
-// WindowSmash-style monomorphic inline cache for one indirect guest call
+// WindowSmash-style two-way inline cache for one indirect guest call
 // site. The generated DLL keeps one tiny cache next to each hot BLR. A
 // hit avoids the shared dispatch hash/table entirely; misses still go through
 // dispatch.c, which deliberately never puts HLE/native overrides in this cache.
 typedef struct {
-    _Atomic(uintptr_t) fn;
-    _Atomic uint64_t key;
+    // Two targets cover the overwhelmingly common C++ virtual-call pattern in
+    // Scarlet: one call site alternating between two concrete object types.
+    // Slot 0 stays sticky; slot 1 is the replaceable secondary target.
+    _Atomic(uintptr_t) fn[2];
+    _Atomic uint64_t key[2];
 } RtCallCache;
 #define RT_CALL_CACHE_MIX(p) ((uint64_t)(uintptr_t)(p) * 0x9E3779B97F4A7C15ull)
 
@@ -51,10 +54,18 @@ static inline void rt_dispatch_cached(Cpu *c, RtCallCache *cache) {
         rt_dispatch(c);
         return;
     }
-    uint64_t key = atomic_load_explicit(&cache->key, memory_order_acquire);
-    uintptr_t hit = atomic_load_explicit(&cache->fn, memory_order_relaxed);
-    GuestFn f = hit && (key ^ RT_CALL_CACHE_MIX(hit)) == c->pc
-        ? (GuestFn)hit : rt_dispatch_cached_slow(c, cache);
+
+    uintptr_t hit0 = atomic_load_explicit(&cache->fn[0], memory_order_relaxed);
+    uint64_t key0 = atomic_load_explicit(&cache->key[0], memory_order_acquire);
+    if (__builtin_expect(hit0 && (key0 ^ RT_CALL_CACHE_MIX(hit0)) == c->pc, 1)) {
+        ((GuestFn)hit0)(c);
+        return;
+    }
+
+    uintptr_t hit1 = atomic_load_explicit(&cache->fn[1], memory_order_relaxed);
+    uint64_t key1 = atomic_load_explicit(&cache->key[1], memory_order_acquire);
+    GuestFn f = hit1 && (key1 ^ RT_CALL_CACHE_MIX(hit1)) == c->pc
+        ? (GuestFn)hit1 : rt_dispatch_cached_slow(c, cache);
     f(c);
 }
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc);

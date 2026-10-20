@@ -362,10 +362,15 @@ static GuestFn dispatch_slow(Cpu *c, RtCallCache *site) {
     atomic_store_explicit(&dcache[h].fn, (uintptr_t)f, memory_order_relaxed);
     atomic_store_explicit(&dcache[h].addr, pc, memory_order_release);
     if (site) {
-        // Publish fn before key. A reader acquires key first, so it can only
-        // accept a function pointer that belongs to that published address.
-        atomic_store_explicit(&site->fn, (uintptr_t)f, memory_order_relaxed);
-        atomic_store_explicit(&site->key, pc ^ RT_CALL_CACHE_MIX(f), memory_order_release);
+        // Keep the first resolved target sticky. A second concrete type gets
+        // slot 1; further polymorphism replaces only that secondary slot.
+        // Publish fn before key. Readers validate the fn/key pair.
+        uintptr_t f0 = atomic_load_explicit(&site->fn[0], memory_order_relaxed);
+        uint64_t k0 = atomic_load_explicit(&site->key[0], memory_order_acquire);
+        bool slot0_same = f0 && (k0 ^ RT_CALL_CACHE_MIX(f0)) == pc;
+        int slot = (!f0 || slot0_same) ? 0 : 1;
+        atomic_store_explicit(&site->fn[slot], (uintptr_t)f, memory_order_relaxed);
+        atomic_store_explicit(&site->key[slot], pc ^ RT_CALL_CACHE_MIX(f), memory_order_release);
     }
     return f;
 }
