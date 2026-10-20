@@ -320,17 +320,50 @@ Write-Host "[scarlet-package] Montando diretamente em $MountPoint (zero extracao
 $Proc = Start-Process -FilePath $FuseNx -ArgumentList $Arguments -RedirectStandardOutput $MountOut -RedirectStandardError $MountErr -WindowStyle Hidden -PassThru
 
 $Mounted = $false
-for ($i=0; $i -lt 200; $i++) {
+$RootEntries = @()
+$DriveRoot = $MountPoint + "\"
+
+# WinFsp can register the drive letter before the FUSE filesystem has finished
+# its init callback. Do not treat "Z:\ exists" as ready: wait until readdir on
+# the root actually returns the XCI/PFS entries.
+for ($i=0; $i -lt 600; $i++) {
     Start-Sleep -Milliseconds 100
     $Proc.Refresh()
     if ($Proc.HasExited) { break }
-    if (Test-Path -LiteralPath ($MountPoint + "\")) { $Mounted = $true; break }
+
+    if (Test-Path -LiteralPath $DriveRoot) {
+        try {
+            $RootEntries = @(Get-ChildItem -LiteralPath $DriveRoot -Force -ErrorAction Stop)
+        }
+        catch {
+            $RootEntries = @()
+        }
+        if ($RootEntries.Count -gt 0) {
+            $Mounted = $true
+            break
+        }
+
+        if (($i % 20) -eq 0 -and $i -gt 0) {
+            Write-Host "[scarlet-package] Unidade $MountPoint criada; aguardando a arvore virtual ficar pronta..." -ForegroundColor DarkGray
+        }
+    }
 }
 if (-not $Mounted) {
-    if (-not $Proc.HasExited) { Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue }
-    $Tail = if (Test-Path $MountErr) { (Get-Content $MountErr -Tail 30) -join [Environment]::NewLine } else { "" }
-    throw "A montagem virtual nao ficou pronta. $Tail"
+    $WasAlive = -not $Proc.HasExited
+    if ($WasAlive) { Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue }
+
+    $OutTail = if (Test-Path $MountOut) { (Get-Content $MountOut -Tail 30) -join [Environment]::NewLine } else { "" }
+    $ErrTail = if (Test-Path $MountErr) { (Get-Content $MountErr -Tail 30) -join [Environment]::NewLine } else { "" }
+    $Detail = @()
+    if ($OutTail) { $Detail += "stdout: $OutTail" }
+    if ($ErrTail) { $Detail += "stderr: $ErrTail" }
+    if (-not $Detail.Count) {
+        $Detail += $(if ($WasAlive) { "processo ficou ativo, mas a raiz permaneceu vazia por 60 s" } else { "processo terminou antes da raiz ficar pronta (exit $($Proc.ExitCode))" })
+    }
+    throw ("A montagem virtual nao ficou pronta. " + ($Detail -join " | "))
 }
+
+Write-Host ("[scarlet-package] Raiz virtual pronta: " + (($RootEntries | Select-Object -ExpandProperty Name) -join ", ")) -ForegroundColor DarkGray
 
 function Find-MountedMainNpdm {
     param([string]$Root)
