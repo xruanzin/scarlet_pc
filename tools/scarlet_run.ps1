@@ -135,10 +135,25 @@ $PreviousVkProf = $env:LARECOMP_VK_PROF
 $PreviousVkOpt = $env:LARECOMP_VK_OPT
 $LocationPushed = $false
 $PreviousDiagnosticEnv = @{}
-foreach ($Name in @('LARECOMP_HLE_PROF', 'LARECOMP_TF_DIAG_DIR', 'LARECOMP_RENDERDOC_AT', 'LARECOMP_RENDERDOC_FRAMES')) {
+foreach ($Name in @(
+    'LARECOMP_HLE_PROF',
+    'LARECOMP_TF_DIAG_DIR',
+    'LARECOMP_RENDERDOC_AT',
+    'LARECOMP_RENDERDOC_FRAMES',
+    'LARECOMP_FRAME_CSV',
+    'LARECOMP_FNPROF',
+    'LARECOMP_FNPROF_OUT',
+    'LARECOMP_GPUPROF_AT',
+    'LARECOMP_SLOW_FRAME_MS',
+    'LARECOMP_INJECT_FRAME_DELAY_MS'
+)) {
     $PreviousDiagnosticEnv[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
 }
 $GraphicsDir = $null
+$PerformanceDir = $null
+$PerformanceMonitor = $null
+$PerformanceStamp = $null
+$PerformanceZip = $null
 try {
     # Anchor launcher-relative paths. The runtime chooses its own data root and reports it in the log.
     Push-Location -LiteralPath $RepoRoot
