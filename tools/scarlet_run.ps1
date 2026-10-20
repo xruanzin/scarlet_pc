@@ -297,6 +297,63 @@ finally {
     }
 }
 
+if ($PerformanceDir) {
+    try {
+        if (Test-Path -LiteralPath $Log -PathType Leaf) {
+            Copy-Item -LiteralPath $Log -Destination (Join-Path $PerformanceDir 'scarlet_boot.log') -Force
+        }
+
+        foreach ($Candidate in @(
+            (Join-Path $RepoRoot 'build\scarlet_gpuprof_latest.txt'),
+            (Join-Path $RepoRoot 'build\build\scarlet_gpuprof_latest.txt')
+        )) {
+            if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
+                Copy-Item -LiteralPath $Candidate -Destination (Join-Path $PerformanceDir 'scarlet_gpuprof_latest.txt') -Force
+                break
+            }
+        }
+
+        $ResultInfo = [ordered]@{
+            EndedUtc = [DateTime]::UtcNow.ToString('o')
+            ExitCode = $Code
+            GitHead = $CurrentHead.Trim()
+            BuiltHead = $BuiltHeadNow
+            ExecutableSha256 = if (Test-Path -LiteralPath $Exe) { (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash } else { $null }
+            GameDllSha256 = if (Test-Path -LiteralPath $GameDll) { (Get-FileHash -LiteralPath $GameDll -Algorithm SHA256).Hash } else { $null }
+        }
+        $ResultInfo | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $PerformanceDir 'result.json') -Encoding UTF8
+
+        $ReportTool = Join-Path $PSScriptRoot 'scarlet_performance_report.py'
+        $Python = Join-Path $RepoRoot '.venv\Scripts\python.exe'
+        if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
+            $PyCmd = Get-Command python.exe -ErrorAction SilentlyContinue
+            if (-not $PyCmd) { $PyCmd = Get-Command python -ErrorAction SilentlyContinue }
+            if ($PyCmd) { $Python = $PyCmd.Source } else { $Python = $null }
+        }
+        if ($Python -and (Test-Path -LiteralPath $ReportTool -PathType Leaf)) {
+            & $Python $ReportTool $PerformanceDir
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "[scarlet-run] Gerador do relatorio terminou com exit $LASTEXITCODE; empacotando dados brutos mesmo assim." -ForegroundColor Yellow
+            }
+        }
+        else {
+            Write-Host "[scarlet-run] Python/gerador de relatorio indisponivel; empacotando dados brutos." -ForegroundColor Yellow
+        }
+
+        Remove-Item -LiteralPath (Join-Path $PerformanceDir 'monitor.stop') -Force -ErrorAction SilentlyContinue
+        $PerformanceZip = Join-Path $RepoRoot ("scarlet-performance-" + $PerformanceStamp + ".zip")
+        if (Test-Path -LiteralPath $PerformanceZip) { Remove-Item -LiteralPath $PerformanceZip -Force }
+        Compress-Archive -Path (Join-Path $PerformanceDir '*') -DestinationPath $PerformanceZip -CompressionLevel Fastest
+        Write-Host ""
+        Write-Host "[scarlet-run] PERFIL COMPLETO GERADO" -ForegroundColor Green
+        Write-Host "PERFORMANCE_ZIP=$PerformanceZip" -ForegroundColor Cyan
+    }
+    catch {
+        Write-Host "[scarlet-run] Falha ao empacotar perfil de desempenho: $_" -ForegroundColor Yellow
+        Write-Host "[scarlet-run] Dados parciais: $PerformanceDir(" -ForegroundColor Yellow
+    }
+}
+
 if ($RenderDoc) {
     $Captures = @(Get-ChildItem -LiteralPath $CaptureDirectory -Filter '*.rdc' -File -ErrorAction SilentlyContinue)
     if ($Captures.Count) {
