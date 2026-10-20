@@ -109,6 +109,20 @@ GENFLAGS += -flto=thin
 GAMELIB_LDFLAGS += -flto=thin -Wl,--thinlto-jobs=$(LTO_JOBS)
 endif
 
+# PGO do codigo do jogo (docs/SCARLET-PGO.md; tools/pgo.sh).  Scarlet e limitado pela CPU no codigo recompilado:
+#   make PGO=gen ...                          -> lasgame instrumentado (grava *.profraw, LLVM_PROFILE_FILE)
+#   make PGO=use PGO_PROFILE=/abs/scarlet.profdata ... -> lasgame otimizado com o perfil
+# O perfil entra no GAMELIB_ID (via GENFLAGS), entao trocar de modo forca recompilar o jogo.
+ifeq ($(PGO),gen)
+GENFLAGS += -fprofile-instr-generate
+GAMELIB_LDFLAGS += -fprofile-instr-generate
+else ifeq ($(PGO),use)
+ifeq ($(wildcard $(PGO_PROFILE)),)
+$(error PGO=use precisa de PGO_PROFILE=<caminho absoluto de um .profdata existente>)
+endif
+GENFLAGS += -fprofile-instr-use=$(PGO_PROFILE) -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin
+endif
+
 # Research build (docs/DEPURACAO.md, LARECOMP_TRACE_STORES): make TRACE=1 B=build/trace GEN=generated-trace gen / -j20 all.
 # Every store of the game reports its instruction to runtime/storetrace.c.
 ifdef TRACE
