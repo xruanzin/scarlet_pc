@@ -123,43 +123,83 @@ def summarize(directory):
     else:
         lines += ['Sem contagem: janela nao terminou, coleta desativada ou processo interrompido.']
 
-    hot = []
-    for m in re.finditer(r'\[fnprof-hot\]\s+(\d+)\s+([0-9a-fA-F]+)\s+(.+?)\s+<-\s+([0-9a-fA-F]+)\s+(.+)    (d/'renderer-timeline.txt').write_text('\n'.join(selected)+'\n',encoding='utf-8')
-    alerts = [line for line in log.splitlines() if re.search(r'FATAL|\[hang\]|no frame|no present|\[shader-slow\]|\[build-timeout\]|UNIMPLEMENTED|\[nvn-unimplemented\]|underrun',line,re.I)]
-    (d/'alerts.txt').write_text('\n'.join(alerts)+'\n',encoding='utf-8')
-    lines += ['', '## Renderizacao, esperas e alertas', '',
-              '- renderer-timeline.txt: CPU do backend por categoria (desenho, descritores, texturas, uploads, pipelines), GPU por intervalo e capturas esparsas de passes, conforme disponibilidade do runtime.',
-              '- alerts.txt: erros, travamentos, shaders lentos e chamadas nao implementadas encontradas no log.',
-              '- scarlet_boot.log: fonte completa, incluindo carregamento, servicos e mensagens do kernel.',
-              f'- Alertas encontrados: {len(alerts)}.', '',
-              'Limites: nao coleta stacks de CPU, uso de cada instrucao, VRAM por recurso ou todas as chamadas com argumentos. Para atribuicao exata de CPU por funcao sera necessario um perfil por amostragem no Windows. Nao conclua gargalo apenas pela maior contagem.', '']
-    (d/'report.md').write_text('\n'.join(lines),encoding='utf-8')
-    (d/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
-    return summary
+    # Group contiguous slow periods by severity so analysis follows scenes, not absolute frame ids.
+    def severity(ms):
+        if ms >= 140: return 'critical'
+        if ms >= 105: return 'severe'
+        if ms >= 70: return 'slow'
+        return None
 
-if __name__ == '__main__':
-    summarize(sys.argv[1])
-    print('Report:', Path(sys.argv[1])/'report.md')
-, log, re.M):
+    episodes = []
+    cur = None
+    for row in frames:
+        sev = severity(row['frame_ms'])
+        if sev is None:
+            if cur:
+                episodes.append(cur)
+                cur = None
+            continue
+        rank = {'slow':1,'severe':2,'critical':3}[sev]
+        if cur is None:
+            cur = {'start':row['frame'],'end':row['frame'],'rank':rank,'rows':[row]}
+        else:
+            cur['end'] = row['frame']
+            cur['rank'] = max(cur['rank'], rank)
+            cur['rows'].append(row)
+    if cur: episodes.append(cur)
+    episodes = [e for e in episodes if len(e['rows']) >= 3]
+    if episodes:
+        names = {1:'slow',2:'severe',3:'critical'}
+        lines += ['', '## Episodios de lentidao', '',
+                  'Agrupados por lentidao sustentada; o numero absoluto do frame e apenas referencia interna.', '',
+                  '|Episodio|Classe|Frames|Mediana ms|p95 ms|Backend mediano|Restante mediano|Draws medianos|',
+                  '|---|---|---|---|---|---|---|---|']
+        for idx,e in enumerate(episodes,1):
+            rs=e['rows']; vals=[x['frame_ms'] for x in rs]
+            med=lambda key: percentile([x[key] for x in rs],.5)
+            lines += [f"|{idx}|{names[e['rank']]}|{len(rs)}|{percentile(vals,.5):.2f}|{percentile(vals,.95):.2f}|{med('backend_ms'):.2f}|{med('other_ms'):.2f}|{med('draws'):.0f}|"]
+        summary['slow_episodes'] = [{
+            'severity': names[e['rank']], 'frames': len(e['rows']),
+            'median_ms': percentile([x['frame_ms'] for x in e['rows']], .5),
+            'p95_ms': percentile([x['frame_ms'] for x in e['rows']], .95),
+            'median_backend_ms': percentile([x['backend_ms'] for x in e['rows']], .5),
+            'median_other_ms': percentile([x['other_ms'] for x in e['rows']], .5),
+        } for e in episodes]
+
+    hot = []
+    for m in re.finditer(r'\[fnprof-hot\]\s+(\d+)\s+([0-9a-fA-F]+)\s+(.+?)\s+<-\s+([0-9a-fA-F]+)\s+(.+)', log, re.M):
         hot.append((int(m.group(1)), m.group(2), m.group(3), m.group(4), m.group(5)))
     if hot:
         lines += ['', '### Hotspots guest resolvidos', '',
                   'Nomes vindos das tabelas de simbolos NSO quando disponiveis; main pode estar parcialmente stripped.', '',
                   '|Entradas|Endereco|Funcao/simbolo|Caller LR|Caller/simbolo|',
                   '|---|---|---|---|---|']
-        for count,addr,name,lr,caller in hot[:50]:
+        for count,addr,name,lr,caller in hot[:80]:
             lines += [f'|{count}|{addr}|{name}|{lr}|{caller}|']
 
-    selected = [line for line in log.splitlines() if line.startswith(('[vk] t=','[gpuprof]','[fnprof]'))]
+    profile_files = sorted(d.glob('fnprof-auto-*.txt'))
+    if profile_files:
+        lines += ['', '### Capturas automaticas por severidade', '']
+        for pf in profile_files:
+            top = []
+            for line in pf.read_text(errors='replace').splitlines()[:20]:
+                parts=line.split()
+                if len(parts)==4:
+                    try: top.append((parts[0], int(parts[1]), parts[3]))
+                    except ValueError: pass
+            lines += [f'- {pf.name}: {len(top)} entradas de topo preservadas; veja o arquivo completo e fnprof-inspect.txt.']
+
+    selected = [line for line in log.splitlines() if line.startswith(('[vk] t=','[gpuprof]','[fnprof]','[fnprof-auto]'))]
     (d/'renderer-timeline.txt').write_text('\n'.join(selected)+'\n',encoding='utf-8')
-    alerts = [line for line in log.splitlines() if re.search(r'FATAL|\[hang\]|no frame|no present|\[shader-slow\]|\[build-timeout\]|UNIMPLEMENTED|\[nvn-unimplemented\]|underrun',line,re.I)]
+    alerts = [line for line in log.splitlines() if re.search(r'FATAL|\[hang\]|no frame|no present|\[shader-slow\]|\[build-timeout\]|UNIMPLEMENTED|\[nvn-unimplemented\]|underrun|\*\*\* exception',line,re.I)]
     (d/'alerts.txt').write_text('\n'.join(alerts)+'\n',encoding='utf-8')
     lines += ['', '## Renderizacao, esperas e alertas', '',
-              '- renderer-timeline.txt: CPU do backend por categoria (desenho, descritores, texturas, uploads, pipelines), GPU por intervalo e capturas esparsas de passes, conforme disponibilidade do runtime.',
-              '- alerts.txt: erros, travamentos, shaders lentos e chamadas nao implementadas encontradas no log.',
-              '- scarlet_boot.log: fonte completa, incluindo carregamento, servicos e mensagens do kernel.',
+              '- renderer-timeline.txt: CPU do backend por categoria, GPU por intervalo e capturas esparsas de passes.',
+              '- alerts.txt: erros, excecoes, travamentos, shaders lentos e chamadas nao implementadas encontradas no log.',
+              '- fnprof-inspect.txt: simbolos e disassembly dos hotspots mais frequentes quando a coleta terminou.',
+              '- scarlet_boot.log: fonte completa.',
               f'- Alertas encontrados: {len(alerts)}.', '',
-              'Limites: nao coleta stacks de CPU, uso de cada instrucao, VRAM por recurso ou todas as chamadas com argumentos. Para atribuicao exata de CPU por funcao sera necessario um perfil por amostragem no Windows. Nao conclua gargalo apenas pela maior contagem.', '']
+              'Limites: o profiler altera o custo da janela em que esta ativo. Use as capturas para localizar hotspots, nao para medir FPS final.', '']
     (d/'report.md').write_text('\n'.join(lines),encoding='utf-8')
     (d/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
     return summary
