@@ -42,8 +42,11 @@ function Stop-ScarletPackageMount {
     }
 }
 trap {
+    $Failure = $_
     Stop-ScarletPackageMount
-    throw
+    Write-Host "" 
+    Write-Host ("[scarlet-run] ERRO: " + $Failure.Exception.Message) -ForegroundColor Red
+    exit 1
 }
 
 # GameRoot can be an extracted root (exefs/ + romfs/) or the user's own XCI/NSP.
