@@ -36,6 +36,7 @@ SCARLET_MAIN_DIRECT_HLE = {
     'ca44e7dd62e61a2a': {
         0x30177A0: '_ZN2nn2os16GetCurrentThreadEv',
         0x3018960: '_ZN2nn2os11GetTlsValueENS0_7TlsSlotE',
+        0x3019B40: '_ZN2nn2os16SignalLightEventEPNS0_14LightEventTypeE',
     },
 }
 
@@ -44,7 +45,9 @@ SCARLET_MAIN_DIRECT_HLE = {
 # the main PLT/GOT thunk and an indirect dispatcher lookup on every call.
 SCARLET_MAIN_DIRECT_GUEST = {
     'ca44e7dd62e61a2a': {
-        0x3019B40: 0x70063720D0,  # nn::os::SignalLightEvent
+        # Keep this table for lifted SDK helpers that need exact guest bodies.
+        # SignalLightEvent moved to SCARLET_MAIN_DIRECT_HLE: its uncontended
+        # state transition is host-fast and its waiter path falls back to SDK.
     },
 }
 
