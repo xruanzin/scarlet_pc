@@ -28,6 +28,17 @@ SCARLET_SETJMP_THUNKS = {
     'ca44e7dd62e61a2a4e8889b3319ae173375770fd': {0x3017B70},
 }
 
+# Scarlet 1.0.0 PLT thunks for tiny nn::os helpers that dominate slow-scene
+# function-entry profiles. The SDK definitions are also replaced through
+# --hle/hle_symbols.txt; mapping the main thunks avoids the extra PLT/GOT +
+# indirect dispatcher trip for calls originating in main.
+SCARLET_MAIN_DIRECT_HLE = {
+    'ca44e7dd62e61a2a': {
+        0x30177A0: '_ZN2nn2os16GetCurrentThreadEv',
+        0x3018960: '_ZN2nn2os11GetTlsValueENS0_7TlsSlotE',
+    },
+}
+
 
 def sext26(w):
     v = w & 0x03FFFFFF
@@ -644,6 +655,9 @@ def main():
         RANDO_CODE.clear()
     starts = m.boundaries()
     hle = {}
+    if args.name == 'main':
+        for off, name in SCARLET_MAIN_DIRECT_HLE.get(bid, {}).items():
+            hle[args.base + off] = name
     if args.hle and os.path.exists(args.hle):
         want = {l.strip() for l in open(args.hle) if l.strip() and not l.startswith('#')}
         for name, info, shndx, value, size in m.nso.syms:

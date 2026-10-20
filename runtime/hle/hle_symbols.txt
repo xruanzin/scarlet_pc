@@ -1,0 +1,6 @@
+# Tiny nn::os helpers selected from Scarlet 1.0.0 slow-scene profiles.
+# gen.py replaces their defined SDK bodies with the matching hle_<sanitized>
+# functions in os_fast.c. Keep this list to functions whose semantics have
+# been verified from the SDK code/ThreadType ABI.
+_ZN2nn2os16GetCurrentThreadEv
+_ZN2nn2os11GetTlsValueENS0_7TlsSlotE
