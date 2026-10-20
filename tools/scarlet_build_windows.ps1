@@ -129,6 +129,14 @@ if ($LASTEXITCODE -eq 0 -and $Head) {
     Set-Content -LiteralPath (Join-Path $RepoRoot "build\.runtime_build_head") -Value $Head.Trim() -Encoding ASCII
 }
 
+$ThinLtoMarker = Join-Path $RepoRoot "build\.thinlto_enabled"
+if ($ThinLTO) {
+    Set-Content -LiteralPath $ThinLtoMarker -Value "1" -Encoding ASCII
+}
+elseif (Test-Path -LiteralPath $ThinLtoMarker) {
+    Remove-Item -LiteralPath $ThinLtoMarker -Force
+}
+
 Write-Host ""
 Write-Host "[scarlet-build] BUILD CONCLUIDO" -ForegroundColor Green
 
