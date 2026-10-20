@@ -250,3 +250,20 @@ código em `runtime/hle/wildbattle.c`; opção "Batalhas selvagens (experimental
   minutos o que três rodadas manuais não mostraram. (3) O `LARECOMP_HOOK_DUMP` exige o endereço completo do guest.
 - **Falta:** XP dividido (metade ao derrotar, metade ao capturar), natureza e shiny do Pokémon tocado, formas
   regionais (a tabela de golpes usa o índice da espécie), batalha de Pokémon grandes/auras e teste em mais áreas.
+
+## 2026-10-20 — Cache de despacho concorrente do Scarlet
+
+Sintoma: baixo desempenho e risco de chamada incorreta entre workers. Diagnóstico:
+o cache compartilhado publicava endereço e função separadamente; colisões
+concorrentes reproduziram uma função errada em teste sintético. Correção: cache
+frontal privado de 16 KiB por thread, tabela exata compartilhada e invalidação
+por geração no boot/override. Teste concorrente e 17 testes de retomada/longjmp
+passaram. Ganho de FPS e build completo Windows ainda não medidos.
+Detalhes: `SCARLET-CPU-DISPATCH.md`.
+
+## 2026-10-20 — Relatorio de desempenho por sessao
+
+Adicionada coleta opt-in de frames, processo, threads e motores GPU, contagem
+guest limitada a uma janela e resumo com percentis e chamadas HLE. O ZIP preserva
+dados brutos e identifica medidas indisponiveis. Testes de CSV e resumo passaram;
+sintaxe PowerShell verificada. Execucao CIM e build completo Windows pendentes.

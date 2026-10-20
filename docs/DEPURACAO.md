@@ -141,3 +141,12 @@ fechado) copia o build atual para lá depois de validado. Assim, recompilar e te
 
 Para comparar áudio com o original:
 `ffmpeg -i <video>.webm -vn -f s16le -ar 48000 -ac 2 ref.raw` e correlacionar com a gravação (numpy no `.venv`).
+
+## Scarlet: pacote de desempenho
+
+`tools/scarlet_diagnose.ps1` inicia o runner com `-Profile`, amostra processo,
+threads e motores GPU e produz um ZIP ao sair. `LARECOMP_FRAME_CSV=<arquivo>`
+ativa a linha do tempo CSV quando `LARECOMP_VK_PROF` esta ativo. O profiler
+escreve linhas por present e descarrega o buffer aproximadamente a cada segundo.
+`tools/scarlet_performance_report.py <pasta>` regenera o resumo com Python padrao.
+Opcoes e limites: `SCARLET-CPU-DISPATCH.md`.

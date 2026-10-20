@@ -65,6 +65,7 @@ volatile int g_fnprof, g_fnhook;
 void fnprof_hit(uint64_t a, uint64_t b, uint64_t d) { (void)a; (void)b; (void)d; }
 int rt_fnhook(Cpu *c, uint64_t a) { (void)c; (void)a; return 0; }
 void rt_unwind_point(void) {}
+uint64_t plat_now_ns(void) { return 0; }
 Cpu *kernel_current_cpu(void) { return NULL; }
 const char *loader_symbol_at(uint64_t a, uint64_t *off) { (void)a; *off=0; return NULL; }
 void plat_print_backtrace(void) {}
@@ -143,7 +144,7 @@ class GuestSetjmpTests(unittest.TestCase):
                 run = subprocess.run(command, capture_output=True, text=True)
                 self.assertEqual(run.returncode, 0, run.stderr)
                 exe = work / (variant + '_test')
-                command = compiler_command() + ['-O2', '-fno-strict-aliasing', '-ffunction-sections',
+                command = compiler_command() + ['-O2', '-UNDEBUG', '-fno-strict-aliasing', '-ffunction-sections',
                     '-fdata-sections', '-Wno-format', '-I' + str(ROOT / 'runtime'), str(harness),
                     str(ROOT / 'runtime/dispatch.c'), str(ROOT / 'tools/gamelib_entry.c')]
                 command += [str(p) for p in sorted(gen.glob('*.c'))]

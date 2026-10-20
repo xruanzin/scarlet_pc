@@ -150,6 +150,7 @@ volatile int g_fnprof, g_fnhook;
 void fnprof_hit(uint64_t a, uint64_t b, uint64_t d) { (void)a; (void)b; (void)d; }
 int rt_fnhook(Cpu *c, uint64_t a) { (void)c; (void)a; return 0; }
 void rt_unwind_point(void) {}
+uint64_t plat_now_ns(void) { return 0; }
 Cpu *kernel_current_cpu(void) { return NULL; }
 const char *loader_symbol_at(uint64_t a, uint64_t *off) { (void)a; *off = 0; return NULL; }
 void plat_print_backtrace(void) {}
@@ -240,7 +241,7 @@ class NativeTests(unittest.TestCase):
         harness = work / 'harness.c'
         harness.write_text(native_harness(cls.module, cls.base))
         cls.exe = work / 'resume_test'
-        cls.compile_args = ['-O2', '-g', '-ffunction-sections', '-fdata-sections', '-Wno-format',
+        cls.compile_args = ['-O2', '-UNDEBUG', '-g', '-ffunction-sections', '-fdata-sections', '-Wno-format',
                     '-I' + str(ROOT / 'runtime'), str(harness),
                     str(ROOT / 'runtime/dispatch.c'), str(ROOT / 'tools/gamelib_entry.c')]
         cmd = cls.cc + cls.compile_args
