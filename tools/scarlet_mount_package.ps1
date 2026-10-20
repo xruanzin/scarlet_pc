@@ -57,12 +57,26 @@ function Ensure-FuseNx {
 
 function Ensure-WinFsp {
     param([string]$FuseExe)
+
+    $Roots = @()
     $Pf86 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
-    $Candidates = @()
-    if ($Pf86) { $Candidates += (Join-Path $Pf86 "WinFsp\bin\winfsp-x64.dll") }
-    if ($env:ProgramFiles) { $Candidates += (Join-Path $env:ProgramFiles "WinFsp\bin\winfsp-x64.dll") }
+    if ($Pf86) { $Roots += (Join-Path $Pf86 "WinFsp") }
+    if ($env:ProgramFiles) { $Roots += (Join-Path $env:ProgramFiles "WinFsp") }
+
     $Dll = $null
-    foreach ($Candidate in $Candidates) { if (Test-Path -LiteralPath $Candidate -PathType Leaf) { $Dll = $Candidate; break } }
+    foreach ($Root in $Roots) {
+        if (-not (Test-Path -LiteralPath $Root -PathType Container)) { continue }
+        $Direct = Join-Path $Root "bin\winfsp-x64.dll"
+        if (Test-Path -LiteralPath $Direct -PathType Leaf) { $Dll = $Direct; break }
+
+        # Newer WinFsp installers may keep the active binaries in an SxS
+        # version directory. Prefer the newest x64 DLL if the compatibility
+        # path is not present.
+        $Sxs = @(Get-ChildItem -LiteralPath $Root -Recurse -File -Filter "winfsp-x64.dll" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTimeUtc -Descending)
+        if ($Sxs.Count) { $Dll = $Sxs[0].FullName; break }
+    }
+
     if (-not $Dll) {
         $Dir = Join-Path $RepoRoot "tools\winfsp"
         $Msi = Join-Path $Dir "winfsp-2.1.25156.msi"
@@ -74,8 +88,151 @@ function Ensure-WinFsp {
         }
         throw "WinFsp precisa ser instalado uma vez para montar XCI/NSP sem extrair. Instalador pronto em: $Msi"
     }
+
     $LocalDll = Join-Path (Split-Path -Parent $FuseExe) "winfsp-x64.dll"
     Copy-Item -LiteralPath $Dll -Destination $LocalDll -Force
+    Write-Host "[scarlet-package] WinFsp runtime: $Dll" -ForegroundColor DarkGray
+}
+
+function Get-PeImports {
+    param([string]$Path)
+
+    $ObjdumpCandidates = @(
+        "C:\msys64\ucrt64\bin\objdump.exe",
+        "C:\msys64\mingw64\bin\objdump.exe",
+        "C:\msys64\clang64\bin\objdump.exe",
+        "C:\msys64\usr\bin\objdump.exe"
+    )
+    $Objdump = $ObjdumpCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if (-not $Objdump) { return @() }
+
+    $Out = @(& $Objdump -p $Path 2>$null)
+    if ($LASTEXITCODE -ne 0) { return @() }
+
+    return @($Out | ForEach-Object {
+        if ($_ -match "^\s*DLL Name:\s*(.+?)\s*$") { $Matches[1] }
+    } | Where-Object { $_ } | Select-Object -Unique)
+}
+
+function Resolve-FuseNxDependencies {
+    param([string]$FuseExe)
+
+    $ToolDir = Split-Path -Parent $FuseExe
+    $SearchRoots = @(
+        $ToolDir,
+        "C:\msys64\ucrt64\bin",
+        "C:\msys64\mingw64\bin",
+        "C:\msys64\clang64\bin",
+        "C:\msys64\usr\bin"
+    )
+
+    $Pf86 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+    if ($Pf86) { $SearchRoots += (Join-Path $Pf86 "WinFsp\bin") }
+    if ($env:WINDIR) {
+        $System32 = Join-Path $env:WINDIR "System32"
+        $SysWow64 = Join-Path $env:WINDIR "SysWOW64"
+    } else {
+        $System32 = $null
+        $SysWow64 = $null
+    }
+
+    $Queue = New-Object System.Collections.Generic.Queue[string]
+    $Queue.Enqueue($FuseExe)
+    $Seen = @{}
+    $Missing = New-Object System.Collections.Generic.List[string]
+
+    while ($Queue.Count -gt 0) {
+        $Binary = $Queue.Dequeue()
+        $Key = $Binary.ToLowerInvariant()
+        if ($Seen.ContainsKey($Key)) { continue }
+        $Seen[$Key] = $true
+
+        foreach ($Name in @(Get-PeImports $Binary)) {
+            $Local = Join-Path $ToolDir $Name
+            if (Test-Path -LiteralPath $Local -PathType Leaf) {
+                if ($Name -match "\.dll$") { $Queue.Enqueue($Local) }
+                continue
+            }
+
+            if (($System32 -and (Test-Path -LiteralPath (Join-Path $System32 $Name) -PathType Leaf)) -or
+                ($SysWow64 -and (Test-Path -LiteralPath (Join-Path $SysWow64 $Name) -PathType Leaf))) {
+                continue
+            }
+
+            # API-set names are virtual contracts resolved by the Windows
+            # loader; they do not exist as ordinary files on every version.
+            if ($Name -match "^(api-ms-win-|ext-ms-win-)") { continue }
+
+            $Found = $null
+            foreach ($Root in $SearchRoots) {
+                if (-not $Root -or -not (Test-Path -LiteralPath $Root -PathType Container)) { continue }
+                $Candidate = Join-Path $Root $Name
+                if (Test-Path -LiteralPath $Candidate -PathType Leaf) { $Found = $Candidate; break }
+            }
+
+            if (-not $Found -and $Name -ieq "winfsp-x64.dll" -and $Pf86) {
+                $WRoot = Join-Path $Pf86 "WinFsp"
+                if (Test-Path -LiteralPath $WRoot -PathType Container) {
+                    $Any = @(Get-ChildItem -LiteralPath $WRoot -Recurse -File -Filter $Name -ErrorAction SilentlyContinue |
+                        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1)
+                    if ($Any.Count) { $Found = $Any[0].FullName }
+                }
+            }
+
+            if ($Found) {
+                Copy-Item -LiteralPath $Found -Destination $Local -Force
+                Write-Host "[scarlet-package] Runtime DLL: $Name <- $Found" -ForegroundColor DarkGray
+                $Queue.Enqueue($Local)
+            }
+            elseif (-not $Missing.Contains($Name)) {
+                $Missing.Add($Name)
+            }
+        }
+    }
+
+    if ($Missing.Count) {
+        throw ("Dependencias do Fuse-Nx ausentes: " + ($Missing -join ", "))
+    }
+
+    # The 2021 release was built with MinGW64. If PE import inspection is not
+    # available, stage the conventional MinGW runtime DLLs opportunistically.
+    if ((Get-PeImports $FuseExe).Count -eq 0) {
+        foreach ($Name in @("libgcc_s_seh-1.dll","libstdc++-6.dll","libwinpthread-1.dll")) {
+            $Local = Join-Path $ToolDir $Name
+            if (Test-Path -LiteralPath $Local -PathType Leaf) { continue }
+            foreach ($Root in $SearchRoots) {
+                if (-not $Root) { continue }
+                $Candidate = Join-Path $Root $Name
+                if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
+                    Copy-Item -LiteralPath $Candidate -Destination $Local -Force
+                    break
+                }
+            }
+        }
+    }
+}
+
+function Test-FuseNxRuntime {
+    param([string]$FuseExe)
+
+    $ProbeOut = Join-Path $RepoRoot "build\package-direct\fuse-runtime-probe.out.log"
+    $ProbeErr = Join-Path $RepoRoot "build\package-direct\fuse-runtime-probe.err.log"
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ProbeOut) | Out-Null
+    Remove-Item $ProbeOut,$ProbeErr -Force -ErrorAction SilentlyContinue
+
+    $p = Start-Process -FilePath $FuseExe -ArgumentList "--help" -RedirectStandardOutput $ProbeOut -RedirectStandardError $ProbeErr -WindowStyle Hidden -PassThru -Wait
+    if ($p.ExitCode -eq -1073741515) {
+        $Imports = @(Get-PeImports $FuseExe)
+        $ImportText = if ($Imports.Count) { " Imports: " + ($Imports -join ", ") } else { "" }
+        throw "Fuse-Nx nao inicia: Windows STATUS_DLL_NOT_FOUND (0xC0000135).$ImportText"
+    }
+    if ($p.ExitCode -eq -1073741701) {
+        throw "Fuse-Nx nao inicia: Windows STATUS_INVALID_IMAGE_FORMAT (0xC000007B), normalmente DLL de arquitetura errada."
+    }
+    if ($p.ExitCode -ne 0) {
+        $Tail = if (Test-Path $ProbeErr) { (Get-Content $ProbeErr -Tail 20) -join [Environment]::NewLine } else { "" }
+        throw "Fuse-Nx falhou no autoteste (exit $($p.ExitCode)). $Tail"
+    }
 }
 
 function Get-ProgramId {
@@ -104,6 +261,8 @@ function To-HostPath {
 $Keys = Find-ProdKeys $KeysPath
 $FuseNx = Ensure-FuseNx $FuseNxPath
 Ensure-WinFsp $FuseNx
+Resolve-FuseNxDependencies $FuseNx
+Test-FuseNxRuntime $FuseNx
 
 $StateDir = Join-Path $RepoRoot "build\package-direct"
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
