@@ -369,19 +369,36 @@ if ($PerformanceDir) {
         }
 
         # Resolve/disassemble a small set of the hottest guest entries automatically.
-        # This gives the next diagnostic enough context to turn safe SDK leaf functions into native fast paths.
+        # This is diagnostic-only and runs after the game has exited.
         $Inspector = Join-Path $PSScriptRoot 'scarlet_inspect_addr.py'
         if ($Python -and (Test-Path -LiteralPath $Inspector -PathType Leaf)) {
             try {
                 $InspectOut = Join-Path $PerformanceDir 'fnprof-inspect.txt'
+                Remove-Item -LiteralPath $InspectOut -Force -ErrorAction SilentlyContinue
                 $SeenAddr = @{}
                 $Profiles = @(Get-ChildItem -LiteralPath $PerformanceDir -Filter 'fnprof*.txt' -File -ErrorAction SilentlyContinue | Sort-Object Name)
                 foreach ($Pf in $Profiles) {
-                    Add-Content -LiteralPath $InspectOut -Value ("===== " + $Pf.Name + " =====") -Encoding UTF8
+                    Add-Content -LiteralPath $InspectOut -Value ('===== ' + $Pf.Name + ' =====') -Encoding UTF8
                     $Rows = @(Get-Content -LiteralPath $Pf.FullName | Select-Object -First 8)
                     foreach ($Row in $Rows) {
                         $Parts = @($Row -split '\s+')
-                        if ($Parts.Count -lt 1 -or $Parts[0] -notmatch '^[0-9a-fA-F]{8,}
+                        if ($Parts.Count -lt 1) { continue }
+                        $Addr = [string]$Parts[0]
+                        if ($Addr -notmatch '^[0-9A-Fa-f]{8,}$') { continue }
+                        $Key = $Addr.ToLowerInvariant()
+                        if ($SeenAddr.ContainsKey($Key)) { continue }
+                        $SeenAddr[$Key] = $true
+                        Add-Content -LiteralPath $InspectOut -Value ('--- 0x' + $Addr + ' ---') -Encoding UTF8
+                        & $Python $Inspector $ExeFs ('0x' + $Addr) 2>&1 | Out-File -LiteralPath $InspectOut -Append -Encoding utf8
+                    }
+                }
+            }
+            catch {
+                Write-Host "[scarlet-run] Inspecao automatica dos hotspots falhou: $_" -ForegroundColor Yellow
+            }
+        }
+
+        if ($Python -and (Test-Path -LiteralPath $ReportTool -PathType Leaf)) {
             & $Python $ReportTool $PerformanceDir
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "[scarlet-run] Gerador do relatorio terminou com exit $LASTEXITCODE; empacotando dados brutos mesmo assim." -ForegroundColor Yellow
