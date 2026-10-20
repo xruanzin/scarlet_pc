@@ -3280,7 +3280,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     if (fkey.ring_neutral_grade) {
         static bool grade_reported;
-        if (!grade_reported) { grade_reported = true; LOG("[vk] Scarlet opening schoolyard neutral grade enabled\n"); }
+        if (!grade_reported) { grade_reported = true; LOG("[vk] Scarlet opening schoolyard atmosphere/chroma correction enabled\n"); }
     }
     vkey.layer_varying = fkey.layer_varying = lut_slice_active;
     vkey.bindless_storage = fkey.bindless_storage = g_vk.bindless_storage_slots;

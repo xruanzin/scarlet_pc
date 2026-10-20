@@ -2245,13 +2245,17 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                "    c0.rgb = hb * hscl;\n"
                "  }\n");
         }
-        // Opening schoolyard/court capture: geometry is already correct before
-        // the final colour grade, but the tone-map output is consistently too
-        // cool compared with the guest reference.  Apply a small white-balance
-        // correction only to the fingerprinted tone-map program and only in
-        // frames where the schoolyard marker shader was seen.
+        // Opening schoolyard/court capture: the port's outdoor image keeps the
+        // right geometry but develops a strong blue-only cast.  Paired Eden /
+        // ScarletRecomp captures show that neutral/warm pixels are already close,
+        // while blue-dominant sky and distance haze lose red/green. Correct only
+        // the blue excess, so interiors, skin, wood and neutral highlights are
+        // not globally regraded. For the reference sky this maps roughly
+        // 21/76/214 -> 42/146/229, matching Eden's ~41/146/228.
         if (key && key->ring_neutral_grade && key->rt_kind[0] == 0)
-            sp(&s, "  c0.rgb = clamp(c0.rgb * vec3(1.025f, 1.0f, 0.92f), vec3(0.0f), vec3(1.0f));\n");
+            sp(&s,
+               "  { float bx = max(c0.b - max(c0.r, c0.g), 0.0f);\n"
+               "    c0.rgb = clamp(c0.rgb + bx * vec3(0.15f, 0.51f, 0.11f), vec3(0.0f), vec3(1.0f)); }\n");
         if (tint)
             sp(&s, "  if (ltint[0].w > 0.0f) { vec3 g = c0.rgb; float l = dot(g, vec3(0.299f, 0.587f, 0.114f));\n"
                    "    c0.rgb = mix(g, ltint[0].rgb * pow(l, ltint[1].w) + ltint[1].rgb * l, ltint[0].w); }\n");
