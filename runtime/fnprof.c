@@ -9,7 +9,7 @@
 #include "platform.h"
 #include "rt.h"
 
-volatile int g_fnprof;
+volatile unsigned g_fn_enter_flags;
 
 #define NSLOT (1 << 18)
 static struct { _Atomic uint64_t addr; _Atomic uint64_t count; uint64_t first, lr; } slots[NSLOT];
@@ -78,9 +78,9 @@ void fnprof_frame(uint64_t frame) {
         if (e && sscanf(e, "%ld:%ld", &from, &to) != 2) from = -1;
     }
     if (from < 0) return;
-    if ((long)frame == from) { g_fnprof = 1; LOG("[fnprof] on at frame %llu\n", (unsigned long long)frame); }
+    if ((long)frame == from) { __atomic_fetch_or(&g_fn_enter_flags, FN_FLAG_PROF, __ATOMIC_RELAXED); LOG("[fnprof] on at frame %llu\n", (unsigned long long)frame); }
     if ((long)frame != to) return;
-    g_fnprof = 0;
+    __atomic_fetch_and(&g_fn_enter_flags, ~FN_FLAG_PROF, __ATOMIC_RELAXED);
     uint64_t (*rows)[4] = malloc(sizeof(uint64_t[4]) * NSLOT);
     int n = 0;
     for (int i = 0; i < NSLOT; i++)
@@ -119,5 +119,5 @@ void fnprof_frame(uint64_t frame) {
 // LARECOMP_FNPROF=0:<to>: profile from process start (threads the game starts before the first frame)
 __attribute__((constructor)) static void fnprof_early(void) {
     const char *e = getenv("LARECOMP_FNPROF");
-    if (e && e[0] == '0' && e[1] == ':') g_fnprof = 1;
+    if (e && e[0] == '0' && e[1] == ':') __atomic_fetch_or(&g_fn_enter_flags, FN_FLAG_PROF, __ATOMIC_RELAXED);
 }
