@@ -55,6 +55,12 @@ GENFLAGS := -O3 -fno-strict-aliasing -fno-math-errno -fno-trapping-math -fno-sem
 AGGRESSIVE_CPU ?= 1
 ifeq ($(AGGRESSIVE_CPU),1)
 GENFLAGS += -funroll-loops -fomit-frame-pointer -DNDEBUG
+# The lifted guest still crosses a very large number of tiny/medium C
+# functions. With ThinLTO those bodies are visible globally, but LLVM's
+# default size heuristic is conservative for a 270k-function DLL. Bias the
+# inliner toward runtime speed: duplicated host code is cheaper than round
+# trips through Cpu state on Scarlet's hot render/gameplay paths.
+GENFLAGS += -mllvm -inline-threshold=600 -mllvm -inlinehint-threshold=1200
 endif
 
 # Function-entry profiling/hooks are deliberately compiled out of the normal
@@ -259,9 +265,9 @@ $(B)/imgui/imgui_impl_%.o: $(IMGUI)/backends/imgui_impl_%.cpp
 PY := $(firstword $(wildcard .venv/Scripts/python.exe) $(wildcard .venv/bin/python) $(wildcard tools/venv/bin/python) $(wildcard tools/venv/Scripts/python.exe))
 
 gen:
-	cd tools && $(abspath $(PY)) gen.py sdk ../extracted/exefs/sdk 0x7006000000 ../$(GEN)/sdk --indirect-resume --hle ../runtime/hle/hle_symbols.txt $(GENSIMD) $(GENTRACE)
-	cd tools && $(abspath $(PY)) gen.py main ../extracted/exefs/main 0x7000000000 ../$(GEN)/main --indirect-resume --hle ../runtime/hle/hle_symbols.txt $(GENSIMD) $(GENTRACE)
-	cd tools && $(abspath $(PY)) gen.py subsdk0 ../extracted/exefs/subsdk0 0x7008000000 ../$(GEN)/subsdk0 --hle ../runtime/hle/hle_symbols.txt $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py sdk ../extracted/exefs/sdk 0x7006000000 ../$(GEN)/sdk --indirect-resume --hle ../runtime/hle/hle_symbols.txt --always-inline-bytes $(GUEST_INLINE_BYTES) $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py main ../extracted/exefs/main 0x7000000000 ../$(GEN)/main --indirect-resume --hle ../runtime/hle/hle_symbols.txt --always-inline-bytes $(GUEST_INLINE_BYTES) $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py subsdk0 ../extracted/exefs/subsdk0 0x7008000000 ../$(GEN)/subsdk0 --hle ../runtime/hle/hle_symbols.txt --always-inline-bytes $(GUEST_INLINE_BYTES) $(GENSIMD) $(GENTRACE)
 
 gen-objs: $(GEN_OBJ)
 
