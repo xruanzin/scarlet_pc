@@ -432,11 +432,42 @@ if ($Ext -eq ".xci") {
 $SearchRoots += ($MountPoint + "\")
 
 $ChosenNpdm = $null
-foreach ($SearchRoot in $SearchRoots) {
-    $Candidate = Find-MountedMainNpdm $SearchRoot
-    if ($Candidate -and (Get-ProgramId $Candidate) -eq [UInt64]0x0100A3D008C5C000) {
-        $ChosenNpdm = $Candidate
-        break
+
+# NSP/PFS packages expose NCA containers directly at the archive root. Using
+# Fuse-Nx's own virtual traversal here is more reliable than relying on
+# PowerShell's WinFsp directory classification for every nested NCA section.
+if ($Ext -eq ".nsp") {
+    $FindErr = Join-Path $StateDir "find-nsp.err.log"
+    Remove-Item -LiteralPath $FindErr -Force -ErrorAction SilentlyContinue
+
+    $VirtualMatches = @(& $FuseNx -k $Keys find -m 32 -d 8 "main.npdm" $PackagePath "/" 2> $FindErr)
+    $FindCode = $LASTEXITCODE
+
+    if ($FindCode -eq 0) {
+        foreach ($Virtual in $VirtualMatches) {
+            if (-not $Virtual) { continue }
+            $Host = To-HostPath $MountPoint ([string]$Virtual)
+            if (-not (Test-Path -LiteralPath $Host -PathType Leaf)) { continue }
+
+            $ProgramId = Get-ProgramId $Host
+            Write-Host ("[scarlet-package] NSP candidato: " + $Virtual + " program_id=0x" + $ProgramId.ToString("x16")) -ForegroundColor DarkGray
+            if ($ProgramId -eq [UInt64]0x0100A3D008C5C000) {
+                $ChosenNpdm = $Host
+                break
+            }
+        }
+    }
+}
+
+# Fallback for XCI and for NSPs whose virtual find traversal did not return a
+# usable mounted path.
+if (-not $ChosenNpdm) {
+    foreach ($SearchRoot in $SearchRoots) {
+        $Candidate = Find-MountedMainNpdm $SearchRoot
+        if ($Candidate -and (Get-ProgramId $Candidate) -eq [UInt64]0x0100A3D008C5C000) {
+            $ChosenNpdm = $Candidate
+            break
+        }
     }
 }
 
@@ -444,24 +475,54 @@ foreach ($SearchRoot in $SearchRoots) {
 # returns the first one. Scarlet base gamecards normally expose only one Program
 # NCA in /secure; title-id validation above prevents booting the wrong program.
 if (-not $ChosenNpdm) {
-    $Top = @(Get-ChildItem -LiteralPath ($MountPoint + "\") -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+    $TopEntries = @(Get-ChildItem -LiteralPath ($MountPoint + "\") -Force -ErrorAction SilentlyContinue)
+    $Top = @($TopEntries | Select-Object -ExpandProperty Name)
     $TopText = if ($Top.Count) { $Top -join ", " } else { "(vazio)" }
 
-    # Capture a shallow diagnostic tree before unmounting; this makes the next
-    # failure actionable without asking the user to browse the transient drive.
+    # Capture a shallow diagnostic tree before unmounting. For NSP, inspect
+    # every parsed NCA container at the root; for XCI inspect the partitions.
     $Diag = New-Object System.Collections.Generic.List[string]
-    foreach ($RootName in @("secure","normal","update")) {
-        $RootPath = Join-Path ($MountPoint + "\") $RootName
-        if (-not (Test-Path -LiteralPath $RootPath -PathType Container)) { continue }
-        foreach ($Entry in @(Get-ChildItem -LiteralPath $RootPath -Force -ErrorAction SilentlyContinue | Select-Object -First 20)) {
-            $Kind = if (Test-Path -LiteralPath $Entry.FullName -PathType Container) { "dir" } else { "file" }
-            $Diag.Add("$RootName/$($Entry.Name) [$Kind]")
+    if ($Ext -eq ".nsp") {
+        foreach ($Entry in $TopEntries) {
+            if ($Entry.Name -match "[.](nca|tik|cert)$") { continue }
+            if (-not (Test-Path -LiteralPath $Entry.FullName -PathType Container)) { continue }
+
+            $Children = @(Get-ChildItem -LiteralPath $Entry.FullName -Force -ErrorAction SilentlyContinue | Select-Object -First 12)
+            if (-not $Children.Count) {
+                $Diag.Add("$($Entry.Name)/ [dir vazio]")
+                continue
+            }
+            foreach ($Child in $Children) {
+                $Kind = if (Test-Path -LiteralPath $Child.FullName -PathType Container) { "dir" } else { "file" }
+                $Diag.Add("$($Entry.Name)/$($Child.Name) [$Kind]")
+            }
+        }
+    } else {
+        foreach ($RootName in @("secure","normal","update")) {
+            $RootPath = Join-Path ($MountPoint + "\") $RootName
+            if (-not (Test-Path -LiteralPath $RootPath -PathType Container)) { continue }
+            foreach ($Entry in @(Get-ChildItem -LiteralPath $RootPath -Force -ErrorAction SilentlyContinue | Select-Object -First 20)) {
+                $Kind = if (Test-Path -LiteralPath $Entry.FullName -PathType Container) { "dir" } else { "file" }
+                $Diag.Add("$RootName/$($Entry.Name) [$Kind]")
+            }
         }
     }
     $DiagText = if ($Diag.Count) { $Diag -join ", " } else { "(sem entradas diagnosticaveis)" }
 
+    $FindTail = ""
+    if ($Ext -eq ".nsp" -and $FindErr -and (Test-Path -LiteralPath $FindErr -PathType Leaf)) {
+        $FindTail = ((Get-Content -LiteralPath $FindErr -Tail 20) -join " | ").Trim()
+    }
+
     Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue
-    throw "O XCI foi montado, mas nao encontrei main.npdm do Pokemon Scarlet (0100A3D008C5C000). Raiz virtual: $TopText. Arvore: $DiagText"
+
+    $KindName = $Ext.TrimStart(".").ToUpperInvariant()
+    if ($FindTail -match "(?i)unsupported encryption scheme|AesCtrEx|BKTR") {
+        throw "$KindName foi montado, mas o Program NCA usa uma secao de update/BKTR que este caminho direto ainda nao suporta. Esse arquivo parece ser update/patch, nao o NSP base. Fuse-Nx: $FindTail"
+    }
+
+    $Extra = if ($FindTail) { " Fuse-Nx: $FindTail" } else { "" }
+    throw "$KindName foi montado, mas nao encontrei main.npdm do Pokemon Scarlet (0100A3D008C5C000). Raiz virtual: $TopText. Arvore: $DiagText.$Extra"
 }
 
 $ExeFs = Split-Path -Parent $ChosenNpdm
