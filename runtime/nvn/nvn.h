@@ -146,8 +146,9 @@ typedef struct {
 // so command-memory reuse on another guest thread cannot recycle/overwrite it
 // while the Vulkan executor is still reading it. pin() returns the resolved
 // host start address (or the original handle when no host stream is known).
+// Pass that returned value to unpin(); the guest slot itself may be recycled.
 uint64_t nvn_cmdstream_pin(uint64_t handle);
-void nvn_cmdstream_unpin(uint64_t handle);
+void nvn_cmdstream_unpin(uint64_t resolved);
 
 enum {
     CMD_END = 0, CMD_JUMP, CMD_CALL,
