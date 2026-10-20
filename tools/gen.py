@@ -37,6 +37,13 @@ SCARLET_MAIN_DIRECT_HLE = {
         0x30177A0: '_ZN2nn2os16GetCurrentThreadEv',
         0x3018960: '_ZN2nn2os11GetTlsValueENS0_7TlsSlotE',
         0x3019B40: '_ZN2nn2os16SignalLightEventEPNS0_14LightEventTypeE',
+
+        # Verified hot leaf functions from the Scarlet 1.0.0 slow-scene capture.
+        # These are pure getters/constants and are substantially cheaper as one
+        # host call than as lifted fragments + dispatcher traffic.
+        0x27036E0: 'scarlet_hot_vec_d0_size',
+        0x270386C: 'scarlet_hot_slot_c4',
+        0x26B7418: 'scarlet_hot_false',
     },
 }
 
@@ -63,6 +70,81 @@ def fname(a):
 
 def sanitize(sym):
     return 'hle_' + re.sub(r'[^A-Za-z0-9_]', '_', sym)
+
+
+MODULE_BASES = {
+    'main': 0x7000000000,
+    'sdk': 0x7006000000,
+    'subsdk0': 0x7008000000,
+}
+
+
+def _sx(v, bits_):
+    sign = 1 << (bits_ - 1)
+    return (v ^ sign) - sign
+
+
+def detect_plt_imports(n, base):
+    """Return {absolute PLT entry: imported symbol name} for standard AArch64 stubs."""
+    rel = {}
+    for off, typ, symidx, add in n.relocs:
+        if typ in (R_AARCH64_JUMP_SLOT, R_AARCH64_GLOB_DAT) and 0 <= symidx < len(n.syms):
+            rel[off] = symidx
+
+    out = {}
+    lo, size = n.text
+    hi = lo + size
+    for off in range(lo, hi - 12, 4):
+        w0 = n.u32(off)
+        w1 = n.u32(off + 4)
+        w2 = n.u32(off + 8)
+        w3 = n.u32(off + 12)
+
+        # adrp x16, page ; ldr x17,[x16,#imm] ; add x16,x16,#imm ; br x17
+        if (w0 & 0x9F00001F) != 0x90000010:
+            continue
+        if (w1 & 0xFFC003FF) != 0xF9400211:
+            continue
+        if (w2 & 0xFFC003FF) != 0x91000210:
+            continue
+        if w3 != 0xD61F0220:
+            continue
+
+        immlo = (w0 >> 29) & 3
+        immhi = (w0 >> 5) & 0x7FFFF
+        pages = _sx((immhi << 2) | immlo, 21)
+        pc = base + off
+        page = (pc & ~0xFFFull) + (pages << 12)
+        got = page + (((w1 >> 10) & 0xFFF) << 3)
+        got_off = got - base
+        symidx = rel.get(got_off)
+        if symidx is None:
+            continue
+        name = n.syms[symidx][0]
+        if name:
+            out[base + off] = name
+    return out
+
+
+def sibling_export_targets(path, current_name):
+    """Resolve unique exports in the sibling main/sdk/subsdk0 modules."""
+    root = os.path.dirname(os.path.abspath(path))
+    found = {}
+    for mod, base in MODULE_BASES.items():
+        if mod == current_name:
+            continue
+        p = os.path.join(root, mod)
+        if not os.path.exists(p):
+            continue
+        try:
+            other = Nso(p)
+        except Exception:
+            continue
+        for name, info, shndx, value, size in other.syms:
+            if not name or not shndx:
+                continue
+            found.setdefault(name, set()).add(base + value)
+    return {name: next(iter(v)) for name, v in found.items() if len(v) == 1}
 
 
 class Module:
@@ -693,11 +775,32 @@ def main():
     if args.name == 'main':
         for off, name in SCARLET_MAIN_DIRECT_HLE.get(bid, {}).items():
             hle[args.base + off] = name
+    want = set()
     if args.hle and os.path.exists(args.hle):
         want = {l.strip() for l in open(args.hle) if l.strip() and not l.startswith('#')}
         for name, info, shndx, value, size in m.nso.syms:
             if shndx and name in want:
                 hle[args.base + value] = name
+
+    # Remove the PLT/GOT + indirect dispatcher trip for every standard import
+    # we can resolve statically. HLE imports call their host implementation
+    # directly; unique exports in sibling NSOs call the lifted target directly.
+    # This is especially important for Scarlet, whose slow scenes execute tens
+    # of thousands of tiny SDK/import thunks per frame.
+    auto_hle = auto_guest = 0
+    sibling = sibling_export_targets(args.nso, args.name)
+    for entry, name in detect_plt_imports(m.nso, args.base).items():
+        if name in want:
+            if entry not in hle:
+                hle[entry] = name
+                auto_hle += 1
+            continue
+        target = sibling.get(name)
+        if target is not None and entry not in m.direct_guest:
+            m.direct_guest[entry] = target
+            auto_guest += 1
+    if auto_hle or auto_guest:
+        print(f'{args.name}: direct PLT bindings: {auto_hle} HLE, {auto_guest} sibling guest')
 
     # Partition text into functions; any branch/call target outside its function becomes a new
     # boundary (splitting the containing function) until a fixpoint is reached.

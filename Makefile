@@ -82,7 +82,7 @@ else
 EXE      := $(B)/$(EXE_NAME).exe
 DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
 OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S -DWIN32_LEAN_AND_MEAN -DNOMINMAX
-GENARCH  ?= -march=x86-64-v3  # AVX2 + FMA for the lifted FP/SIMD code (simd.h); override for older CPUs
+GENARCH  ?= -march=x86-64-v3 -mtune=znver2  # x86-v3 compatibility, scheduled for Ryzen 4000G/Zen 2
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
             -lvulkan-1 -lwinmm -lgdi32 -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared \
@@ -104,9 +104,9 @@ endif
 # partitioned into many C translation units; without LTO, direct guest calls
 # that cross a chunk boundary cannot be inlined. ThinLTO keeps the build
 # parallel/scalable while allowing the hottest tiny wrappers and SDK helpers to
-# inline across chunks. It is opt-in because the first rebuild/link is heavier.
-THINLTO ?= 0
-LTO_JOBS ?= 4
+# inline across chunks. It is enabled by default on this Scarlet branch; THINLTO=0 remains available for build troubleshooting.
+THINLTO ?= 1
+LTO_JOBS ?= 6
 ifeq ($(THINLTO),1)
 GENFLAGS += -flto=thin
 GAMELIB_LDFLAGS += -flto=thin -Wl,--thinlto-jobs=$(LTO_JOBS)
