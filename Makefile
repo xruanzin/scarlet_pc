@@ -97,6 +97,18 @@ GAMELIB_LDFLAGS := -shared -fuse-ld=lld $(B)/lasrecomp.dll.a
 GAMELIB_SHARED := -shared  # (+ the import library: runtime/gamebuild.c)
 endif
 
+# Optional ThinLTO for the lifted game library. Scarlet's generated code is
+# partitioned into many C translation units; without LTO, direct guest calls
+# that cross a chunk boundary cannot be inlined. ThinLTO keeps the build
+# parallel/scalable while allowing the hottest tiny wrappers and SDK helpers to
+# inline across chunks. It is opt-in because the first rebuild/link is heavier.
+THINLTO ?= 0
+LTO_JOBS ?= 4
+ifeq ($(THINLTO),1)
+GENFLAGS += -flto=thin
+GAMELIB_LDFLAGS += -flto=thin -Wl,--thinlto-jobs=$(LTO_JOBS)
+endif
+
 # Research build (docs/DEPURACAO.md, LARECOMP_TRACE_STORES): make TRACE=1 B=build/trace GEN=generated-trace gen / -j20 all.
 # Every store of the game reports its instruction to runtime/storetrace.c.
 ifdef TRACE
