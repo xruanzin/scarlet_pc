@@ -123,10 +123,13 @@ GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools
                 runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
-# Generated game objects are expensive, but compiler flags materially affect runtime speed.
-# Keep a flag/id stamp as a prerequisite so switching O1 -> O2 (or future CPU flags)
-# cannot silently reuse stale objects from an older build.
-GENFLAGS_STAMP := $(B)/obj/.genflags-$(GAMELIB_ID)
+# Generated game objects are expensive. Recompile all of them only when the
+# compiler flags change, not whenever gen.py/hle symbol metadata changes.
+# Generator changes are reflected in generated/*.c mtimes by write_if_changed;
+# gamelib_entry.o still tracks GAMELIB_ID, so the DLL is relinked/stamped with
+# the exact generator/runtime metadata without throwing away unchanged objects.
+GENFLAGS_ID := $(shell (echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
+GENFLAGS_STAMP := $(B)/obj/.genflags-$(GENFLAGS_ID)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
 # Runtime objects must track the repository revision. Git checkouts/pulls can
