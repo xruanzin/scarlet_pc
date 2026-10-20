@@ -111,7 +111,10 @@ $FindErr = Join-Path $StateDir "find.err.log"
 Remove-Item -LiteralPath $FindErr -Force -ErrorAction SilentlyContinue
 
 Write-Host "[scarlet-package] Localizando ExeFS dentro do ${Ext} sem extrair..." -ForegroundColor Cyan
-$Found = @(& $FuseNx -k $Keys find -m 16 -d 8 "main.npdm" $PackagePath 2> $FindErr)
+$SearchStart = if ($Ext -eq ".xci") { "/secure" } else { "/" }
+# Stop at the first program NPDM. For XCI, search only the secure game
+# partition so the system-update partition is never walked.
+$Found = @(& $FuseNx -k $Keys find -m 1 -d 6 "main.npdm" $PackagePath $SearchStart 2> $FindErr)
 $FindCode = $LASTEXITCODE
 if ($FindCode -ne 0) {
     $Tail = if (Test-Path $FindErr) { (Get-Content $FindErr -Tail 20) -join [Environment]::NewLine } else { "" }
@@ -134,7 +137,7 @@ $MountOut = Join-Path $StateDir ("fuse-" + $DriveLetter + ".out.log")
 $MountErr = Join-Path $StateDir ("fuse-" + $DriveLetter + ".err.log")
 Remove-Item $MountOut,$MountErr -Force -ErrorAction SilentlyContinue
 
-function Quote-Arg([string]$Value) { return ([char]34) + $Value.Replace([char]34, "\" + [char]34) + ([char]34) }
+function Quote-Arg([string]$Value) { return ([char]34) + $Value + ([char]34) }
 $Arguments = "-k " + (Quote-Arg $Keys) + " mount -r " + (Quote-Arg $PackagePath) + " " + (Quote-Arg $MountPoint)
 Write-Host "[scarlet-package] Montando diretamente em $MountPoint (zero extracao)..." -ForegroundColor Cyan
 $Proc = Start-Process -FilePath $FuseNx -ArgumentList $Arguments -RedirectStandardOutput $MountOut -RedirectStandardError $MountErr -WindowStyle Hidden -PassThru
