@@ -41,7 +41,10 @@ IMGUI    := third_party/imgui
 # keeps strict FP semantics but lets clang inline/vectorize the generated basic
 # blocks more aggressively; the GAMELIB_ID stamp below forces a one-time clean
 # rebuild so stale -O2 objects cannot be reused.
-GENFLAGS := -O3 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+# -fno-math-errno / -fno-trapping-math: the lifted FP keeps FPCR/FPSR in Cpu (simd.h), never reads errno or host FP
+# exception flags, so sqrt & co. may inline to single instructions and FP code may be scheduled/vectorized more freely.
+# Results stay IEEE-identical (no fast-math: no reassociation, no NaN/inf assumptions).
+GENFLAGS := -O3 -fno-strict-aliasing -fno-math-errno -fno-trapping-math -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
 
 # The game code (made by `make gen` from your own game files) is its own library next to the app (runtime/gamelib.h);
 # the app itself holds none of it

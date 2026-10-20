@@ -5,6 +5,7 @@ param(
     [switch]$IncrementalRuntime,
     [switch]$RuntimeOnly,
     [switch]$ThinLTO,
+    [switch]$NoThinLTO,  # ThinLTO is now the default for lasgame.dll (CPU-bound game code); this turns it off
     [int]$LtoJobs = 4
 )
 
@@ -103,7 +104,7 @@ if (-not $IncrementalRuntime -or $ForceRuntime) {
 
 # The backtick keeps $PATH for Bash instead of expanding it in PowerShell.
 $PerfMake = ""
-if ($ThinLTO) {
+if ($ThinLTO -or -not $NoThinLTO) {
     $PerfMake = " THINLTO=1 LTO_JOBS=$LtoJobs"
     Write-Host "[scarlet-build] ThinLTO ativado para lasgame.dll (primeiro rebuild pode demorar mais)." -ForegroundColor Green
 }
