@@ -46,13 +46,15 @@ IMGUI    := third_party/imgui
 # Results stay IEEE-identical (no fast-math: no reassociation, no NaN/inf assumptions).
 GENFLAGS := -O3 -fno-strict-aliasing -fno-math-errno -fno-trapping-math -fno-semantic-interposition -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
 
-# This branch prioritizes frame time over bit-exact host FP behavior. Fast-math
-# lets LLVM reassociate/vectorize the portable lifted FP/SIMD and use FMA; loop
-# unrolling helps compact translated loops. Disable with AGGRESSIVE_CPU=0 if a
-# particular scene exposes a numerical compatibility regression.
+# Aggressive CPU mode keeps optimizations that are compatible with the lifted
+# guest FP/SIMD environment. Do NOT use -ffast-math here: runtime/simd_fp.h and
+# runtime/simd.h intentionally use STDC FENV_ACCESS so FPCR/FPSR-sensitive
+# operations remain valid, and Clang rejects FENV_ACCESS when precise FP is
+# disabled. O3 already enables vectorization; unrolling/frame-pointer removal
+# are safe for the generated hot code.
 AGGRESSIVE_CPU ?= 1
 ifeq ($(AGGRESSIVE_CPU),1)
-GENFLAGS += -ffast-math -funroll-loops -fomit-frame-pointer -DNDEBUG
+GENFLAGS += -funroll-loops -fomit-frame-pointer -DNDEBUG
 endif
 
 # Function-entry profiling/hooks are deliberately compiled out of the normal
