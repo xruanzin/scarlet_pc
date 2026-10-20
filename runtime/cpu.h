@@ -100,16 +100,21 @@ enum { FN_FLAG_PROF = 1u, FN_FLAG_HOOK = 2u };
 extern volatile unsigned g_fn_enter_flags;
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
 int rt_fnhook(Cpu *c, uint64_t addr);
+#ifdef LARECOMP_FN_INSTRUMENT
 #define FN_ENTER(a) do {                                                                 \
-        /* Scarlet can enter ~180k lifted functions per frame in crowded scenes.          \
-           Keep diagnostics at one relaxed flag load/branch when both profilers/hooks      \
-           are off instead of two volatile global loads on every guest call. */            \
         unsigned _ff = __atomic_load_n(&g_fn_enter_flags, __ATOMIC_RELAXED);               \
         if (__builtin_expect(_ff != 0, 0)) {                                               \
             if (_ff & FN_FLAG_PROF) fnprof_hit(a, c->x[30], c->x[0]);                     \
             if ((_ff & FN_FLAG_HOOK) && rt_fnhook(c, a)) return;                          \
         }                                                                                  \
     } while (0)
+#else
+// Performance build: Scarlet can enter ~180k lifted functions per frame.
+// Do not pay even one atomic load/branch per entry for disabled diagnostics.
+// Use make FNINSTRUMENT=1 (or the diagnostic build helper) when function-entry
+// profiling/hooks are explicitly required.
+#define FN_ENTER(a) do { (void)sizeof(a); } while (0)
+#endif
 
 #define LD8(a)  (*(const u8a *)(uintptr_t)(a))
 #define LD16(a) (*(const u16u *)(uintptr_t)(a))

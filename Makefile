@@ -44,7 +44,15 @@ IMGUI    := third_party/imgui
 # -fno-math-errno / -fno-trapping-math: the lifted FP keeps FPCR/FPSR in Cpu (simd.h), never reads errno or host FP
 # exception flags, so sqrt & co. may inline to single instructions and FP code may be scheduled/vectorized more freely.
 # Results stay IEEE-identical (no fast-math: no reassociation, no NaN/inf assumptions).
-GENFLAGS := -O3 -fno-strict-aliasing -fno-math-errno -fno-trapping-math -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+GENFLAGS := -O3 -fno-strict-aliasing -fno-math-errno -fno-trapping-math -fno-semantic-interposition -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+
+# Function-entry profiling/hooks are deliberately compiled out of the normal
+# performance build. They add an atomic load/branch to every lifted function.
+# Re-enable only for targeted diagnostic builds.
+FNINSTRUMENT ?= 0
+ifeq ($(FNINSTRUMENT),1)
+GENFLAGS += -DLARECOMP_FN_INSTRUMENT=1
+endif
 
 # The game code (made by `make gen` from your own game files) is its own library next to the app (runtime/gamelib.h);
 # the app itself holds none of it
