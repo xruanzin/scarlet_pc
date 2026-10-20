@@ -2,7 +2,9 @@ param(
     [int]$Jobs = 4,
     [switch]$Setup,
     [switch]$ForceRuntime,
-    [switch]$IncrementalRuntime
+    [switch]$IncrementalRuntime,
+    [switch]$ThinLTO,
+    [int]$LtoJobs = 4
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,6 +56,9 @@ if (-not (Select-String -LiteralPath $MainTable -Pattern 'const uint64_t main_se
 if ($Jobs -lt 1) {
     $Jobs = 1
 }
+if ($LtoJobs -lt 1) {
+    $LtoJobs = 1
+}
 
 # Convert C:\foo\bar to /c/foo/bar for MSYS2 without invoking cygpath inside
 # the shell command. Keeping the command substitution out avoids quoting/parser
@@ -92,7 +97,12 @@ if (-not $IncrementalRuntime -or $ForceRuntime) {
 }
 
 # The backtick keeps $PATH for Bash instead of expanding it in PowerShell.
-$Cmd = "set -o pipefail; export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin':`$PATH; cd '$RepoPosix'; make -j$Jobs EXE_NAME=ScarletRecomp build/ScarletRecomp.exe build/lasgame.dll 2>&1 | tee scarlet_build.log"
+$PerfMake = ""
+if ($ThinLTO) {
+    $PerfMake = " THINLTO=1 LTO_JOBS=$LtoJobs"
+    Write-Host "[scarlet-build] ThinLTO ativado para lasgame.dll (primeiro rebuild pode demorar mais)." -ForegroundColor Green
+}
+$Cmd = "set -o pipefail; export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin':`$PATH; cd '$RepoPosix'; make -j$Jobs EXE_NAME=ScarletRecomp$PerfMake build/ScarletRecomp.exe build/lasgame.dll 2>&1 | tee scarlet_build.log"
 
 & $Bash -lc $Cmd
 $Code = $LASTEXITCODE
