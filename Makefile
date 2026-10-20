@@ -46,6 +46,15 @@ IMGUI    := third_party/imgui
 # Results stay IEEE-identical (no fast-math: no reassociation, no NaN/inf assumptions).
 GENFLAGS := -O3 -fno-strict-aliasing -fno-math-errno -fno-trapping-math -fno-semantic-interposition -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
 
+# This branch prioritizes frame time over bit-exact host FP behavior. Fast-math
+# lets LLVM reassociate/vectorize the portable lifted FP/SIMD and use FMA; loop
+# unrolling helps compact translated loops. Disable with AGGRESSIVE_CPU=0 if a
+# particular scene exposes a numerical compatibility regression.
+AGGRESSIVE_CPU ?= 1
+ifeq ($(AGGRESSIVE_CPU),1)
+GENFLAGS += -ffast-math -funroll-loops -fomit-frame-pointer -DNDEBUG
+endif
+
 # Function-entry profiling/hooks are deliberately compiled out of the normal
 # performance build. They add an atomic load/branch to every lifted function.
 # Re-enable only for targeted diagnostic builds.
