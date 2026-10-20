@@ -350,7 +350,7 @@ if ($PerformanceDir) {
     }
     catch {
         Write-Host "[scarlet-run] Falha ao empacotar perfil de desempenho: $_" -ForegroundColor Yellow
-        Write-Host "[scarlet-run] Dados parciais: $PerformanceDir(" -ForegroundColor Yellow
+        Write-Host "[scarlet-run] Dados parciais: $PerformanceDir" -ForegroundColor Yellow
     }
 }
 
