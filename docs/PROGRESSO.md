@@ -92,3 +92,10 @@ _Atualizado em 17/10/2026._
 | Texturas | `RGB5A1`/`RGBA4` convertidos para RGBA8 (ícones dos Pokémon) | `runtime/nvn/vulkan/textures.c` |
 | Texturas | sem escala para texturas preenchidas pela CPU; invalidação por escrita do host | `runtime/nvn/vulkan/textures.c` |
 | Áudio | fila mínima no `audout` + contagem de underruns | `runtime/services/audio.c` |
+
+## Scarlet — CPU, 2026-10-20
+
+Cache de despacho corrigido para remover publicação inconsistente e escritas
+concorrentes entre workers. Testes sintéticos passaram; falta comparação no
+Windows no mesmo percurso. Não há confirmação de 30 FPS estáveis.
+Ver `SCARLET-CPU-DISPATCH.md`.

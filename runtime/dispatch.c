@@ -86,6 +86,9 @@ void rt_hle_profile_report(void) {
 #define MAX_OVERRIDE 1024
 static struct { uint64_t addr; HostFn fn; const char *name; } overrides[MAX_OVERRIDE];
 static int override_count;
+// Registration and boot initialization run while guest threads are quiescent.
+// Surviving host threads invalidate their private cache lazily on the next call.
+static uint64_t dispatch_generation;
 
 // Host implementations registered by name (runtime/hle/*.c fill this via HLE_FUNC)
 typedef struct { const char *name; HostFn fn; } HleImpl;
@@ -127,6 +130,7 @@ void hle_override(uint64_t addr, HostFn fn, const char *name) {
     overrides[override_count].fn = fn;
     overrides[override_count].name = name;
     override_count++;
+    dispatch_generation++;
 }
 
 // ---- recent-HLE ring. Shared histories outlive their writer threads (TLS does not).
@@ -236,17 +240,18 @@ uint64_t guest_sym(const char *name) {
     return a;
 }
 
-// Shared direct-mapped cache in front of the binary search.
-// Guest address -> lifted function is immutable for a boot, so making this
-// per-thread only duplicated memory and forced every Scarlet worker to warm the
-// same lookup table again. 262144 entries (~4 MiB total) cover almost the
-// complete lifted working set and are shared by loader, jobs, audio and render.
-#define DCACHE 262144
-typedef struct {
-    _Atomic uint64_t addr;
-    _Atomic(uintptr_t) fn;
-} DCacheEnt;
-static DCacheEnt dcache[DCACHE];
+// Small private front cache: no cross-thread cache-line bouncing on misses,
+// and an address/function pair cannot be torn by a colliding writer. The large
+// immutable exact table remains shared, so workers do not duplicate that table.
+#define DCACHE_BITS 10
+#define DCACHE (1u << DCACHE_BITS)
+typedef struct { uint64_t addr; GuestFn fn; } DCacheEnt;
+static __thread DCacheEnt dcache[DCACHE];
+static __thread uint64_t dcache_generation;
+
+static inline unsigned dispatch_hash(uint64_t pc) {
+    return (unsigned)(((pc >> 2) * 11400714819323198485ull) >> (64 - DCACHE_BITS));
+}
 
 static uint64_t hle_next = HLE_HEAP;
 RT_ON_RESET(hle_heap_reset) { hle_next = HLE_HEAP; }  // (guest memory, wiped by the reboot)
@@ -291,7 +296,7 @@ void *hle_alloc(uint64_t size) {
 
 void dispatch_init(void) {  // (after gamelib_load)
     const GameLibTables *g = gamelib_tables();
-    memset(dcache, 0, sizeof dcache);
+    dispatch_generation++;
     if (!exact_tab) exact_tab = calloc(EXACT_TAB, sizeof *exact_tab);
     else memset(exact_tab, 0, EXACT_TAB * sizeof *exact_tab);
     if (!exact_tab) FATAL("cannot allocate exact guest dispatch table\n");
@@ -358,9 +363,7 @@ static GuestFn dispatch_slow(Cpu *c) {
         const char *s = loader_symbol_at(c->x[30], &off);
         FATAL("no function at %llx (lr=%llx %s+%llx)\n", pc, c->x[30], s ? s : "?", off);
     }
-    unsigned h = (unsigned)(((pc >> 2) * 11400714819323198485ull) >> (64 - 18));
-    atomic_store_explicit(&dcache[h].fn, (uintptr_t)f, memory_order_relaxed);
-    atomic_store_explicit(&dcache[h].addr, pc, memory_order_release);
+    dcache[dispatch_hash(pc)] = (DCacheEnt){pc, f};
     return f;
 }
 
@@ -380,11 +383,12 @@ void rt_dispatch(Cpu *c) {
             }
         }
     }
-    unsigned h = (unsigned)(((c->pc >> 2) * 11400714819323198485ull) >> (64 - 18));
-    uint64_t cached = atomic_load_explicit(&dcache[h].addr, memory_order_acquire);
-    GuestFn f = cached == c->pc
-        ? (GuestFn)(uintptr_t)atomic_load_explicit(&dcache[h].fn, memory_order_relaxed)
-        : dispatch_slow(c);
+    if (__builtin_expect(dcache_generation != dispatch_generation, 0)) {
+        memset(dcache, 0, sizeof dcache);
+        dcache_generation = dispatch_generation;
+    }
+    DCacheEnt *entry = &dcache[dispatch_hash(c->pc)];
+    GuestFn f = entry->fn && entry->addr == c->pc ? entry->fn : dispatch_slow(c);
     __attribute__((musttail)) return f(c);
 }
 
