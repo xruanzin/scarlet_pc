@@ -136,7 +136,12 @@ NVN(nvnQueueSubmitCommands) {
 
     for (int i = 0; i < n; i++) backend_execute(resolved[i]);
 
-    for (int i = n - 1; i >= 0; i--) nvn_cmdstream_unpin(handles[i]);
+    // pin() returns the stable host-chain start.  Unpin that exact value: the
+    // guest command-memory slot may already have been recycled/re-written by a
+    // recording worker by the time this submit completes.  Unpinning the guest
+    // handle leaked one ref per submitted list and made the host command pool
+    // grow until the 1 GiB safety cap.
+    for (int i = n - 1; i >= 0; i--) nvn_cmdstream_unpin(resolved[i]);
 
     if (resolved != stack_resolved) free(resolved);
 }
