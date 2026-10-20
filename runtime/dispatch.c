@@ -334,7 +334,7 @@ GuestFn dispatch_lookup(uint64_t addr) {
     return NULL;
 }
 
-static GuestFn dispatch_slow(Cpu *c) {
+static GuestFn dispatch_slow(Cpu *c, RtCallCache *site) {
     uint64_t pc = c->pc;
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
         rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)
@@ -361,7 +361,17 @@ static GuestFn dispatch_slow(Cpu *c) {
     unsigned h = (unsigned)(((pc >> 2) * 11400714819323198485ull) >> (64 - 18));
     atomic_store_explicit(&dcache[h].fn, (uintptr_t)f, memory_order_relaxed);
     atomic_store_explicit(&dcache[h].addr, pc, memory_order_release);
+    if (site) {
+        // Publish fn before key. A reader acquires key first, so it can only
+        // accept a function pointer that belongs to that published address.
+        atomic_store_explicit(&site->fn, (uintptr_t)f, memory_order_relaxed);
+        atomic_store_explicit(&site->key, pc ^ RT_CALL_CACHE_MIX(f), memory_order_release);
+    }
     return f;
+}
+
+GuestFn rt_dispatch_cached_slow(Cpu *c, RtCallCache *cache) {
+    return dispatch_slow(c, cache);
 }
 
 // Always tail-calls, so chains of indirect jumps don't grow the host stack.
@@ -384,7 +394,7 @@ void rt_dispatch(Cpu *c) {
     uint64_t cached = atomic_load_explicit(&dcache[h].addr, memory_order_acquire);
     GuestFn f = cached == c->pc
         ? (GuestFn)(uintptr_t)atomic_load_explicit(&dcache[h].fn, memory_order_relaxed)
-        : dispatch_slow(c);
+        : dispatch_slow(c, NULL);
     __attribute__((musttail)) return f(c);
 }
 

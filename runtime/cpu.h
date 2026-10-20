@@ -2,6 +2,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <string.h>
 
 typedef struct __attribute__((aligned(16))) Cpu {
@@ -30,8 +31,31 @@ _Static_assert(offsetof(Cpu, v) == 512, "v");
 
 typedef void (*GuestFn)(Cpu *);
 
+// WindowSmash-style monomorphic inline cache for one indirect guest branch
+// site. The generated DLL keeps one tiny cache next to each hot BLR/BR. A
+// hit avoids the shared dispatch hash/table entirely; misses still go through
+// dispatch.c, which deliberately never puts HLE/native overrides in this cache.
+typedef struct {
+    _Atomic(uintptr_t) fn;
+    _Atomic uint64_t key;
+} RtCallCache;
+#define RT_CALL_CACHE_MIX(p) ((uint64_t)(uintptr_t)(p) * 0x9E3779B97F4A7C15ull)
+
 // ---- runtime services (runtime/*.c)
 void rt_dispatch(Cpu *c);                 // call function at c->pc
+GuestFn rt_dispatch_cached_slow(Cpu *c, RtCallCache *cache);
+static inline void rt_dispatch_cached(Cpu *c, RtCallCache *cache) {
+    // Guest longjmp returns are recognized by rt_dispatch. Do not let a hot
+    // branch-site cache bypass that uncommon control-flow escape.
+    if (__builtin_expect(c->pc == c->x[30], 0)) {
+        __attribute__((musttail)) return rt_dispatch(c);
+    }
+    uint64_t key = atomic_load_explicit(&cache->key, memory_order_acquire);
+    uintptr_t hit = atomic_load_explicit(&cache->fn, memory_order_relaxed);
+    GuestFn f = hit && (key ^ RT_CALL_CACHE_MIX(hit)) == c->pc
+        ? (GuestFn)hit : rt_dispatch_cached_slow(c, cache);
+    __attribute__((musttail)) return f(c);
+}
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc);
 void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) __attribute__((noreturn));
 void rt_udf(Cpu *c, uint64_t pc) __attribute__((noreturn));
