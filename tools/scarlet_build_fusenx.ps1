@@ -68,7 +68,7 @@ if ($RepoPosix -match "^([A-Za-z]):/(.*)$") { $RepoPosix = "/" + $matches[1].ToL
 $SrcPosix = $SrcDir -replace "\\","/"
 if ($SrcPosix -match "^([A-Za-z]):/(.*)$") { $SrcPosix = "/" + $matches[1].ToLowerInvariant() + "/" + $matches[2] }
 
-$Cmd = "set -o pipefail; export PATH='/c/msys64/mingw64/bin:/c/msys64/usr/bin':`$PATH; cd '$SrcPosix'; meson setup build-scarlet -Dcryptobackend=libgcrypt 2>&1 | tee '$RepoPosix/build/fuse-nx-build.log'; meson compile -C build-scarlet 2>&1 | tee -a '$RepoPosix/build/fuse-nx-build.log'"
+$Cmd = "set -o pipefail; export PATH='/c/msys64/mingw64/bin:/c/msys64/usr/bin':`$PATH; cd '$SrcPosix'; meson setup build-scarlet -Dcryptobackend=gcrypt 2>&1 | tee '$RepoPosix/build/fuse-nx-build.log'; meson compile -C build-scarlet 2>&1 | tee -a '$RepoPosix/build/fuse-nx-build.log'"
 & $Bash -lc $Cmd
 if ($LASTEXITCODE -ne 0) { throw "Build corrigida do Fuse-Nx falhou. Envie build\fuse-nx-build.log." }
 
