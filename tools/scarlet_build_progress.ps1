@@ -32,12 +32,12 @@ while ($true) {
     if ($item.Length -eq $lastLength) { Start-Sleep -Milliseconds $RefreshMs; continue }
     $lastLength = $item.Length
     $lines = @(Get-Content $LogPath -ErrorAction SilentlyContinue)
-    $game = @($lines | Where-Object { $_ -match "^\\[game-cc\\]\\s+(.+)$" })
+    $gamePrefix = "[game-cc] "
+    $game = @($lines | Where-Object { $_.StartsWith($gamePrefix) })
     $count = $game.Count
     $current = "Preparando compilacao..."
     if ($game.Count -gt 0) {
-        $m = [regex]::Match($game[-1], "^\\[game-cc\\]\\s+(.+)$")
-        if ($m.Success) { $current = $m.Groups[1].Value }
+        $current = $game[-1].Substring($gamePrefix.Length).Trim()
     }
     $elapsed = ((Get-Date)-$start).TotalSeconds
     $percent = if ($total -gt 0) { [Math]::Min(99,[Math]::Floor($count*100.0/$total)) } else { 0 }
