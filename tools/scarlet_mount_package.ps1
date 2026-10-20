@@ -446,13 +446,13 @@ if ($Ext -eq ".nsp") {
     if ($FindCode -eq 0) {
         foreach ($Virtual in $VirtualMatches) {
             if (-not $Virtual) { continue }
-            $Host = To-HostPath $MountPoint ([string]$Virtual)
-            if (-not (Test-Path -LiteralPath $Host -PathType Leaf)) { continue }
+            $HostPath = To-HostPath $MountPoint ([string]$Virtual)
+            if (-not (Test-Path -LiteralPath $HostPath -PathType Leaf)) { continue }
 
-            $ProgramId = Get-ProgramId $Host
+            $ProgramId = Get-ProgramId $HostPath
             Write-Host ("[scarlet-package] NSP candidato: " + $Virtual + " program_id=0x" + $ProgramId.ToString("x16")) -ForegroundColor DarkGray
             if ($ProgramId -eq [UInt64]0x0100A3D008C5C000) {
-                $ChosenNpdm = $Host
+                $ChosenNpdm = $HostPath
                 break
             }
         }
