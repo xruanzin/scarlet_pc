@@ -58,6 +58,10 @@ static void scarlet_ref_assign(Cpu *c) {
         return;
     }
 
+    if (__builtin_expect(!atomic_load_explicit(&g_refassign_first_hit, memory_order_relaxed), 0) &&
+        !atomic_exchange_explicit(&g_refassign_first_hit, 1, memory_order_relaxed))
+        LOG("[scarlet-hot] 700270c4ac native ref-assign fast path active\\n");
+
     uint64_t next = LD64(source);
     int32_t *next_rc = NULL;
 
@@ -103,11 +107,11 @@ static void scarlet_ref_assign(Cpu *c) {
         if (after == 0) {
             uint64_t vtbl = LD64(old);
             if (!scarlet_guest_range(vtbl, 0x18)) {
-                // State has already transitioned exactly as the guest would.
-                // Let dispatch fail naturally on the same bad vtable rather
-                // than executing the assignment twice.
-                c->pc = 0;
-                rt_dispatch(c);
+                // Restore the complete pre-call state before exact fallback.
+                __atomic_fetch_add(old_rc, 1, __ATOMIC_ACQ_REL);
+                ST64(owner + 0x38, old);
+                if (next_rc) __atomic_fetch_sub(next_rc, 1, __ATOMIC_ACQ_REL);
+                rt_call_original(c, SCARLET_REF_ASSIGN);
                 return;
             }
             uint64_t destroy = LD64(vtbl + 0x10);
@@ -117,9 +121,6 @@ static void scarlet_ref_assign(Cpu *c) {
             return;
         }
     }
-
-    if (!atomic_exchange_explicit(&g_refassign_first_hit, 1, memory_order_relaxed))
-        LOG("[scarlet-hot] 700270c4ac native ref-assign fast path active\n");
 }
 
 void scarlet_hot_configure(void) {
