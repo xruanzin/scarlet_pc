@@ -37,10 +37,17 @@ EXE_NAME  ?= lasrecomp
 CC       := clang $(CROSS)
 CXX      := clang++ $(CROSS)
 IMGUI    := third_party/imgui
-# Match the original LASRecomp game-code build profile.
-# Keep Scarlet-specific module/layout support, but compile lifted guest code
-# with the upstream optimization policy to reduce code size and build cost.
+# Game-code compiler profile.
+# Default: upstream LASRecomp-style compact build.
+# LEGACY_GAME_PROFILE=1 reproduces the last known-good Scarlet profile from
+# commit 0b2bbdf exactly enough for an A/B boot test: -O3, the three FP/shared-
+# library optimisation flags, Zen 2 scheduling on Windows, and ThinLTO below.
+LEGACY_GAME_PROFILE ?= 0
+ifeq ($(LEGACY_GAME_PROFILE),1)
+GENFLAGS := -O3 -fno-strict-aliasing -fno-math-errno -fno-trapping-math -fno-semantic-interposition -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+else
 GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+endif
 
 # Optional A/B performance mode inspired by mature Switch static-recomp builds:
 # force only the tiny scalar guest helpers (flags/arithmetic/bit ops/division)
@@ -96,7 +103,11 @@ else
 EXE      := $(B)/$(EXE_NAME).exe
 DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
 OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S -DWIN32_LEAN_AND_MEAN -DNOMINMAX
+ifeq ($(LEGACY_GAME_PROFILE),1)
+GENARCH  ?= -march=x86-64-v3 -mtune=znver2  # exact scheduling policy of the known-good Scarlet build
+else
 GENARCH  ?= -march=x86-64-v3  # same policy as upstream LASRecomp on Windows
+endif
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
             -lvulkan-1 -lwinmm -lgdi32 -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared \
@@ -115,8 +126,13 @@ GAMELIB_SHARED := -shared  # (+ the import library: runtime/gamebuild.c)
 endif
 
 # Upstream LASRecomp does not use LTO for the generated game library.
-# Keep ThinLTO available only as an explicit experiment; default stays off.
+# The legacy Scarlet control profile did: turn it on by default only for that
+# explicit A/B mode. Command-line THINLTO still wins.
+ifeq ($(LEGACY_GAME_PROFILE),1)
+THINLTO ?= 1
+else
 THINLTO ?= 0
+endif
 LTO_JOBS ?= 6
 ifeq ($(THINLTO),1)
 GENFLAGS += -flto=thin
