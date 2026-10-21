@@ -71,8 +71,19 @@ void vk_collect_dead(void);
 // Two batches of slots: recording a full batch must never wrap to one of its
 // already-ended, not-yet-submitted command buffers.
 #define SUBS (MAX_QUEUE_LISTS * 2)
-#define DESC_BATCH 16
-#define DESC_LAYOUT_CACHE 8
+#define DESC_BATCH 32
+#define DESC_REUSE_CACHE 1024
+typedef struct {
+    uint64_t h1, h2;
+    VkDescriptorSetLayout layout;
+    VkDescriptorSet set;
+} DescReuse;
+
+// Scarlet can touch dozens of shader layouts inside one queued submission.
+// Eight entries caused constant eviction: captures showed thousands of
+// vkAllocateDescriptorSets calls despite 16-set batching. 64 entries costs
+// only a few hundred KiB across the submission ring and lets each batch drain.
+#define DESC_LAYOUT_CACHE 64
 typedef struct {
     VkDescriptorSetLayout layout;
     VkDescriptorSet set[DESC_BATCH];
@@ -87,6 +98,7 @@ typedef struct {
     int npools, cur_pool;
     DescBatch desc_cache[DESC_LAYOUT_CACHE];
     uint8_t desc_replace;
+    DescReuse desc_reuse[DESC_REUSE_CACHE];
 } Sub;
 static Sub subs[SUBS];
 static int cur_sub;
@@ -100,7 +112,7 @@ _Static_assert(SUBS > MAX_QUEUE_LISTS, "queue batch must not wrap the slot ring"
 static VkCommandBufferSubmitInfo qbatch_cbs[QBATCH_MAX_CBS];
 static uint32_t qbatch_ncb, qbatch_lists;
 static uint64_t stat_logical_submits, stat_queue_batches;
-static uint64_t stat_desc_sets, stat_desc_alloc_calls;
+static uint64_t stat_desc_sets, stat_desc_alloc_calls, stat_desc_reuse;
 
 static int queue_batch_limit(void) {
     static int n = -1;
@@ -156,6 +168,7 @@ static Sub *sub(void) {
         s->cur_pool = 0;
         memset(s->desc_cache, 0, sizeof s->desc_cache);
         s->desc_replace = 0;
+        memset(s->desc_reuse, 0, sizeof s->desc_reuse);
         s->seq = submit_seq + 1;
         s->main_begun = s->upload_begun = false;
     }
@@ -1286,9 +1299,10 @@ const char *renderer_stats(void) {
                  (unsigned long long)stat_logical_submits,
                  (unsigned long long)stat_queue_batches);
         n = strlen(stats_text);
-        snprintf(stats_text + n, sizeof stats_text - n, " desc %llu/%llu alloc",
+        snprintf(stats_text + n, sizeof stats_text - n, " desc %llu/%llu alloc reuse %llu",
                  (unsigned long long)stat_desc_sets,
-                 (unsigned long long)stat_desc_alloc_calls);
+                 (unsigned long long)stat_desc_alloc_calls,
+                 (unsigned long long)stat_desc_reuse);
     }
     {
         uint32_t bf[4] = {0}; uint64_t bc[4] = {0};
@@ -1392,7 +1406,7 @@ const char *renderer_stats(void) {
     stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = stat_raster_discard_sets = stat_raster_discard_on = stat_a2c_1x = 0;
     stat_vkbar_full = stat_vkbar_graphics = stat_vkbar_compute = stat_vkbar_transfer = stat_vkbar_upload = 0;
     stat_logical_submits = stat_queue_batches = 0;
-    stat_desc_sets = stat_desc_alloc_calls = 0;
+    stat_desc_sets = stat_desc_alloc_calls = stat_desc_reuse = 0;
     stat_tf_dep_vbuf = stat_tf_dep_cbuf = stat_tf_dep_sbuf = stat_tf_dep_gmem = stat_tf_dep_op = stat_tf_dep_submit = stat_tf_dep_rt = 0;
     return stats_text;
 }
@@ -1805,7 +1819,9 @@ static void compile_program(void *arg) {
     size_t nv = 0, nf = 0;
     uint64_t t0 = SDL_GetTicksNS();
     uint32_t *sv = vk_glsl_to_spirv(p->vi->msl, STAGE_VERTEX, "vs", &nv);
-    uint32_t *sf = sv ? vk_glsl_to_spirv(p->fi->msl, STAGE_FRAGMENT, "fs", &nf) : NULL;
+    // Transform-feedback skinning is vertex-only and rasterizer-discarded.
+    // Do not compile a fragment shader that the pipeline will never execute.
+    uint32_t *sf = (!p->vkey.xfb && sv) ? vk_glsl_to_spirv(p->fi->msl, STAGE_FRAGMENT, "fs", &nf) : NULL;
     if (sv && getenv("LARECOMP_RENDERDOC_AT")) {  // which guest shader each SPIR-V is: tools/rdc_skin.py (FNV-1a 64)
         static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
         uint64_t h = 0xcbf29ce484222325ull;
@@ -1815,21 +1831,29 @@ static void compile_program(void *arg) {
         if (f) { fprintf(f, "%016llx vs %llx\n", (unsigned long long)h, (unsigned long long)p->code[0]); fclose(f); }
         pthread_mutex_unlock(&lock);
     }
-    if (!sv || !sf) { free(sv); free(sf); atomic_store(&p->state, 2); return; }
+    if (!sv || (!p->vkey.xfb && !sf)) { free(sv); free(sf); atomic_store(&p->state, 2); return; }
     p->nbinds = vk_reflect(sv, nv, p->binds, MAX_BIND);
-    p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
+    if (!p->vkey.xfb)
+        p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
     p->vs = vk_module(sv, nv);
-    p->fs = vk_module(sf, nf);
+    p->fs = p->vkey.xfb ? VK_NULL_HANDLE : vk_module(sf, nf);
     static _Atomic unsigned module_logs;
-    if (atomic_fetch_add(&module_logs, 1) < 8)
-        LOG("[shader] modules %llx/%llx: vertex=%zu words fragment=%zu words\n",
-            (unsigned long long)p->code[0], (unsigned long long)p->code[1], nv, nf);
+    if (atomic_fetch_add(&module_logs, 1) < 8) {
+        if (p->vkey.xfb)
+            LOG("[shader] XFB vertex-only module %llx: vertex=%zu words\n",
+                (unsigned long long)p->code[0], nv);
+        else
+            LOG("[shader] modules %llx/%llx: vertex=%zu words fragment=%zu words\n",
+                (unsigned long long)p->code[0], (unsigned long long)p->code[1], nv, nf);
+    }
     free(sv);
     free(sf);
-    p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
+    p->layout = p->vkey.xfb
+        ? make_layout(p, 1, VK_SHADER_STAGE_VERTEX_BIT, 0)
+        : make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
     atomic_fetch_add(&stat_spirv_ns, SDL_GetTicksNS() - t0);
     atomic_fetch_add(&stat_compiles, 1);
-    atomic_store(&p->state, p->vs && p->fs ? 1 : 2);
+    atomic_store(&p->state, p->vs && (p->vkey.xfb || p->fs) ? 1 : 2);
 }
 
 static void translate_program(void *arg) {
@@ -1891,7 +1915,9 @@ static void translate_program(void *arg) {
             g_exp_count[3]++;
         }
     }
-    if (p->vi->msl && !p->code[1]) {  // vertex-only program (see get_program): an empty fragment shader
+    if (p->vi->msl && (p->vkey.xfb || !p->code[1])) {
+        // Keep an empty ShaderInfo so common draw bookkeeping can stay branch-light,
+        // but do not translate/compile a fragment stage for vertex-only XFB skinning.
         p->fi = calloc(1, sizeof *p->fi);
         p->fi->stage = STAGE_FRAGMENT;
         p->fi->msl = strdup("#version 460\nvoid main() {}\n");
@@ -2008,14 +2034,16 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
         return NULL;
     }
     uint64_t h = 0xcbf29ce484222325ull;
-    for (int i = 0; i < 2; i++) {
+    int nstages = vkey->xfb ? 1 : 2;
+    for (int i = 0; i < nstages; i++) {
         uint64_t values[] = {np->stages[i].code_addr, np->stages[i].const_offset, np->stages[i].const_size};
         for (size_t j = 0; j < sizeof values / sizeof *values; j++)
             for (int k = 0; k < 8; k++) { h ^= (values[j] >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; }
     }
     const uint8_t *vb = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
-    for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    if (!vkey->xfb)
+        for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
     if (!h) h = 1;
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
@@ -2023,7 +2051,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     Prog *p = calloc(1, sizeof *p);
     prog_tab[slot].key = h;
     prog_tab[slot].prog = p;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < (vkey->xfb ? 1 : 2); i++) {
         p->code[i] = np->stages[i].code_addr;
         p->cmax[i] = np->stages[i].const_offset ? np->stages[i].const_offset : 0x10000;
         if (np->stages[i].const_offset && np->stages[i].const_size) {
@@ -2731,10 +2759,15 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         }
     }
 
-    // LARECOMP_VK_UBO_DIRECT=1 (experiment X3): bind the range in place in the imported guest heap, read when the GPU
-    // runs - as on the console - in case compute shaders write it after this point. Counted: direct vs copied.
+    // Bind aligned guest uniform buffers directly from the imported host heap.
+    // This matches the console's GPU-visible memory model and removes a hot per-draw
+    // guest_copy/transient allocation path.  The old snapshot path remains available
+    // with LARECOMP_VK_COPY_UBO=1 for A/B correctness diagnostics.
     static int direct = -1;
-    if (direct < 0) direct = getenv("LARECOMP_VK_UBO_DIRECT") ? atoi(getenv("LARECOMP_VK_UBO_DIRECT")) : 0;
+    if (direct < 0) {
+        const char *force = getenv("LARECOMP_VK_UBO_DIRECT");
+        direct = force ? atoi(force) != 0 : getenv("LARECOMP_VK_COPY_UBO") == NULL;
+    }
     if (direct) {
         extern bool vk_guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off);
         VkBuffer gb;
@@ -3098,6 +3131,62 @@ static void surface_finish_writes(const ShaderInfo *si) {
     }
 }
 
+// Descriptor sets are immutable after vkUpdateDescriptorSets. Scarlet repeats the
+// exact same buffer/image bindings across many draws inside one submission, so
+// fingerprint the fully-resolved writes and reuse the already-updated set.
+static uint64_t descriptor_writes_hash(uint64_t seed, VkDescriptorSetLayout layout,
+                                       const VkWriteDescriptorSet *w, int n) {
+    uint64_t h = hash_words(seed, &layout, sizeof layout);
+    for (int i = 0; i < n; i++) {
+        struct { uint32_t binding, elem, count, type; } m = {
+            w[i].dstBinding, w[i].dstArrayElement, w[i].descriptorCount, (uint32_t)w[i].descriptorType
+        };
+        h = hash_words(h, &m, sizeof m);
+        switch (w[i].descriptorType) {
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+            if (w[i].pBufferInfo)
+                h = hash_words(h, w[i].pBufferInfo, (size_t)w[i].descriptorCount * sizeof *w[i].pBufferInfo);
+            break;
+        case VK_DESCRIPTOR_TYPE_SAMPLER:
+        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+        case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+            if (w[i].pImageInfo)
+                h = hash_words(h, w[i].pImageInfo, (size_t)w[i].descriptorCount * sizeof *w[i].pImageInfo);
+            break;
+        default:
+            break;
+        }
+    }
+    return h ? h : 1;
+}
+
+static VkDescriptorSet descriptor_reuse_lookup(VkDescriptorSetLayout layout, const VkWriteDescriptorSet *w, int n,
+                                                uint64_t *h1_out, uint64_t *h2_out) {
+    static int off = -1;
+    if (off < 0) off = getenv("LARECOMP_NO_DESC_REUSE") != NULL;
+    if (off) { *h1_out = *h2_out = 0; return VK_NULL_HANDLE; }
+    uint64_t h1 = descriptor_writes_hash(0xcbf29ce484222325ull, layout, w, n);
+    uint64_t h2 = descriptor_writes_hash(0x9e3779b97f4a7c15ull, layout, w, n);
+    DescReuse *e = &sub()->desc_reuse[(uint32_t)(h1 ^ (h1 >> 32)) & (DESC_REUSE_CACHE - 1)];
+    *h1_out = h1; *h2_out = h2;
+    if (e->set && e->layout == layout && e->h1 == h1 && e->h2 == h2) {
+        stat_desc_reuse++;
+        return e->set;
+    }
+    return VK_NULL_HANDLE;
+}
+
+static void descriptor_reuse_store(VkDescriptorSetLayout layout, VkDescriptorSet set, uint64_t h1, uint64_t h2) {
+    if (!h1) return;
+    DescReuse *e = &sub()->desc_reuse[(uint32_t)(h1 ^ (h1 >> 32)) & (DESC_REUSE_CACHE - 1)];
+    *e = (DescReuse){h1, h2, layout, set};
+}
+
 // Writes the descriptor set of one stage. gx..gz: compute group counts (driver constants).
 // pre_ii: texture descriptors already resolved by the caller (draw: fragment textures, needed earlier for the
 // viewport decision), or NULL.
@@ -3174,7 +3263,7 @@ static void storage_stage_buffers(int stage, ShaderInfo *si, VkDescriptorBufferI
 
 static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t set, int stage, ShaderInfo *si, const float *rscale_row0,
                                  const float tint[8], uint32_t gx, uint32_t gy, uint32_t gz, const VkDescriptorImageInfo *pre_ii) {
-    VkDescriptorSet ds = vk_alloc_set(layout);
+    VkDescriptorSet ds = VK_NULL_HANDLE;
     VkWriteDescriptorSet w[MAX_BIND];
     VkDescriptorBufferInfo bi[MAX_BIND];
     VkDescriptorImageInfo ii[MAX_BIND];
@@ -3189,7 +3278,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     for (int i = 0; i < p->nbinds; i++) {
         VkBindingInfo *b = &p->binds[i];
         if (b->set != set) continue;
-        w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
+        w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = VK_NULL_HANDLE, .dstBinding = b->binding,
                                       .descriptorCount = b->count ? b->count : 1, .descriptorType = b->type};
         if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && b->binding == 120 && surf) {
             bi[n] = (VkDescriptorBufferInfo){surf->map_buf, 0, (VkDeviceSize)surf->map_count * 8};
@@ -3231,7 +3320,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     for (int i = 0; i < p->nbinds; i++) {
         VkBindingInfo *b = &p->binds[i];
         if (b->set != set || b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || (b->binding != 18 && b->binding != 19)) continue;
-        w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
+        w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = VK_NULL_HANDLE, .dstBinding = b->binding,
                                       .descriptorCount = 1, .descriptorType = b->type};
         if (b->binding == 18) {
             for (int t = 0; t < si->ntex && t < 64; t++) { rs[1 + t][0] = tex_sc[sg][t][0]; rs[1 + t][1] = tex_sc[sg][t][1]; }
@@ -3243,7 +3332,15 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         w[n].pBufferInfo = &bi[n];
         n++;
     }
-    if (n) vkUpdateDescriptorSets(g_vk.dev, (uint32_t)n, w, 0, NULL);
+    if (!n) return vk_alloc_set(layout);
+    uint64_t dh1, dh2;
+    ds = descriptor_reuse_lookup(layout, w, n, &dh1, &dh2);
+    if (ds) return ds;
+
+    ds = vk_alloc_set(layout);
+    for (int i = 0; i < n; i++) w[i].dstSet = ds;
+    vkUpdateDescriptorSets(g_vk.dev, (uint32_t)n, w, 0, NULL);
+    descriptor_reuse_store(layout, ds, dh1, dh2);
     return ds;
 }
 
@@ -3753,60 +3850,61 @@ static void draw_(CmdRec *r, bool indexed) {
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_key += prof_td_ - prof_tk_;
 
-    // ---- depth / stencil (dynamic)
-    static int nodt = -1;
-    if (nodt < 0) nodt = getenv("LARECOMP_NO_DEPTH_TEST") != NULL;
-    bool dt = st.ds[0] && !nodt && pass_depth;
-    vkCmdSetDepthTestEnable(cb, dt);
-    vkCmdSetDepthWriteEnable(cb, dt && st.ds[1]);
-    VkCompareOp dop = dt ? compare_fn(st.ds[2]) : VK_COMPARE_OP_ALWAYS;
-    // EQUAL against a depth pre-pass written by a different vertex shader (foliage, trees) needs both shaders to land
-    // on identical depths. They do since the translator stopped using unpackHalf2x16 (NVIDIA ran the half math after
-    // it in fp16, differently per shader: black slashes in foliage). LARECOMP_VK_EQUAL_TOL=1 brings back the old
-    // workaround: LESS_OR_EQUAL with a few ulps of bias towards the camera, which also let walls paint over the
-    // plants stuck flat on them (beach) - so it is off.
-    static int tol = -1;
-    if (tol < 0) tol = getenv("LARECOMP_VK_EQUAL_TOL") != NULL;
-    bool equal_tol = dop == VK_COMPARE_OP_EQUAL && tol;
-    if (equal_tol) dop = VK_COMPARE_OP_LESS_OR_EQUAL;
-    vkCmdSetDepthCompareOp(cb, dop);
-    bool sten = st.ds[3] && pass_stencil;
-    vkCmdSetStencilTestEnable(cb, sten);
-    if (sten) {
-        uint32_t ops = st.ds[5] | st.ds[6] << 8 | st.ds[7] << 16;
-        for (int f = 0; f < 2; f++) {
-            uint32_t o = f ? ops >> 12 : ops;
-            VkStencilFaceFlags face = f ? VK_STENCIL_FACE_BACK_BIT : VK_STENCIL_FACE_FRONT_BIT;
-            vkCmdSetStencilOp(cb, face, stencil_op(o & 0xF), stencil_op((o >> 8) & 0xF), stencil_op((o >> 4) & 0xF),
-                              compare_fn(f ? st.ds[4] >> 4 : st.ds[4] & 0xF));
-            vkCmdSetStencilCompareMask(cb, face, st.stencil_vmask[f] & 0xFF);
-            vkCmdSetStencilWriteMask(cb, face, st.stencil_mask[f] & 0xFF);
-            vkCmdSetStencilReference(cb, face, st.stencil_ref[f]);
+    // ---- fixed-function dynamic state
+    // XFB skinning is rasterizer-discarded: depth/stencil/blend/cull/front-face
+    // and depth bias cannot affect transform-feedback output. Avoid a large
+    // number of Vulkan driver calls on the hottest character path.
+    bool equal_tol = false;
+    if (!vertex_only_xfb) {
+        static int nodt = -1;
+        if (nodt < 0) nodt = getenv("LARECOMP_NO_DEPTH_TEST") != NULL;
+        bool dt = st.ds[0] && !nodt && pass_depth;
+        vkCmdSetDepthTestEnable(cb, dt);
+        vkCmdSetDepthWriteEnable(cb, dt && st.ds[1]);
+        VkCompareOp dop = dt ? compare_fn(st.ds[2]) : VK_COMPARE_OP_ALWAYS;
+        static int tol = -1;
+        if (tol < 0) tol = getenv("LARECOMP_VK_EQUAL_TOL") != NULL;
+        equal_tol = dop == VK_COMPARE_OP_EQUAL && tol;
+        if (equal_tol) dop = VK_COMPARE_OP_LESS_OR_EQUAL;
+        vkCmdSetDepthCompareOp(cb, dop);
+        bool sten = st.ds[3] && pass_stencil;
+        vkCmdSetStencilTestEnable(cb, sten);
+        if (sten) {
+            uint32_t ops = st.ds[5] | st.ds[6] << 8 | st.ds[7] << 16;
+            for (int f = 0; f < 2; f++) {
+                uint32_t o = f ? ops >> 12 : ops;
+                VkStencilFaceFlags face = f ? VK_STENCIL_FACE_BACK_BIT : VK_STENCIL_FACE_FRONT_BIT;
+                vkCmdSetStencilOp(cb, face, stencil_op(o & 0xF), stencil_op((o >> 8) & 0xF), stencil_op((o >> 4) & 0xF),
+                                  compare_fn(f ? st.ds[4] >> 4 : st.ds[4] & 0xF));
+                vkCmdSetStencilCompareMask(cb, face, st.stencil_vmask[f] & 0xFF);
+                vkCmdSetStencilWriteMask(cb, face, st.stencil_mask[f] & 0xFF);
+                vkCmdSetStencilReference(cb, face, st.stencil_ref[f]);
+            }
+        }
+        vkCmdSetBlendConstants(cb, st.blend_color);
+
+        uint8_t cull = st.poly[0];
+        vkCmdSetCullMode(cb, cull == 1 ? VK_CULL_MODE_FRONT_BIT : cull == 2 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE);
+        bool ccw = st.poly[1] == 1;
+        static int flipw = -1;
+        if (flipw < 0) flipw = getenv("LARECOMP_VK_FLIP_WINDING") != NULL;
+        bool front_ccw = (ccw != vkey.flip_y) != (flipw != 0);
+        vkCmdSetFrontFace(cb, front_ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
+        {
+            float f[3] = {0, 0, 0};
+            static int off = -1;
+            if (off < 0) off = getenv("LARECOMP_NO_DEPTH_BIAS") != NULL;
+            bool on = (st.poly[3] & 4) && !off;
+            if (on) memcpy(f, st.poly_offset, sizeof f);
+            if (equal_tol) { f[1] -= 8; on = true; }
+            vkCmdSetDepthBiasEnable(cb, on);
+            vkCmdSetDepthBias(cb, f[1], f[2], f[0]);
         }
     }
-    vkCmdSetBlendConstants(cb, st.blend_color);
-
-    // ---- rasterizer
-    uint8_t cull = st.poly[0];
-    vkCmdSetCullMode(cb, cull == 1 ? VK_CULL_MODE_FRONT_BIT : cull == 2 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE);
-    bool ccw = st.poly[1] == 1;
-    static int flipw = -1;  // LARECOMP_VK_FLIP_WINDING: invert the front-face mapping (A/B against Metal)
-    if (flipw < 0) flipw = getenv("LARECOMP_VK_FLIP_WINDING") != NULL;
-    bool front_ccw = (ccw != vkey.flip_y) != (flipw != 0);
-    vkCmdSetFrontFace(cb, front_ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
+    // These three states still affect primitive assembly / whether XFB runs.
     vkCmdSetPrimitiveTopology(cb, native ? topo : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     vkCmdSetPrimitiveRestartEnable(cb, st.prim_restart && native && (mode == 3 || mode == 5));
-    vkCmdSetRasterizerDiscardEnable(cb, (st.raster_discard || vkey.xfb) ? VK_TRUE : VK_FALSE);
-    {
-        float f[3] = {0, 0, 0};
-        static int off = -1;
-        if (off < 0) off = getenv("LARECOMP_NO_DEPTH_BIAS") != NULL;
-        bool on = (st.poly[3] & 4) && !off;
-        if (on) memcpy(f, st.poly_offset, sizeof f);
-        if (equal_tol) { f[1] -= 8; on = true; }  // (see the EQUAL comment above: a few depth ulps nearer)
-        vkCmdSetDepthBiasEnable(cb, on);
-        vkCmdSetDepthBias(cb, f[1], f[2], f[0]);
-    }
+    vkCmdSetRasterizerDiscardEnable(cb, (st.raster_discard || vertex_only_xfb) ? VK_TRUE : VK_FALSE);
 
     // ---- textures first (their scales feed the widescreen decision and the rscale table), then the viewport
     float *vp = st.viewport[0];
@@ -3872,7 +3970,7 @@ static void draw_(CmdRec *r, bool indexed) {
             if (g_cur_fs_hash == want) n++;
         }
     }
-    {
+    if (!vertex_only_xfb) {
         float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
         set_viewport(vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf);
         if (g_debug_frame) {
@@ -3882,8 +3980,8 @@ static void draw_(CmdRec *r, bool indexed) {
                 sr.extent.width, sr.extent.height, st.scissor[0][0], st.scissor[0][1], st.scissor[0][2], st.scissor[0][3], pass_w, pass_h,
                 vp_sx, vp_sy);
         }
+        apply_scissor();
     }
-    apply_scissor();
     float rs0[4] = {vp_sx, vp_sy, vp_ox, vp_oy};
     uint64_t prof_t1_ = prof ? SDL_GetTicksNS() : 0;
     if (vertex_only_xfb) {

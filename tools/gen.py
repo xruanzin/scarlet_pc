@@ -163,6 +163,10 @@ class Module:
         self.setjmp_targets = {base + a for a in SCARLET_SETJMP_THUNKS.get(n.build_id, set())} if name == 'main' else set()
         self.setjmp_sites = {}
         self.direct_guest = {}
+        # Guest entry -> host HLE symbol. Direct BL sites use this table too,
+        # bypassing the generated f_<addr> wrapper when the target is known.
+        self.direct_hle = {}
+        self.always_inline_bytes = 96
 
     def in_text(self, a):
         return self.lo <= a < self.hi and a % 4 == 0
@@ -537,6 +541,9 @@ class Module:
             return [f'if ({ins.cond}) {{ {jump(ins.target)} }}']
         if k == 'bl':
             t = ins.target
+            h = self.direct_hle.get(t)
+            if h is not None:
+                return [f'c->x[30] = {hx(a + 4)}; {sanitize(h)}(c);']
             if self.in_text(t):
                 refs.add(t)
                 return [f'c->x[30] = {hx(a + 4)}; {fname(t)}(c);']
@@ -550,7 +557,15 @@ class Module:
         raise Unsupported(k)
 
     def emit_function(self, entry, end, labels, tables, hle, resumable=False):
-        out = [f'void {fname(entry)}(Cpu *c) {{']
+        # Tiny lifted functions are ubiquitous in Scarlet (getters, wrappers,
+        # STL helpers). ThinLTO can see across chunks, but its size heuristic
+        # still leaves a large amount of host call/Cpu-state traffic behind.
+        # Force-inline compact ordinary entries while retaining their external
+        # out-of-line copy for the dispatch table / indirect calls.
+        force_inline = (not resumable and end > entry and
+                        end - entry <= self.always_inline_bytes)
+        attr = '__attribute__((always_inline, hot)) ' if force_inline else ''
+        out = [f'{attr}void {fname(entry)}(Cpu * restrict c) {{']
         if entry in hle:
             out.append(f'    {sanitize(hle[entry])}(c);')
             out.append('}')
@@ -581,7 +596,7 @@ class Module:
                 out.insert(0, f'void {fname(entry)}_resume(Cpu *c);')
                 out += [f'    c->pc = {hx(entry)};',
                         f'    __attribute__((musttail)) return {fname(entry)}_resume(c);',
-                        '}', f'void {fname(entry)}_resume(Cpu *c) {{',
+                        '}', f'void {fname(entry)}_resume(Cpu * restrict c) {{',
                         '    goto L_dispatch;']
         batch = []
         refs = set()
@@ -672,7 +687,10 @@ class Module:
                     out.append(f'    __attribute__((musttail)) return {helper}(c);')
                     last = 'b'
                     continue
-                if self.in_text(t):
+                h = self.direct_hle.get(t)
+                if h is not None:
+                    out.append(f'    c->x[30] = {hx(a + 4)}; {sanitize(h)}(c);')
+                elif self.in_text(t):
                     refs.add(t)
                     out.append(f'    c->x[30] = {hx(a + 4)}; {fname(t)}(c);')
                 else:
@@ -740,6 +758,8 @@ def main():
     ap.add_argument('--chunk', type=int, default=1500)  # functions per file at most
     ap.add_argument('--chunk-bytes', type=int, default=1500000)  # and about this much C (even compile times)
     ap.add_argument('--big-fn', type=int, default=100000)  # bytes of C from which a function gets its own file
+    ap.add_argument('--always-inline-bytes', type=int, default=96,
+                    help='force-inline lifted non-resumable functions up to this many guest text bytes (0 disables)')
     ap.add_argument('--limit', type=int, default=0)
     ap.add_argument('--extra-entry', action='append', default=[],
                     help='additional absolute guest code entry (repeatable; hex accepted)')
@@ -756,6 +776,7 @@ def main():
 
     t0 = time.time()
     m = Module(args.name, args.nso, args.base, args.simd, args.trace_stores)
+    m.always_inline_bytes = max(0, args.always_inline_bytes)
     m.setjmp_targets.update(args.setjmp_target)
     if any(not m.in_text(a) for a in m.setjmp_targets):
         raise SystemExit('setjmp target outside module text')
@@ -799,6 +820,9 @@ def main():
         if target is not None and entry not in m.direct_guest:
             m.direct_guest[entry] = target
             auto_guest += 1
+    # Freeze the final HLE map onto the module so every statically-known BL can
+    # call host C directly instead of bouncing through a generated wrapper.
+    m.direct_hle = dict(hle)
     if auto_hle or auto_guest:
         print(f'{args.name}: direct PLT bindings: {auto_hle} HLE, {auto_guest} sibling guest')
 
@@ -906,7 +930,9 @@ def main():
         path = os.path.join(args.outdir, f'{args.name}_{nchunks:03d}.c')
         text = ['#include "cpu.h"\n' + ('#include "simd.h"\n' if m.lifter.sc else '')]
         text += [f'void {fname(r)}(Cpu *c);\n' for r in sorted(refs)]
-        text += [f'void {sanitize(hle[a])}(Cpu *c);\n' for a in sorted(set(hle) & set(fns))]
+        # Direct BL sites can reference HLE targets whose wrapper entry lives in
+        # another generated chunk, so declare the host implementations globally.
+        text += [f'void {sanitize(name)}(Cpu *c);\n' for name in sorted(set(hle.values()))]
         text += ['\n'.join(body), '\n']
         write_if_changed(path, ''.join(text))
         nchunks += 1

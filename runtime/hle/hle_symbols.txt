@@ -1,9 +1,68 @@
-# Tiny nn::os helpers selected from Scarlet 1.0.0 slow-scene profiles.
-# gen.py replaces their defined SDK bodies with the matching hle_<sanitized>
-# functions in os_fast.c. Keep this list to functions whose semantics have
-# been verified from the SDK code/ThreadType ABI.
+# Host-fast functions whose exact guest bodies/import thunks may be replaced
+# by direct C calls in every Scarlet module. Keep only ABI-compatible leaf-like
+# operations here: gen.py also bypasses the generated wrapper at direct BL sites.
 _ZN2nn2os16GetCurrentThreadEv
 _ZN2nn2os11GetTlsValueENS0_7TlsSlotE
 
+# StandardAllocator: millions of calls in the CPU-bound capture.
+_ZN2nn3mem17StandardAllocator8AllocateEm
+_ZN2nn3mem17StandardAllocator8AllocateEmm
+_ZN2nn3mem17StandardAllocator4FreeEPv
+_ZN2nn3mem17StandardAllocator10ReallocateEPvm
+_ZNK2nn3mem17StandardAllocator9GetSizeOfEPKv
+
+# libc/string loops: use the host's vectorized CRT instead of lifted AArch64.
 memcpy
+memmove
+memset
+memcmp
+memchr
+strlen
 strcmp
+strncmp
+strcpy
+strncpy
+strchr
+strrchr
+
+# Scalar libm: host-native x86-64 implementations instead of lifted AArch64 loops.
+sqrt
+sqrtf
+fabs
+fabsf
+floor
+floorf
+ceil
+ceilf
+trunc
+truncf
+round
+roundf
+sin
+sinf
+cos
+cosf
+tan
+tanf
+asin
+asinf
+acos
+acosf
+atan
+atanf
+atan2
+atan2f
+exp
+expf
+log
+logf
+pow
+powf
+fmod
+fmodf
+fmin
+fminf
+fmax
+fmaxf
+copysign
+copysignf

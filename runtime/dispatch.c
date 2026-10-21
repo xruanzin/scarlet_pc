@@ -225,6 +225,28 @@ static void hle_unimplemented(Cpu *c) {
     c->x[0] = 0;
 }
 
+// Cached indirect HLE entry. Dynamic NVN/SDK calls arrive through BLR very
+// frequently; keeping the guest-address -> "this is HLE" decision in the same
+// per-call-site/global caches as guest functions removes repeated dispatch
+// classification while preserving the reboot safe point and opt-in diagnostics.
+static void hle_cached_call(Cpu *c) {
+    rt_unwind_point();
+    unsigned i = (unsigned)((c->pc - HLE_BASE) / 16);
+    if (__builtin_expect(i >= (unsigned)hle_count, 0)) {
+        FATAL("invalid cached HLE pc %llx\n", (unsigned long long)c->pc);
+    }
+    if (__builtin_expect(hh_enabled, 0)) hhist_push(hle_slots[i].name, c);
+    if (__builtin_expect(hle_slots[i].fn == NULL, 0)) {
+        unimpl_pc = c->pc;
+        hle_unimplemented(c);
+        return;
+    }
+    static __thread int profile = -1;
+    if (__builtin_expect(profile < 0, 0)) profile = getenv("LARECOMP_HLE_PROF") != NULL;
+    if (__builtin_expect(profile, 0)) hle_profile_call(c);
+    else hle_slots[i].fn(c);
+}
+
 uint64_t guest_sym(const char *name) {
     // small cache: callers pass string literals, so pointer identity is a good key
     static struct { const char *name; uint64_t addr; } cache[64];
@@ -344,17 +366,23 @@ GuestFn dispatch_lookup(uint64_t addr) {
 static GuestFn dispatch_slow(Cpu *c, RtCallCache *site) {
     uint64_t pc = c->pc;
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
-        rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)
         int i = (int)((pc - HLE_BASE) / 16);
         if (i < hle_count) {
-            if (__builtin_expect(hh_enabled, 0)) hhist_push(hle_slots[i].name, c);
-            if (hle_slots[i].fn) {
-                static __thread int profile = -1;
-                if (profile < 0) profile = getenv("LARECOMP_HLE_PROF") != NULL;
-                return profile ? hle_profile_call : hle_slots[i].fn;
+            // Cache the generic HLE trampoline rather than the implementation:
+            // it still performs rt_unwind_point/history/profiling every call.
+            GuestFn f = hle_cached_call;
+            unsigned h = (unsigned)(((pc >> 2) * 11400714819323198485ull) >> (64 - 18));
+            atomic_store_explicit(&dcache[h].fn, (uintptr_t)f, memory_order_relaxed);
+            atomic_store_explicit(&dcache[h].addr, pc, memory_order_release);
+            if (site) {
+                uintptr_t f0 = atomic_load_explicit(&site->fn[0], memory_order_relaxed);
+                uint64_t k0 = atomic_load_explicit(&site->key[0], memory_order_acquire);
+                bool slot0_same = f0 && (k0 ^ RT_CALL_CACHE_MIX(f0)) == pc;
+                int slot = (!f0 || slot0_same) ? 0 : 1;
+                atomic_store_explicit(&site->fn[slot], (uintptr_t)f, memory_order_relaxed);
+                atomic_store_explicit(&site->key[slot], pc ^ RT_CALL_CACHE_MIX(f), memory_order_release);
             }
-            unimpl_pc = pc;
-            return hle_unimplemented;
+            return f;
         }
     }
     for (int i = 0; i < override_count; i++)

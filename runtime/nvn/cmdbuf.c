@@ -852,7 +852,12 @@ NVN(nvnCommandBufferSetDepthRange) {
     Snap s = snap(c);
     CmdRec *r = record(c, CMD_SET_DEPTH_RANGES, 8, &s);
     r->x[0] = 0; r->x[1] = 1;
-    memcpy(r->extra, s.f, 8);
+    // minDepth/maxDepth are float arguments in s0/s1 (low 32 bits of v0/v1).
+    // Keep Snap integer-only so every recorded command stays small.
+    uint32_t depth_bits[2];
+    memcpy(&depth_bits[0], &c->v[0], sizeof depth_bits[0]);
+    memcpy(&depth_bits[1], &c->v[1], sizeof depth_bits[1]);
+    memcpy(r->extra, depth_bits, sizeof depth_bits);
 }
 NVN(nvnCommandBufferSetBlendColor) { record_copy(c, CMD_SET_BLEND_COLOR, 1, 16); }
 NVN(nvnCommandBufferSetStencilRef) { Snap s = snap(c); CmdRec *r = record(c, CMD_SET_STENCIL, 0, &s); r->x[6] = 0; }
