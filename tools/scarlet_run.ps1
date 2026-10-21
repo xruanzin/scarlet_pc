@@ -371,13 +371,14 @@ try {
         $env:LARECOMP_FRAME_CSV = Join-Path $PerformanceDir 'frames.csv'
         # Function profiling follows actual slowness instead of a brittle absolute frame range.
         # Capture increasingly severe slow scenes instead of stopping at the first hitch.
-        # Defaults: >=70 ms, then >=105 ms, then >=140 ms; each must persist for 3 frames.
+        # Defaults target the sustained 30-60 ms scenes that matter for Scarlet:
+        # >=30 ms, then >=45 ms, then >=60 ms; each must persist for 3 frames.
         # Setting LARECOMP_FNPROF=<from>:<to> explicitly still selects the old fixed-window mode.
         if (-not $env:LARECOMP_FNPROF -and -not $env:LARECOMP_FNPROF_AUTO_MS) {
-            $env:LARECOMP_FNPROF_AUTO_MS = '70'
+            $env:LARECOMP_FNPROF_AUTO_MS = '30'
             $env:LARECOMP_FNPROF_AUTO_CONSEC = '3'
             $env:LARECOMP_FNPROF_AUTO_FRAMES = '60'
-            $env:LARECOMP_FNPROF_AUTO_STEP_MS = '35'
+            $env:LARECOMP_FNPROF_AUTO_STEP_MS = '15'
             $env:LARECOMP_FNPROF_AUTO_CAPTURES = '3'
         }
         $env:LARECOMP_FNPROF_OUT = Join-Path $PerformanceDir 'fnprof.txt'
