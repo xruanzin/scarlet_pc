@@ -4,6 +4,7 @@ param(
     [switch]$ForceRuntime,
     [switch]$IncrementalRuntime,
     [switch]$RuntimeOnly,
+    [switch]$FunctionInstrument,
     [switch]$ThinLTO,
     [switch]$NoThinLTO,  # ThinLTO is now the default for lasgame.dll (CPU-bound game code); this turns it off
     [int]$LtoJobs = 4
@@ -13,6 +14,9 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $Bash = "C:\msys64\usr\bin\bash.exe"
+$BuildRel = if ($FunctionInstrument) { "build/profile" } else { "build" }
+$BuildDir = Join-Path $RepoRoot ($BuildRel -replace "/", "\")
+$BuildLogName = if ($FunctionInstrument) { "scarlet_build_profile.log" } else { "scarlet_build.log" }
 
 if ($Setup -or -not (Test-Path -LiteralPath $Bash)) {
     Write-Host "[scarlet-build] Preparando toolchain Windows/MSYS2..." -ForegroundColor Cyan
@@ -72,11 +76,14 @@ if ($RepoPosix -match "^([A-Za-z]):/(.*)$") {
     $RepoPosix = "/$Drive/$Tail"
 }
 
-$Log = Join-Path $RepoRoot "scarlet_build.log"
+$Log = Join-Path $RepoRoot $BuildLogName
 if (Test-Path -LiteralPath $Log) {
     Remove-Item -LiteralPath $Log -Force
 }
 
+if ($FunctionInstrument) {
+    Write-Host "[scarlet-build] Modo PROFILE: FNINSTRUMENT=1 em build\profile (build normal preservado)." -ForegroundColor Magenta
+}
 if ($RuntimeOnly) {
     Write-Host "[scarlet-build] Compilando somente ScarletRecomp.exe com -j$Jobs; lasgame.dll sera preservado." -ForegroundColor Cyan
 } else {
@@ -91,12 +98,12 @@ Write-Host "[scarlet-build] Log: $Log"
 # as current.  Default to a clean runtime rebuild; opt into incremental runtime
 # builds only with -IncrementalRuntime.
 if (-not $IncrementalRuntime -or $ForceRuntime) {
-    $RtDir = Join-Path $RepoRoot "build\rt"
+    $RtDir = Join-Path $BuildDir "rt"
     if (Test-Path -LiteralPath $RtDir) {
         Write-Host "[scarlet-build] Recompilando runtime do zero (lasgame permanece incremental)..." -ForegroundColor Yellow
         Remove-Item -LiteralPath $RtDir -Recurse -Force
     }
-    $OldExe = Join-Path $RepoRoot "build\ScarletRecomp.exe"
+    $OldExe = Join-Path $BuildDir "ScarletRecomp.exe"
     if (Test-Path -LiteralPath $OldExe) {
         Remove-Item -LiteralPath $OldExe -Force
     }
@@ -108,8 +115,9 @@ if ($ThinLTO -or -not $NoThinLTO) {
     $PerfMake = " THINLTO=1 LTO_JOBS=$LtoJobs"
     Write-Host "[scarlet-build] ThinLTO ativado para lasgame.dll (primeiro rebuild pode demorar mais)." -ForegroundColor Green
 }
-$Targets = if ($RuntimeOnly) { "build/ScarletRecomp.exe" } else { "build/ScarletRecomp.exe build/lasgame.dll" }
-$Cmd = "set -o pipefail; export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin':`$PATH; cd '$RepoPosix'; make -j$Jobs EXE_NAME=ScarletRecomp$PerfMake $Targets 2>&1 | tee scarlet_build.log"
+$InstrumentMake = if ($FunctionInstrument) { " FNINSTRUMENT=1 B=$BuildRel" } else { "" }
+$Targets = if ($RuntimeOnly) { "$BuildRel/ScarletRecomp.exe" } else { "$BuildRel/ScarletRecomp.exe $BuildRel/lasgame.dll" }
+$Cmd = "set -o pipefail; export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin':`$PATH; cd '$RepoPosix'; make -j$Jobs EXE_NAME=ScarletRecomp$PerfMake$InstrumentMake $Targets 2>&1 | tee $BuildLogName"
 
 & $Bash -lc $Cmd
 $Code = $LASTEXITCODE
@@ -118,9 +126,9 @@ if ($Code -ne 0) {
     throw "Build falhou (exit $Code). Envie scarlet_build.log."
 }
 
-$Exe = Join-Path $RepoRoot "build\ScarletRecomp.exe"
-$GameDll = Join-Path $RepoRoot "build\lasgame.dll"
-$Id = Join-Path $RepoRoot "build\lasgame.dll.id"
+$Exe = Join-Path $BuildDir "ScarletRecomp.exe"
+$GameDll = Join-Path $BuildDir "lasgame.dll"
+$Id = Join-Path $BuildDir "lasgame.dll.id"
 
 foreach ($Path in @($Exe, $GameDll, $Id)) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -133,10 +141,10 @@ foreach ($Path in @($Exe, $GameDll, $Id)) {
 # restore source mtimes older than an already-built EXE.
 $Head = (& git -C $RepoRoot rev-parse HEAD 2>$null)
 if ($LASTEXITCODE -eq 0 -and $Head) {
-    Set-Content -LiteralPath (Join-Path $RepoRoot "build\.runtime_build_head") -Value $Head.Trim() -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $BuildDir ".runtime_build_head") -Value $Head.Trim() -Encoding ASCII
 }
 
-$ThinLtoMarker = Join-Path $RepoRoot "build\.thinlto_enabled"
+$ThinLtoMarker = Join-Path $BuildDir ".thinlto_enabled"
 if (-not $RuntimeOnly) {
     if ($ThinLTO) {
         Set-Content -LiteralPath $ThinLtoMarker -Value "1" -Encoding ASCII
