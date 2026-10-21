@@ -50,6 +50,10 @@ else {
 }
 
 $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+if ($Address) {
+    $Address = $Address.Trim().ToLowerInvariant()
+    if (-not $Address.StartsWith("0x")) { $Address = "0x$Address" }
+}
 $null = New-Item -ItemType Directory -Force -Path $OutDir
 if ($Address) {
     $AddressTag = $Address -replace "^0x",""
@@ -297,7 +301,20 @@ if ($UseWslGhidra) {
         $Info = $Prop.Value
         $Fns = @($Info.hot_functions)
         if ($Address) {
-            $Fns = @($Fns | Where-Object { ([string]$_.address).ToLowerInvariant() -eq $Address.ToLowerInvariant() })
+            $Fns = @($Fns | Where-Object { ([string]$_.address).ToLowerInvariant() -eq $Address })
+            if (-not $Fns.Count) {
+                # A fresh profiler run can reveal a new hotspot that was not in
+                # the manifest used when the raw image was exported. Accept any
+                # aligned address that actually falls inside this module image.
+                $Source = [string]$Info.image
+                if (-not [IO.Path]::IsPathRooted($Source)) { $Source = Join-Path $RepoRoot $Source }
+                $BaseNum = [Convert]::ToUInt64(([string]$Info.base).Substring(2), 16)
+                $AddrNum = [Convert]::ToUInt64($Address.Substring(2), 16)
+                $FileLen = if (Test-Path -LiteralPath $Source -PathType Leaf) { (Get-Item -LiteralPath $Source).Length } else { 0 }
+                if (($AddrNum -band 3) -eq 0 -and $AddrNum -ge $BaseNum -and $AddrNum -lt ($BaseNum + [uint64]$FileLen)) {
+                    $Fns = @([PSCustomObject]@{ address = $Address })
+                }
+            }
         }
         else {
             $Fns = @($Fns | Select-Object -First $Top)
@@ -358,7 +375,20 @@ else {
 
         $Fns = @($Info.hot_functions)
         if ($Address) {
-            $Fns = @($Fns | Where-Object { ([string]$_.address).ToLowerInvariant() -eq $Address.ToLowerInvariant() })
+            $Fns = @($Fns | Where-Object { ([string]$_.address).ToLowerInvariant() -eq $Address })
+            if (-not $Fns.Count) {
+                # A fresh profiler run can reveal a new hotspot that was not in
+                # the manifest used when the raw image was exported. Accept any
+                # aligned address that actually falls inside this module image.
+                $Source = [string]$Info.image
+                if (-not [IO.Path]::IsPathRooted($Source)) { $Source = Join-Path $RepoRoot $Source }
+                $BaseNum = [Convert]::ToUInt64(([string]$Info.base).Substring(2), 16)
+                $AddrNum = [Convert]::ToUInt64($Address.Substring(2), 16)
+                $FileLen = if (Test-Path -LiteralPath $Source -PathType Leaf) { (Get-Item -LiteralPath $Source).Length } else { 0 }
+                if (($AddrNum -band 3) -eq 0 -and $AddrNum -ge $BaseNum -and $AddrNum -lt ($BaseNum + [uint64]$FileLen)) {
+                    $Fns = @([PSCustomObject]@{ address = $Address })
+                }
+            }
         }
         else {
             $Fns = @($Fns | Select-Object -First $Top)
