@@ -4,13 +4,21 @@ param(
     [switch]$ForceRuntime,
     [switch]$IncrementalRuntime,
     [switch]$RuntimeOnly,
+    [switch]$GameDllOnly,
     [switch]$FunctionInstrument,
     [switch]$ThinLTO,
-    [switch]$NoThinLTO,  # ThinLTO is now the default for lasgame.dll (CPU-bound game code); this turns it off
+    [switch]$NoThinLTO,  # compatibility switch; upstream-style game builds already default to no ThinLTO
     [int]$LtoJobs = 4
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($RuntimeOnly -and $GameDllOnly) {
+    throw "-RuntimeOnly e -GameDllOnly sao mutuamente exclusivos."
+}
+if ($ThinLTO -and $NoThinLTO) {
+    throw "-ThinLTO e -NoThinLTO sao mutuamente exclusivos."
+}
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $Bash = "C:\msys64\usr\bin\bash.exe"
@@ -86,6 +94,8 @@ if ($FunctionInstrument) {
 }
 if ($RuntimeOnly) {
     Write-Host "[scarlet-build] Compilando somente ScarletRecomp.exe com -j$Jobs; lasgame.dll sera preservado." -ForegroundColor Cyan
+} elseif ($GameDllOnly) {
+    Write-Host "[scarlet-build] Compilando somente lasgame.dll com -j$Jobs; o jogo NAO sera iniciado." -ForegroundColor Cyan
 } else {
     Write-Host "[scarlet-build] Compilando runtime + codigo gerado com -j$Jobs..." -ForegroundColor Cyan
 }
@@ -97,7 +107,7 @@ Write-Host "[scarlet-build] Log: $Log"
 # .runtime_build_head even when make rebuilt nothing, falsely marking an old EXE
 # as current.  Default to a clean runtime rebuild; opt into incremental runtime
 # builds only with -IncrementalRuntime.
-if (-not $IncrementalRuntime -or $ForceRuntime) {
+if ((-not $GameDllOnly) -and (-not $IncrementalRuntime -or $ForceRuntime)) {
     $RtDir = Join-Path $BuildDir "rt"
     if (Test-Path -LiteralPath $RtDir) {
         Write-Host "[scarlet-build] Recompilando runtime do zero (lasgame permanece incremental)..." -ForegroundColor Yellow
@@ -110,10 +120,14 @@ if (-not $IncrementalRuntime -or $ForceRuntime) {
 }
 
 # The backtick keeps $PATH for Bash instead of expanding it in PowerShell.
-$PerfMake = ""
-if ($ThinLTO -or -not $NoThinLTO) {
+# Match upstream LASRecomp by default: no LTO for generated game code.
+# ThinLTO is now opt-in only via -ThinLTO.
+$PerfMake = " THINLTO=0"
+if ($ThinLTO) {
     $PerfMake = " THINLTO=1 LTO_JOBS=$LtoJobs"
-    Write-Host "[scarlet-build] ThinLTO ativado para lasgame.dll (primeiro rebuild pode demorar mais)." -ForegroundColor Green
+    Write-Host "[scarlet-build] ThinLTO ativado explicitamente para lasgame.dll." -ForegroundColor Green
+} else {
+    Write-Host "[scarlet-build] lasgame.dll: perfil upstream LASRecomp (sem ThinLTO)." -ForegroundColor Green
 }
 $InstrumentMake = if ($FunctionInstrument) { " FNINSTRUMENT=1 B=$BuildRel" } else { "" }
 
@@ -134,7 +148,13 @@ if ($RuntimeOnly) {
     Write-Host "[scarlet-build] lasgame.dll CONGELADA: id=$FrozenId" -ForegroundColor Green
 }
 
-$Targets = if ($RuntimeOnly) { "$BuildRel/ScarletRecomp.exe" } else { "$BuildRel/ScarletRecomp.exe $BuildRel/lasgame.dll" }
+$Targets = if ($RuntimeOnly) {
+    "$BuildRel/ScarletRecomp.exe"
+} elseif ($GameDllOnly) {
+    "$BuildRel/lasgame.dll"
+} else {
+    "$BuildRel/ScarletRecomp.exe $BuildRel/lasgame.dll"
+}
 $Cmd = "set -o pipefail; export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin':`$PATH; cd '$RepoPosix'; make -j$Jobs EXE_NAME=ScarletRecomp$PerfMake$InstrumentMake$GameIdMake $Targets 2>&1 | tee $BuildLogName"
 
 & $Bash -lc $Cmd
@@ -148,7 +168,8 @@ $Exe = Join-Path $BuildDir "ScarletRecomp.exe"
 $GameDll = Join-Path $BuildDir "lasgame.dll"
 $Id = Join-Path $BuildDir "lasgame.dll.id"
 
-foreach ($Path in @($Exe, $GameDll, $Id)) {
+$ExpectedArtifacts = if ($GameDllOnly) { @($GameDll, $Id) } else { @($Exe, $GameDll, $Id) }
+foreach ($Path in $ExpectedArtifacts) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "Build terminou sem criar o artefato esperado: $Path"
     }
@@ -157,9 +178,11 @@ foreach ($Path in @($Exe, $GameDll, $Id)) {
 # Record exactly which repository revision produced the native runtime.
 # File timestamps are not reliable after git checkout/pull, because Git may
 # restore source mtimes older than an already-built EXE.
-$Head = (& git -C $RepoRoot rev-parse HEAD 2>$null)
-if ($LASTEXITCODE -eq 0 -and $Head) {
-    Set-Content -LiteralPath (Join-Path $BuildDir ".runtime_build_head") -Value $Head.Trim() -Encoding ASCII
+if (-not $GameDllOnly) {
+    $Head = (& git -C $RepoRoot rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $Head) {
+        Set-Content -LiteralPath (Join-Path $BuildDir ".runtime_build_head") -Value $Head.Trim() -Encoding ASCII
+    }
 }
 
 $ThinLtoMarker = Join-Path $BuildDir ".thinlto_enabled"
@@ -175,7 +198,8 @@ if (-not $RuntimeOnly) {
 Write-Host ""
 Write-Host "[scarlet-build] BUILD CONCLUIDO" -ForegroundColor Green
 
-Get-Item $Exe, $GameDll, $Id |
+$DisplayArtifacts = if ($GameDllOnly) { @($GameDll, $Id) } else { @($Exe, $GameDll, $Id) }
+Get-Item $DisplayArtifacts |
     Select-Object Name, @{N="SizeMB";E={[Math]::Round($_.Length / 1MB, 2)}}, LastWriteTime |
     Format-Table -AutoSize
 
