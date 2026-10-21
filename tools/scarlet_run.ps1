@@ -377,6 +377,8 @@ foreach ($Name in @(
     'LARECOMP_FNPROF_AUTO_FRAMES',
     'LARECOMP_FNPROF_AUTO_STEP_MS',
     'LARECOMP_FNPROF_AUTO_CAPTURES',
+    'LARECOMP_HOSTPROF_OUT',
+    'LARECOMP_HOSTPROF_MS',
     'LARECOMP_GPUPROF_AT',
     'LARECOMP_SLOW_FRAME_MS',
     'LARECOMP_INJECT_FRAME_DELAY_MS'
@@ -429,19 +431,19 @@ try {
         $env:LARECOMP_HLE_PROF = '1'
         $env:LARECOMP_VK_PROF = '1'
         $env:LARECOMP_FRAME_CSV = Join-Path $PerformanceDir 'frames.csv'
-        # Function profiling follows actual slowness instead of a brittle absolute frame range.
-        # Capture increasingly severe slow scenes instead of stopping at the first hitch.
-        # Defaults target the sustained 30-60 ms scenes that matter for Scarlet:
-        # >=30 ms, then >=45 ms, then >=60 ms; each must persist for 3 frames.
-        # Setting LARECOMP_FNPROF=<from>:<to> explicitly still selects the old fixed-window mode.
-        if (-not $env:LARECOMP_FNPROF -and -not $env:LARECOMP_FNPROF_AUTO_MS) {
-            $env:LARECOMP_FNPROF_AUTO_MS = '30'
-            $env:LARECOMP_FNPROF_AUTO_CONSEC = '3'
-            $env:LARECOMP_FNPROF_AUTO_FRAMES = '60'
-            $env:LARECOMP_FNPROF_AUTO_STEP_MS = '15'
-            $env:LARECOMP_FNPROF_AUTO_CAPTURES = '3'
-        }
-        $env:LARECOMP_FNPROF_OUT = Join-Path $PerformanceDir 'fnprof.txt'
+
+        # Guest hotspots are sampled from host RIPs in the normal lasgame.dll.
+        # Do not arm FN_ENTER/FNPROF: that would require the expensive instrumented DLL.
+        Remove-Item Env:LARECOMP_FNPROF -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_FNPROF_OUT -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_FNPROF_AUTO_MS -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_FNPROF_AUTO_CONSEC -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_FNPROF_AUTO_FRAMES -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_FNPROF_AUTO_STEP_MS -ErrorAction SilentlyContinue
+        Remove-Item Env:LARECOMP_FNPROF_AUTO_CAPTURES -ErrorAction SilentlyContinue
+        $env:LARECOMP_HOSTPROF_OUT = Join-Path $PerformanceDir 'hostprof.txt'
+        if (-not $env:LARECOMP_HOSTPROF_MS) { $env:LARECOMP_HOSTPROF_MS = '5' }
+
         if (-not $env:LARECOMP_GPUPROF_AT) { $env:LARECOMP_GPUPROF_AT = '1200,2200,2900,4000' }
 
         $RunInfo = [ordered]@{
@@ -450,7 +452,7 @@ try {
             BuiltHead = $BuiltHeadNow
             Backend = $Backend
             Performance = [bool]$Performance
-            FunctionFrames = if ($env:LARECOMP_FNPROF) { $env:LARECOMP_FNPROF } else { "auto-slow" }
+            FunctionFrames = "host-rip-sampling"
             LogicalProcessors = [Environment]::ProcessorCount
             Environment = [ordered]@{
                 LARECOMP_SCALE = $env:LARECOMP_SCALE
@@ -466,6 +468,8 @@ try {
                 LARECOMP_FNPROF_AUTO_FRAMES = $env:LARECOMP_FNPROF_AUTO_FRAMES
                 LARECOMP_FNPROF_AUTO_STEP_MS = $env:LARECOMP_FNPROF_AUTO_STEP_MS
                 LARECOMP_FNPROF_AUTO_CAPTURES = $env:LARECOMP_FNPROF_AUTO_CAPTURES
+                LARECOMP_HOSTPROF_OUT = $env:LARECOMP_HOSTPROF_OUT
+                LARECOMP_HOSTPROF_MS = $env:LARECOMP_HOSTPROF_MS
                 LARECOMP_GPUPROF_AT = $env:LARECOMP_GPUPROF_AT
             }
         }
@@ -482,7 +486,7 @@ try {
             }
         }
 
-        Write-Host "[scarlet-run] Perfil completo ativo: frames, CPU/threads, GPU, HLE e funcoes guest." -ForegroundColor Cyan
+        Write-Host "[scarlet-run] Perfil completo ativo: frames, CPU/threads, GPU, HLE e guest hotspots por amostragem." -ForegroundColor Cyan
         Write-Host "[scarlet-run] Captura: $PerformanceDir" -ForegroundColor Cyan
     }
     else {
