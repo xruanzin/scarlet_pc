@@ -45,6 +45,10 @@ void plat_unmap_file(const void *ptr);
 void plat_set_cpu_boost(bool enabled);
 // Apply the current guest thread's Horizon priority/core as Windows scheduler hints.
 void plat_guest_thread_config(int priority, int core);
+// Diagnostic CPU sampler: briefly capture RIP from registered guest threads.
+// Returns the number of host PCs stored in pcs. Windows-only and enabled only
+// when the runtime sampling profiler asks for it.
+int plat_sample_registered_thread_pcs(uint64_t *pcs, int max);
 // Native modal text entry centered over the game window. Returns 1 = OK, 0 = cancel.
 int plat_text_input_dialog(const char *title, const char *subtitle, const char *guide,
                            const char *initial, int min_chars, int max_chars,
