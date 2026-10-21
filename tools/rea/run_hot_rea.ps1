@@ -143,22 +143,6 @@ function Resolve-WindowsRea {
     throw "REA nao esta instalado e npx nao foi encontrado. Instale Node.js 22.19+; nao e necessario instalar WSL."
 }
 
-function Invoke-WslText([string[]]$Args) {
-    $SavedPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        $r = @(& wsl.exe @WslPrefix -- @Args 2>&1)
-        $Code = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $SavedPreference
-    }
-    if ($Code -ne 0) {
-        throw ($r -join [Environment]::NewLine)
-    }
-    return (($r | ForEach-Object { "$_" }) -join [Environment]::NewLine).Trim()
-}
-
 $Done = 0
 if ($UseWslGhidra) {
     Write-Host "[rea] backend: REA 6.7.0 / Ghidra / WSL" -ForegroundColor Green
