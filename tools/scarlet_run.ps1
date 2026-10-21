@@ -604,15 +604,21 @@ if ($PerformanceDir) {
             if ($PyCmd) { $Python = $PyCmd.Source } else { $Python = $null }
         }
 
-        # Merge every FNPROF capture into a REA-ready ranking. Keep it inside
-        # the performance bundle so the next step never depends on a separate
-        # manual command.
+        # Merge the host RIP sampling profile (or legacy FNPROF captures) into a
+        # REA-ready ranking. Keep it inside the bundle so the next step never
+        # depends on a separate manual command.
         $HotAnalyzer = Join-Path $PSScriptRoot 'rea\analyze_hot.py'
         if ($Python -and (Test-Path -LiteralPath $HotAnalyzer -PathType Leaf)) {
             try {
-                $ProfilesForRea = @(Get-ChildItem -LiteralPath $PerformanceDir -Filter 'fnprof-auto-*.txt' -File -ErrorAction SilentlyContinue | Sort-Object Name)
-                if (-not $ProfilesForRea.Count) {
-                    $ProfilesForRea = @(Get-ChildItem -LiteralPath $PerformanceDir -Filter 'fnprof.txt' -File -ErrorAction SilentlyContinue)
+                $ProfilesForRea = @()
+                $HostProf = Join-Path $PerformanceDir 'hostprof.txt'
+                if (Test-Path -LiteralPath $HostProf -PathType Leaf) {
+                    $ProfilesForRea = @((Get-Item -LiteralPath $HostProf))
+                } else {
+                    $ProfilesForRea = @(Get-ChildItem -LiteralPath $PerformanceDir -Filter 'fnprof-auto-*.txt' -File -ErrorAction SilentlyContinue | Sort-Object Name)
+                    if (-not $ProfilesForRea.Count) {
+                        $ProfilesForRea = @(Get-ChildItem -LiteralPath $PerformanceDir -Filter 'fnprof.txt' -File -ErrorAction SilentlyContinue)
+                    }
                 }
                 if ($ProfilesForRea.Count) {
                     $HotJson = Join-Path $PerformanceDir 'hot_functions.json'
@@ -633,10 +639,16 @@ if ($PerformanceDir) {
         $Inspector = Join-Path $PSScriptRoot 'scarlet_inspect_addr.py'
         if ($Python -and (Test-Path -LiteralPath $Inspector -PathType Leaf)) {
             try {
-                $InspectOut = Join-Path $PerformanceDir 'fnprof-inspect.txt'
+                $InspectOut = Join-Path $PerformanceDir 'hotspot-inspect.txt'
                 Remove-Item -LiteralPath $InspectOut -Force -ErrorAction SilentlyContinue
                 $SeenAddr = @{}
-                $Profiles = @(Get-ChildItem -LiteralPath $PerformanceDir -Filter 'fnprof*.txt' -File -ErrorAction SilentlyContinue | Sort-Object Name)
+                $Profiles = @()
+                $HostProfInspect = Join-Path $PerformanceDir 'hostprof.txt'
+                if (Test-Path -LiteralPath $HostProfInspect -PathType Leaf) {
+                    $Profiles = @((Get-Item -LiteralPath $HostProfInspect))
+                } else {
+                    $Profiles = @(Get-ChildItem -LiteralPath $PerformanceDir -Filter 'fnprof*.txt' -File -ErrorAction SilentlyContinue | Sort-Object Name)
+                }
                 foreach ($Pf in $Profiles) {
                     Add-Content -LiteralPath $InspectOut -Value ('===== ' + $Pf.Name + ' =====') -Encoding UTF8
                     $Rows = @(Get-Content -LiteralPath $Pf.FullName | Select-Object -First 8)
