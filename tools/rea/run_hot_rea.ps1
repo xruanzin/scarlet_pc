@@ -34,6 +34,8 @@ finally { Pop-Location }
 $ManifestPath = Join-Path $RawDir "manifest.json"
 $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
 $null = New-Item -ItemType Directory -Force -Path $OutDir
+Get-ChildItem -LiteralPath $OutDir -File -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 
 # Prefer REA/Ghidra in WSL when it is genuinely available. Windows Ghidra P0
 # does not admit raw ARM64, so on a Windows-only machine use REA's official
