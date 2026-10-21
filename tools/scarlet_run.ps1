@@ -187,16 +187,16 @@ if (Test-Path -LiteralPath $Exe -PathType Leaf) {
             if ($RuntimeOnlyBuild) {
                 Write-Host "[scarlet-run] Mudou apenas o runtime; recompilando ScarletRecomp.exe sem relinkar lasgame.dll..." -ForegroundColor Yellow
                 if (Test-Path -LiteralPath $ThinLtoMarker -PathType Leaf) {
-                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime @BuildFlavorArgs -RuntimeOnly @BuildFlavorArgs -ThinLTO @BuildFlavorArgs
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly -ThinLTO @BuildFlavorArgs
                 } else {
-                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly @BuildFlavorArgs
                 }
             } else {
                 Write-Host "[scarlet-run] Codigo do jogo/runtime mudou; executando build completo..." -ForegroundColor Yellow
                 if (Test-Path -LiteralPath $ThinLtoMarker -PathType Leaf) {
                     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO @BuildFlavorArgs
                 } else {
-                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime @BuildFlavorArgs
                 }
             }
             if ($LASTEXITCODE -ne 0) { throw "Build do runtime falhou (exit $LASTEXITCODE). Envie scarlet_build.log." }
