@@ -107,6 +107,23 @@ static void scarlet_ref_assign(Cpu *c) {
     }
 
     uint64_t next = LD64(source);
+    uint64_t old = LD64(owner + 0x38);
+
+    // Very common smart-pointer self-assignment. The guest does an atomic
+    // increment followed immediately by an atomic decrement of the same
+    // counter. When a live owner already holds the object, those two RMWs have
+    // no observable net effect but are expensive LOCKed operations on x86.
+    // Keep the exact guest path for invalid/dead refcount states.
+    if (next == old) {
+        if (!next) return;
+        if (__builtin_expect(!scarlet_guest_range(next, 0x2c), 0)) {
+            g_orig_ref_assign(c);
+            return;
+        }
+        int32_t rc = __atomic_load_n((int32_t *)(uintptr_t)(next + 0x28), __ATOMIC_RELAXED);
+        if (__builtin_expect(rc > 0, 1)) return;
+    }
+
     int32_t *next_rc = NULL;
     if (next) {
         if (__builtin_expect(!scarlet_guest_range(next, 0x2c), 0)) {
@@ -122,7 +139,6 @@ static void scarlet_ref_assign(Cpu *c) {
         }
     }
 
-    uint64_t old = LD64(owner + 0x38);
     ST64(owner + 0x38, next);
 
     if (old) {
