@@ -39,6 +39,19 @@ class GuestForceInlineTests(unittest.TestCase):
         self.assertIn('GUEST_FORCE_INLINE=1', ps1)
         self.assertIn('GUEST_FORCE_INLINE=0', ps1)
 
+    def test_legacy_profile_matches_known_good_flags(self):
+        make = MAKEFILE.read_text()
+        for flag in ("-O3", "-fno-math-errno", "-fno-trapping-math",
+                     "-fno-semantic-interposition", "-mtune=znver2"):
+            self.assertIn(flag, make)
+        self.assertIn("LEGACY_GAME_PROFILE ?= 0", make)
+        self.assertIn("THINLTO ?= 1", make)
+
+        ps1 = BUILD_PS1.read_text()
+        self.assertIn("[switch]$LegacyGameProfile", ps1)
+        self.assertIn("LEGACY_GAME_PROFILE=1 THINLTO=1", ps1)
+        self.assertIn("-LegacyGameProfile e -GuestForceInline sao mutuamente exclusivos", ps1)
+
     def test_scalar_helpers_use_force_inline_macro(self):
         text = CPU_H.read_text()
         self.assertIn("#define GUEST_ALWAYS_INLINE static __inline__ __attribute__((always_inline))", text)
