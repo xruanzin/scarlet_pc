@@ -34,16 +34,8 @@ SCARLET_SETJMP_THUNKS = {
 # indirect dispatcher trip for calls originating in main.
 SCARLET_MAIN_DIRECT_HLE = {
     'ca44e7dd62e61a2a': {
-        0x30177A0: '_ZN2nn2os16GetCurrentThreadEv',
-        0x3018960: '_ZN2nn2os11GetTlsValueENS0_7TlsSlotE',
-        0x3019B40: '_ZN2nn2os16SignalLightEventEPNS0_14LightEventTypeE',
-
-        # Verified hot leaf functions from the Scarlet 1.0.0 slow-scene capture.
-        # These are pure getters/constants and are substantially cheaper as one
-        # host call than as lifted fragments + dispatcher traffic.
-        0x27036E0: 'scarlet_hot_vec_d0_size',
-        0x270386C: 'scarlet_hot_slot_c4',
-        0x26B7418: 'scarlet_hot_false',
+        # Keep experimental hot replacements disabled by default. They are
+        # reintroduced one-by-one only after boot/gameplay + REA validation.
     },
 }
 
@@ -58,11 +50,6 @@ SCARLET_MAIN_DIRECT_GUEST = {
     },
 }
 
-# Exact SDK entry where a tiny lock-free prefix can return before executing the
-# lifted body. Unlike a full HLE replacement, state==1 falls through to the
-# original AArch64 implementation so process-wide-key waiter semantics stay exact.
-SCARLET_SDK_SIGNAL_LIGHT_EVENT_BUILD = '3644a6760469451cabc99f00c540acc2a64aee41'
-SCARLET_SDK_SIGNAL_LIGHT_EVENT_OFF = 0x3720D0
 
 
 def sext26(w):
@@ -580,26 +567,6 @@ class Module:
                     '    goto L_dispatch;']
         else:
             out.append(f'    FN_ENTER({hx(entry)});')
-            if (self.name == 'sdk' and
-                    self.nso.build_id == SCARLET_SDK_SIGNAL_LIGHT_EVENT_BUILD and
-                    entry == self.base + SCARLET_SDK_SIGNAL_LIGHT_EVENT_OFF):
-                # SignalLightEvent's state word is at LightEventType+4. For both
-                # clear modes, state 2 is already signaled and state 0 can be
-                # promoted to 2 atomically. State 1 means a waiter exists: keep
-                # the original lifted body below for its process-wide-key wake.
-                out += [
-                    '    {',
-                    '        uint32_t *_sle_state = (uint32_t *)(uintptr_t)(c->x[0] + 4);',
-                    '        uint32_t _sle_cur = __atomic_load_n(_sle_state, __ATOMIC_ACQUIRE);',
-                    '        if (_sle_cur == 2) return;',
-                    '        if (_sle_cur == 0) {',
-                    '            uint32_t _sle_expected = 0;',
-                    '            if (__atomic_compare_exchange_n(_sle_state, &_sle_expected, 2, 0,',
-                    '                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;',
-                    '            if (_sle_expected == 2) return;',
-                    '        }',
-                    '    }',
-                ]
             if resumable:
                 # Normal direct calls always start at entry. Only the runtime's
                 # range lookup calls _resume with an interior c->pc. Keep identical
