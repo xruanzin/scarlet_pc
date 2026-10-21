@@ -585,14 +585,41 @@ uint64_t plat_register_thread(void) {
     LONG k = InterlockedIncrement(&g_nreg_threads) - 1;
     if (k >= MAX_REG_THREADS) return tid;
     HANDLE h = NULL;
+    DWORD rights = THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT;
     if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,
-                        THREAD_QUERY_INFORMATION, FALSE, 0)) {
+                        rights, FALSE, 0)) {
         g_reg_tids[k] = tid;
         // Publish the handle only once the associated tid is ready. Keep it alive
-        // for exit-status checks, rather than blindly querying a potentially recycled tid.
+        // for exit-status checks and diagnostic RIP sampling.
         InterlockedExchangePointer((PVOID volatile *)&g_reg_threads[k], h);
     }
     return tid;
+}
+
+int plat_sample_registered_thread_pcs(uint64_t *pcs, int max) {
+    if (!pcs || max <= 0) return 0;
+    DWORD self = GetCurrentThreadId();
+    LONG count = InterlockedCompareExchange(&g_nreg_threads, 0, 0);
+    LONG n = count < MAX_REG_THREADS ? count : MAX_REG_THREADS;
+    int out = 0;
+    for (LONG k = 0; k < n && out < max; k++) {
+        HANDLE h = InterlockedCompareExchangePointer((PVOID volatile *)&g_reg_threads[k], NULL, NULL);
+        if (!h || g_reg_tids[k] == self) continue;
+        DWORD code = 0;
+        if (!GetExitCodeThread(h, &code) || code != STILL_ACTIVE) continue;
+
+        DWORD sr = SuspendThread(h);
+        if (sr == (DWORD)-1) continue;
+
+        CONTEXT ctx = {0};
+        ctx.ContextFlags = CONTEXT_CONTROL;
+        BOOL ok = GetThreadContext(h, &ctx);
+        ResumeThread(h);
+        if (!ok) continue;
+
+        pcs[out++] = (uint64_t)ctx.Rip;
+    }
+    return out;
 }
 
 typedef HWCT (WINAPI *OpenWctFn)(DWORD, PWAITCHAINCALLBACK);
