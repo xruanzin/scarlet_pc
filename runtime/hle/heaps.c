@@ -287,7 +287,6 @@ typedef struct {
 
 static _Thread_local StdFastTls g_std_fast_tls;
 static uint32_t g_std_fast_generation = 1;
-static uint64_t g_std_fast_allocs, g_std_fast_frees, g_std_fast_refills, g_std_fast_slow;
 
 static unsigned std_log2_pow2(uint64_t v) {
     unsigned n = 0;
@@ -375,7 +374,6 @@ static uint64_t std_fast_refill(int cls, uint32_t capacity, uint64_t align, uint
             g_std_fast_tls.head[cls] = addr;
         }
     }
-    __atomic_fetch_add(&g_std_fast_refills, 1, __ATOMIC_RELAXED);
     return first;
 }
 
@@ -391,12 +389,10 @@ static uint64_t std_fast_alloc(uint64_t size, uint64_t align) {
         g_std_fast_tls.head[cls] = *(uint64_t *)(uintptr_t)addr;
         StdFastHdr *h = (StdFastHdr *)(uintptr_t)(addr - sizeof(StdFastHdr));
         h->requested = (uint32_t)(size ? size : 1);
-        __atomic_fetch_add(&g_std_fast_allocs, 1, __ATOMIC_RELAXED);
         return addr;
     }
 
     addr = std_fast_refill(cls, capacity, norm_align, size ? size : 1);
-    if (addr) __atomic_fetch_add(&g_std_fast_allocs, 1, __ATOMIC_RELAXED);
     return addr;
 }
 
@@ -406,7 +402,6 @@ static bool std_fast_free(uint64_t addr) {
     std_fast_tls_sync();
     *(uint64_t *)(uintptr_t)addr = g_std_fast_tls.head[h->cls];
     g_std_fast_tls.head[h->cls] = addr;
-    __atomic_fetch_add(&g_std_fast_frees, 1, __ATOMIC_RELAXED);
     return true;
 }
 
@@ -441,7 +436,6 @@ static uint64_t std_guest_alloc(uint64_t size, uint64_t align) {
 
     uint64_t fast = std_fast_alloc(size, align);
     if (fast) return fast;
-    __atomic_fetch_add(&g_std_fast_slow, 1, __ATOMIC_RELAXED);
 
     pthread_mutex_lock(&g_std_lock);
 
