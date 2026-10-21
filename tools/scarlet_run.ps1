@@ -6,6 +6,7 @@ param(
     [switch]$PackageExtract,
     [string]$HactoolPath = "",
     [switch]$PackageForceExtract,
+    [switch]$RegenerateHot,
     [switch]$Profile,
     [switch]$Performance,
     [switch]$LiveLog,
@@ -122,6 +123,33 @@ if ($DirectPackage) {
 } else {
     $ExeFs = Join-Path $GameRoot "exefs"
     $RomFs = Join-Path $GameRoot "romfs"
+}
+
+# Regenerate only the modules that contain the current CPU-hot direct HLE/PLT
+# rewrites. This runs while a direct NSP/XCI mount is alive, so no extraction is
+# needed. write_if_changed in gen.py keeps unchanged chunks untouched.
+if ($RegenerateHot) {
+    $GenerateScript = Join-Path $PSScriptRoot "scarlet_generate.ps1"
+    if (-not (Test-Path -LiteralPath $GenerateScript -PathType Leaf)) {
+        throw "Gerador Scarlet ausente: $GenerateScript"
+    }
+    foreach ($HotModule in @("sdk", "main")) {
+        Write-Host "[scarlet-run] Regenerando modulo quente $HotModule a partir de $ExeFs ..." -ForegroundColor Magenta
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $GenerateScript -ExeFs $ExeFs -Module $HotModule
+        if ($LASTEXITCODE -ne 0) {
+            throw "Geracao de $HotModule falhou (exit $LASTEXITCODE)."
+        }
+    }
+
+    # Generator/HLE metadata changes only become real CPU optimizations after the
+    # affected generated chunks are recompiled. Force one incremental game build;
+    # the normal and PROFILE variants remain isolated.
+    Write-Host "[scarlet-run] Recompilando somente os chunks gerados alterados..." -ForegroundColor Magenta
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO @BuildFlavorArgs
+    if ($LASTEXITCODE -ne 0) {
+        $WhichLog = if ($Profile) { "scarlet_build_profile.log" } else { "scarlet_build.log" }
+        throw "Build apos regeneracao falhou (exit $LASTEXITCODE). Envie $WhichLog."
+    }
 }
 
 # git pull updates source files, not the already-built EXE. Compare the exact
