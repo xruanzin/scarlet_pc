@@ -46,17 +46,31 @@ function Invoke-WslText([string[]]$Args) {
 }
 
 $RepoWsl = Invoke-WslText @("wslpath", "-a", $RepoRoot)
-$Probe = & wsl.exe @WslPrefix -- bash -lc "command -v rea >/dev/null 2>&1 && rea doctor --json >/dev/null 2>&1"
-if ($LASTEXITCODE -ne 0) {
-    throw @"
-REA/Ghidra ainda nao esta pronto dentro do WSL.
-No WSL, configure Ghidra/JDK e rode:
-  npm install --global rea-agents
-  rea doctor --json
 
-Depois execute este script novamente.
+# Prefer an installed REA, but pin the exact 6.7.0 package through npx when the
+# command is absent. This matches the rea-agents version used for this project.
+$ReaShell = "rea"
+& wsl.exe @WslPrefix -- bash -lc "command -v rea >/dev/null 2>&1"
+if ($LASTEXITCODE -ne 0) {
+    & wsl.exe @WslPrefix -- bash -lc "command -v npx >/dev/null 2>&1"
+    if ($LASTEXITCODE -ne 0) {
+        throw "REA nao esta instalado e npx nao existe no WSL. Instale Node.js 22.19+ no WSL."
+    }
+    $ReaShell = "npx -y rea-agents@6.7.0"
+}
+
+$Doctor = & wsl.exe @WslPrefix -- bash -lc "$ReaShell doctor --provider ghidra --json" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    $DoctorText = ($Doctor -join [Environment]::NewLine)
+    throw @"
+REA 6.7.0 foi encontrado, mas o provider Ghidra raw ARM64 nao esta pronto no WSL.
+Diagnostico REA:
+$DoctorText
+
+Raw ARM64 do Scarlet precisa de Ghidra no Linux/WSL; a fronteira Windows do REA nao admite esse formato.
 "@
 }
+Write-Host "[rea] engine: $ReaShell / Ghidra" -ForegroundColor Green
 
 $ManifestPath = Join-Path $RawDir "manifest.json"
 $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
@@ -82,7 +96,7 @@ foreach ($Prop in $Manifest.modules.PSObject.Properties) {
         $Out = Join-Path $OutDir (($Addr -replace "^0x","") + ".json")
         Write-Host "[rea] $Module $Addr" -ForegroundColor Cyan
 
-        $Cmd = "export REA_GHIDRA_SEED_FILE='$SeedsWsl'; rea function '$ImageWsl' '$Addr' --target-format raw-binary --architecture arm64 --entry-point '$Base' --provider ghidra --json"
+        $Cmd = "export REA_GHIDRA_SEED_FILE='$SeedsWsl'; $ReaShell function '$ImageWsl' '$Addr' --target-format raw-binary --architecture arm64 --entry-point '$Base' --provider ghidra --json"
         $Json = & wsl.exe @WslPrefix -- bash -lc $Cmd 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[rea] falhou $Addr" -ForegroundColor Yellow
