@@ -1,8 +1,10 @@
 param(
-    [Parameter(Mandatory=$true)][string]$ExeFs,
+    [string]$ExeFs = "",
     [string]$HotJson = "analysis\rea\hot_functions.json",
     [int]$Top = 8,
-    [string]$Distro = ""
+    [string]$Distro = "",
+    [switch]$ReuseRaw,
+    [int]$GhidraTimeoutMs = 1200000
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,26 +14,36 @@ $RawDir = Join-Path $RepoRoot "analysis\rea\raw"
 $OutDir = Join-Path $RepoRoot "analysis\rea\functions"
 $HotPath = if ([IO.Path]::IsPathRooted($HotJson)) { $HotJson } else { Join-Path $RepoRoot $HotJson }
 
-if (-not (Test-Path -LiteralPath $HotPath -PathType Leaf)) {
-    throw "Hot JSON nao encontrado: $HotPath"
-}
-
-$Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
-    $Pc = Get-Command python.exe -ErrorAction SilentlyContinue
-    if (-not $Pc) { $Pc = Get-Command python -ErrorAction SilentlyContinue }
-    if (-not $Pc) { throw "Python nao encontrado." }
-    $Python = $Pc.Source
-}
-
-Push-Location $RepoRoot
-try {
-    & $Python $Exporter --exefs $ExeFs --hot-json $HotPath --outdir $RawDir --top $Top
-    if ($LASTEXITCODE -ne 0) { throw "Falha exportando NSO para REA." }
-}
-finally { Pop-Location }
-
 $ManifestPath = Join-Path $RawDir "manifest.json"
+
+if ($ReuseRaw) {
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+        throw "Manifest REA nao encontrado para -ReuseRaw: $ManifestPath"
+    }
+    Write-Host "[rea] Reutilizando imagens raw ja exportadas; NSP/ExeFS nao sera remontado." -ForegroundColor Green
+}
+else {
+    if (-not $ExeFs) { throw "ExeFs e obrigatorio sem -ReuseRaw." }
+    if (-not (Test-Path -LiteralPath $HotPath -PathType Leaf)) {
+        throw "Hot JSON nao encontrado: $HotPath"
+    }
+
+    $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
+        $Pc = Get-Command python.exe -ErrorAction SilentlyContinue
+        if (-not $Pc) { $Pc = Get-Command python -ErrorAction SilentlyContinue }
+        if (-not $Pc) { throw "Python nao encontrado." }
+        $Python = $Pc.Source
+    }
+
+    Push-Location $RepoRoot
+    try {
+        & $Python $Exporter --exefs $ExeFs --hot-json $HotPath --outdir $RawDir --top $Top
+        if ($LASTEXITCODE -ne 0) { throw "Falha exportando NSO para REA." }
+    }
+    finally { Pop-Location }
+}
+
 $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
 $null = New-Item -ItemType Directory -Force -Path $OutDir
 Get-ChildItem -LiteralPath $OutDir -File -ErrorAction SilentlyContinue |
@@ -94,7 +106,7 @@ if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
                 }
                 # REA uses #!/usr/bin/env node. A non-interactive WSL shell
                 # does not source NVM, so put the REA/Node bin directory on PATH.
-                $Bootstrap = ('export PATH={0}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export GHIDRA_INSTALL_DIR="$HOME/ghidra_12.1.4_PUBLIC"; export JAVA_HOME="/usr/lib/jvm/java-21-openjdk-amd64"; ' -f $QuotedBin)
+                $Bootstrap = ('export PATH={0}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export GHIDRA_INSTALL_DIR="$HOME/ghidra_12.1.4_PUBLIC"; export JAVA_HOME="/usr/lib/jvm/java-21-openjdk-amd64"; export REA_GHIDRA_STARTUP_TIMEOUT_MS="{1}"; ' -f $QuotedBin, $GhidraTimeoutMs)
                 Write-Host "[rea] WSL REA: $ReaPath" -ForegroundColor DarkGray
                 $Doctor = Invoke-WslRaw ($Bootstrap + $QuotedRea + ' doctor --provider ghidra --json')
                 $DoctorText = ($Doctor.Output -join [Environment]::NewLine)
@@ -187,6 +199,7 @@ function Resolve-WindowsRea {
 $Done = 0
 if ($UseWslGhidra) {
     Write-Host "[rea] backend: REA 6.7.0 / Ghidra / WSL" -ForegroundColor Green
+    Write-Host "[rea] Ghidra startup timeout: $GhidraTimeoutMs ms" -ForegroundColor DarkGray
 
     foreach ($Prop in $Manifest.modules.PSObject.Properties) {
         $Module = $Prop.Name
@@ -195,7 +208,7 @@ if ($UseWslGhidra) {
         $SeedsWsl = Convert-WindowsPathToWsl ([string]$Info.seeds)
         $Base = [string]$Info.base
 
-        foreach ($Fn in @($Info.hot_functions)) {
+        foreach ($Fn in @($Info.hot_functions | Select-Object -First $Top)) {
             $Addr = [string]$Fn.address
             $Out = Join-Path $OutDir (($Addr -replace "^0x","") + ".json")
             Write-Host "[rea] Ghidra $Module $Addr" -ForegroundColor Cyan
@@ -230,7 +243,7 @@ else {
         if (-not [IO.Path]::IsPathRooted($Image)) { $Image = Join-Path $RepoRoot $Image }
         $BaseNum = [Convert]::ToUInt64(([string]$Info.base).Substring(2),16)
 
-        foreach ($Fn in @($Info.hot_functions)) {
+        foreach ($Fn in @($Info.hot_functions | Select-Object -First $Top)) {
             $Addr = [string]$Fn.address
             $AddrNum = [Convert]::ToUInt64($Addr.Substring(2),16)
             if ($AddrNum -lt $BaseNum) { continue }
