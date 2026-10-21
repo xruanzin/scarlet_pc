@@ -51,8 +51,16 @@ else {
 
 $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
 $null = New-Item -ItemType Directory -Force -Path $OutDir
-Get-ChildItem -LiteralPath $OutDir -File -ErrorAction SilentlyContinue |
-    Remove-Item -Force -ErrorAction SilentlyContinue
+if ($Address) {
+    $AddressTag = $Address -replace "^0x",""
+    Get-ChildItem -LiteralPath $OutDir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like ($AddressTag + ".json*") } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+}
+else {
+    Get-ChildItem -LiteralPath $OutDir -File -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+}
 
 # Prefer the full REA/Ghidra lane in WSL. Do not depend on an interactive
 # shell profile: NVM is often unavailable to bash -lc even though REA works in
@@ -348,7 +356,15 @@ else {
         if (-not [IO.Path]::IsPathRooted($Image)) { $Image = Join-Path $RepoRoot $Image }
         $BaseNum = [Convert]::ToUInt64(([string]$Info.base).Substring(2),16)
 
-        foreach ($Fn in @($Info.hot_functions | Select-Object -First $Top)) {
+        $Fns = @($Info.hot_functions)
+        if ($Address) {
+            $Fns = @($Fns | Where-Object { ([string]$_.address).ToLowerInvariant() -eq $Address.ToLowerInvariant() })
+        }
+        else {
+            $Fns = @($Fns | Select-Object -First $Top)
+        }
+
+        foreach ($Fn in $Fns) {
             $Addr = [string]$Fn.address
             $AddrNum = [Convert]::ToUInt64($Addr.Substring(2),16)
             if ($AddrNum -lt $BaseNum) { continue }
