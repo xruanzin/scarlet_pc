@@ -5,7 +5,7 @@ param(
     [string]$KeysPath = "",
     [string]$FuseNxPath = "",
     [string]$HotJson = "",
-    [int]$Top = 8,
+    [int]$Top = 3,
     [string]$Distro = ""
 )
 
