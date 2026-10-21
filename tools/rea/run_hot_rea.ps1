@@ -175,7 +175,7 @@ if ($UseWslGhidra) {
             $Addr = [string]$Fn.address
             $Out = Join-Path $OutDir (($Addr -replace "^0x","") + ".json")
             Write-Host "[rea] Ghidra $Module $Addr" -ForegroundColor Cyan
-            $Cmd = "export GHIDRA_INSTALL_DIR=\"$HOME/ghidra_12.1.4_PUBLIC\"; export JAVA_HOME=\"/usr/lib/jvm/java-21-openjdk-amd64\"; export REA_GHIDRA_SEED_FILE='$SeedsWsl'; $ReaShell function '$ImageWsl' '$Addr' --target-format raw-binary --architecture arm64 --entry-point '$Base' --provider ghidra --json"
+            $Cmd = "export GHIDRA_INSTALL_DIR=`"`$HOME/ghidra_12.1.4_PUBLIC`"; export JAVA_HOME=`"/usr/lib/jvm/java-21-openjdk-amd64`"; export REA_GHIDRA_SEED_FILE='$SeedsWsl'; $ReaShell function '$ImageWsl' '$Addr' --target-format raw-binary --architecture arm64 --entry-point '$Base' --provider ghidra --json"
             $Run = Invoke-WslRaw $Cmd
             $Json = @($Run.Output | ForEach-Object { "$_" })
             if ($Run.ExitCode -ne 0) {
