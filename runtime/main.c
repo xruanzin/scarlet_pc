@@ -148,6 +148,7 @@ __attribute__((section(".rst$a"), used)) static const ResetFn __start_resets[1];
 __attribute__((section(".rst$z"), used)) static const ResetFn __stop_resets[1];
 #endif
 
+void hostprof_start(void);            // runtime/hostprof.c; no-op unless LARECOMP_HOSTPROF_OUT is set
 void backend_reset(void);             // renderer: GPU idle, game textures and address-keyed caches dropped
 void renderthread_reset(void);          // renderer: drop/drain queued command batches before backend teardown
 void backend_guest_memory_reset(void);  // renderer: guest memory was replaced (re-wrap the heap)
@@ -208,6 +209,7 @@ static void boot(const char *root) {
     { extern void settings_load(void); settings_load(); }
     kernel_init();
     dispatch_init();
+    hostprof_start();
 
     uint32_t stack_size = 0x100000;
     int prio = 44;
