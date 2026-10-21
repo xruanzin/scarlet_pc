@@ -208,8 +208,10 @@ static void boot(const char *root) {
     loader_load(exefs);
     { extern void settings_load(void); settings_load(); }
     kernel_init();
-    dispatch_init();
+    // Patch the frozen lasgame function table/direct CALLs before dispatch_init
+    // snapshots those pointers into its exact lookup/cache tables.
     { extern void scarlet_hot_configure(void); scarlet_hot_configure(); }
+    dispatch_init();
     hostprof_start();
 
     uint32_t stack_size = 0x100000;
