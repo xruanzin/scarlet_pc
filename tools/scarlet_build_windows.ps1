@@ -116,8 +116,26 @@ if ($ThinLTO -or -not $NoThinLTO) {
     Write-Host "[scarlet-build] ThinLTO ativado para lasgame.dll (primeiro rebuild pode demorar mais)." -ForegroundColor Green
 }
 $InstrumentMake = if ($FunctionInstrument) { " FNINSTRUMENT=1 B=$BuildRel" } else { "" }
+
+# Runtime-only means exactly that: preserve the existing huge lasgame.dll and
+# compile the EXE against the DLL's existing GAMELIB_ID, even if generator/HLE
+# source files changed since that DLL was built.
+$GameIdMake = ""
+if ($RuntimeOnly) {
+    $FrozenDll = Join-Path $BuildDir "lasgame.dll"
+    $FrozenIdPath = Join-Path $BuildDir "lasgame.dll.id"
+    if (-not (Test-Path -LiteralPath $FrozenDll -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $FrozenIdPath -PathType Leaf)) {
+        throw "RuntimeOnly pediu para preservar lasgame.dll, mas a DLL/ID existente nao foi encontrada em $BuildDir."
+    }
+    $FrozenId = (Get-Content -LiteralPath $FrozenIdPath -Raw).Trim()
+    if (-not $FrozenId) { throw "lasgame.dll.id vazio em $FrozenIdPath" }
+    $GameIdMake = " GAMELIB_ID=$FrozenId"
+    Write-Host "[scarlet-build] lasgame.dll CONGELADA: id=$FrozenId" -ForegroundColor Green
+}
+
 $Targets = if ($RuntimeOnly) { "$BuildRel/ScarletRecomp.exe" } else { "$BuildRel/ScarletRecomp.exe $BuildRel/lasgame.dll" }
-$Cmd = "set -o pipefail; export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin':`$PATH; cd '$RepoPosix'; make -j$Jobs EXE_NAME=ScarletRecomp$PerfMake$InstrumentMake $Targets 2>&1 | tee $BuildLogName"
+$Cmd = "set -o pipefail; export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin':`$PATH; cd '$RepoPosix'; make -j$Jobs EXE_NAME=ScarletRecomp$PerfMake$InstrumentMake$GameIdMake $Targets 2>&1 | tee $BuildLogName"
 
 & $Bash -lc $Cmd
 $Code = $LASTEXITCODE
