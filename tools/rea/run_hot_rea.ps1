@@ -4,6 +4,10 @@ param(
     [int]$Top = 8,
     [string]$Distro = "",
     [switch]$ReuseRaw,
+    [string]$Address = "",
+    [switch]$Focused,
+    [int]$FocusWindowMiB = 4,
+    [switch]$FastAnalyzers,
     [int]$GhidraTimeoutMs = 1200000,
     [string]$GhidraMaxMem = "4G"
 )
