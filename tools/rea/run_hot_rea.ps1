@@ -163,7 +163,17 @@ function Convert-WindowsPathToWsl([string]$Path) {
     if (-not $Path) { throw "Caminho vazio ao converter para WSL." }
     if ($Path.StartsWith("/")) { return $Path }
 
-    if ($Path -match '^([A-Za-z]):[\\/](.*)    foreach ($Name in @("rea.cmd","rea.exe","rea")) {
+    if ($Path -match '^([A-Za-z]):[\\/](.*)$') {
+        $Drive = $Matches[1].ToLowerInvariant()
+        $Rest = ($Matches[2] -replace '\\','/')
+        return "/mnt/$Drive/$Rest"
+    }
+
+    throw "Caminho Windows nao suportado para WSL: $Path"
+}
+
+function Resolve-WindowsRea {
+    foreach ($Name in @("rea.cmd","rea.exe","rea")) {
         $Cmd = Get-Command $Name -ErrorAction SilentlyContinue
         if ($Cmd) { return [PSCustomObject]@{ Program=$Cmd.Source; Prefix=@() } }
     }
