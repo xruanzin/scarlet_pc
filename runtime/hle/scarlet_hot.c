@@ -60,7 +60,7 @@ static void scarlet_ref_assign(Cpu *c) {
 
     if (__builtin_expect(!atomic_load_explicit(&g_refassign_first_hit, memory_order_relaxed), 0) &&
         !atomic_exchange_explicit(&g_refassign_first_hit, 1, memory_order_relaxed))
-        LOG("[scarlet-hot] 700270c4ac native ref-assign fast path active\\n");
+        LOG("[scarlet-hot] 700270c4ac native ref-assign fast path active\n");
 
     uint64_t next = LD64(source);
     int32_t *next_rc = NULL;
