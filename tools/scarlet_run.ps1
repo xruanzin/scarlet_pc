@@ -104,30 +104,29 @@ elseif (-not (Test-Path -LiteralPath $GameRoot -PathType Container)) {
 . (Join-Path $PSScriptRoot "scarlet_graphics_backend.ps1")
 if (-not $DirectXDirectory) { $DirectXDirectory = Join-Path $RepoRoot "tools\directx\mesa" }
 
-# Full profiling needs FN_ENTER compiled into every lifted guest function.
-# Keep that expensive diagnostic build isolated from the normal performance build.
-$BuildVariantDir = if ($Profile) { Join-Path $RepoRoot "build\profile" } else { Join-Path $RepoRoot "build" }
+# Profiling now uses host RIP sampling in the runtime. The normal game DLL is
+# reused unchanged; no FNINSTRUMENT/profile guest build is needed.
+$BuildVariantDir = Join-Path $RepoRoot "build"
 $Exe = Join-Path $BuildVariantDir "ScarletRecomp.exe"
 $GameDll = Join-Path $BuildVariantDir "lasgame.dll"
 $BuildScript = Join-Path $PSScriptRoot "scarlet_build_windows.ps1"
 $BuildFlavorArgs = @()
-if ($Profile) { $BuildFlavorArgs += "-FunctionInstrument" }
 
 if ($Profile) {
-    $HaveProfileExe = Test-Path -LiteralPath $Exe -PathType Leaf
-    $HaveProfileDll = Test-Path -LiteralPath $GameDll -PathType Leaf
-    if (-not $HaveProfileDll -and -not $RebuildGameDll) {
-        throw "build\profile\lasgame.dll nao existe. A DLL do jogo esta congelada por padrao; use -RebuildGameDll somente quando voce quiser recompila-la explicitamente."
+    $HaveExe = Test-Path -LiteralPath $Exe -PathType Leaf
+    $HaveDll = Test-Path -LiteralPath $GameDll -PathType Leaf
+    if (-not $HaveDll -and -not $RebuildGameDll) {
+        throw "build\lasgame.dll nao existe. A DLL do jogo esta congelada por padrao; use -RebuildGameDll somente para cria-la/recompila-la explicitamente."
     }
-    if (-not $HaveProfileExe -and $HaveProfileDll) {
-        Write-Host "[scarlet-run] PROFILE: reconstruindo somente ScarletRecomp.exe; lasgame.dll congelada." -ForegroundColor Magenta
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly -ThinLTO @BuildFlavorArgs
-        if ($LASTEXITCODE -ne 0) { throw "Build PROFILE do runtime falhou (exit $LASTEXITCODE). Envie scarlet_build_profile.log." }
+    if (-not $HaveExe -and $HaveDll) {
+        Write-Host "[scarlet-run] PROFILE por amostragem: reconstruindo somente ScarletRecomp.exe; lasgame.dll congelada." -ForegroundColor Magenta
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly -ThinLTO
+        if ($LASTEXITCODE -ne 0) { throw "Build do runtime falhou (exit $LASTEXITCODE). Envie scarlet_build.log." }
     }
-    elseif ((-not $HaveProfileExe -or -not $HaveProfileDll) -and $RebuildGameDll) {
-        Write-Host "[scarlet-run] PROFILE: recompilacao de lasgame.dll autorizada explicitamente." -ForegroundColor Yellow
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO @BuildFlavorArgs
-        if ($LASTEXITCODE -ne 0) { throw "Build PROFILE falhou (exit $LASTEXITCODE). Envie scarlet_build_profile.log." }
+    elseif ((-not $HaveExe -or -not $HaveDll) -and $RebuildGameDll) {
+        Write-Host "[scarlet-run] -RebuildGameDll autorizado explicitamente." -ForegroundColor Yellow
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO
+        if ($LASTEXITCODE -ne 0) { throw "Build completo falhou (exit $LASTEXITCODE). Envie scarlet_build.log." }
     }
 }
 if ($DirectPackage) {
@@ -339,7 +338,7 @@ $BuiltHeadNow = if (Test-Path -LiteralPath $MarkerNow) { (Get-Content -LiteralPa
 Write-Host "[scarlet-run] SCRIPT_REV=$($CurrentHead.Trim())"
 Write-Host "[scarlet-run] EXE_REV=$BuiltHeadNow"
 if ($Profile) {
-    Write-Host "[scarlet-run] PROFILE guest instrumentation: ON (build\profile, FNINSTRUMENT=1)" -ForegroundColor Magenta
+    Write-Host "[scarlet-run] PROFILE guest: host RIP sampling (lasgame.dll normal congelada)" -ForegroundColor Magenta
 }
 Write-Host ""
 
