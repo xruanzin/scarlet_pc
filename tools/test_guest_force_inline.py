@@ -11,6 +11,7 @@ import unittest
 ROOT = Path(__file__).resolve().parent.parent
 CPU_H = ROOT / "runtime" / "cpu.h"
 MAKEFILE = ROOT / "Makefile"
+BUILD_PS1 = ROOT / "tools" / "scarlet_build_windows.ps1"
 
 SCALAR_HELPERS = (
     "adds64", "subs64", "adds32", "subs32", "logic64", "logic32",
@@ -31,6 +32,12 @@ class GuestForceInlineTests(unittest.TestCase):
         make = MAKEFILE.read_text()
         self.assertIn("GUEST_FORCE_INLINE ?= 0", make)
         self.assertIn("GENFLAGS += -DLARECOMP_GUEST_FORCE_INLINE=1", make)
+
+    def test_windows_build_helper_exposes_toggle(self):
+        ps1 = BUILD_PS1.read_text()
+        self.assertIn("[switch]$GuestForceInline", ps1)
+        self.assertIn('GUEST_FORCE_INLINE=1', ps1)
+        self.assertIn('GUEST_FORCE_INLINE=0', ps1)
 
     def test_scalar_helpers_use_force_inline_macro(self):
         text = CPU_H.read_text()
