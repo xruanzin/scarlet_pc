@@ -84,7 +84,7 @@ void rt_hle_profile_report(void) {
 
 // Overrides of recompiled guest functions (by address)
 #define MAX_OVERRIDE 1024
-static struct { uint64_t addr; HostFn fn; const char *name; } overrides[MAX_OVERRIDE];
+static struct { uint64_t addr; HostFn fn; const char *name; bool cacheable; } overrides[MAX_OVERRIDE];
 static int override_count;
 
 // Host implementations registered by name (runtime/hle/*.c fill this via HLE_FUNC)
@@ -121,12 +121,21 @@ uint64_t hle_register(const char *name, HostFn fn) {
     return HLE_BASE + 16ull * hle_count++;
 }
 
-void hle_override(uint64_t addr, HostFn fn, const char *name) {
+static void hle_override_add(uint64_t addr, HostFn fn, const char *name, bool cacheable) {
     if (override_count == MAX_OVERRIDE) FATAL("too many overrides\n");
     overrides[override_count].addr = addr;
     overrides[override_count].fn = fn;
     overrides[override_count].name = name;
+    overrides[override_count].cacheable = cacheable;
     override_count++;
+}
+
+void hle_override(uint64_t addr, HostFn fn, const char *name) {
+    hle_override_add(addr, fn, name, false);
+}
+
+void hle_override_cached(uint64_t addr, HostFn fn, const char *name) {
+    hle_override_add(addr, fn, name, true);
 }
 
 // ---- recent-HLE ring. Shared histories outlive their writer threads (TLS does not).
@@ -357,8 +366,24 @@ static GuestFn dispatch_slow(Cpu *c, RtCallCache *site) {
             return hle_unimplemented;
         }
     }
-    for (int i = 0; i < override_count; i++)
-        if (overrides[i].addr == pc) return overrides[i].fn;
+    for (int i = 0; i < override_count; i++) {
+        if (overrides[i].addr != pc) continue;
+        GuestFn f = (GuestFn)overrides[i].fn;
+        if (overrides[i].cacheable) {
+            unsigned h = (unsigned)(((pc >> 2) * 11400714819323198485ull) >> (64 - 18));
+            atomic_store_explicit(&dcache[h].fn, (uintptr_t)f, memory_order_relaxed);
+            atomic_store_explicit(&dcache[h].addr, pc, memory_order_release);
+            if (site) {
+                uintptr_t f0 = atomic_load_explicit(&site->fn[0], memory_order_relaxed);
+                uint64_t k0 = atomic_load_explicit(&site->key[0], memory_order_acquire);
+                bool slot0_same = f0 && (k0 ^ RT_CALL_CACHE_MIX(f0)) == pc;
+                int slot = (!f0 || slot0_same) ? 0 : 1;
+                atomic_store_explicit(&site->fn[slot], (uintptr_t)f, memory_order_relaxed);
+                atomic_store_explicit(&site->key[slot], pc ^ RT_CALL_CACHE_MIX(f), memory_order_release);
+            }
+        }
+        return f;
+    }
     GuestFn f = dispatch_lookup(pc);
     if (!f) {
         uint64_t off;
