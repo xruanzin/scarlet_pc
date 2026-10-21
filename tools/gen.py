@@ -120,7 +120,7 @@ def detect_plt_imports(n, base):
         immhi = (w0 >> 5) & 0x7FFFF
         pages = _sx((immhi << 2) | immlo, 21)
         pc = base + off
-        page = (pc & ~0xFFFull) + (pages << 12)
+        page = (pc & ~0xFFF) + (pages << 12)
         got = page + (((w1 >> 10) & 0xFFF) << 3)
         got_off = got - base
         symidx = rel.get(got_off)
