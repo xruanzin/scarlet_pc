@@ -7,6 +7,7 @@ param(
     [string]$HactoolPath = "",
     [switch]$PackageForceExtract,
     [switch]$RegenerateHot,
+    [switch]$RebuildGameDll,
     [switch]$Profile,
     [switch]$Performance,
     [switch]$LiveLog,
@@ -112,10 +113,22 @@ $BuildScript = Join-Path $PSScriptRoot "scarlet_build_windows.ps1"
 $BuildFlavorArgs = @()
 if ($Profile) { $BuildFlavorArgs += "-FunctionInstrument" }
 
-if ($Profile -and (-not (Test-Path -LiteralPath $Exe -PathType Leaf) -or -not (Test-Path -LiteralPath $GameDll -PathType Leaf))) {
-    Write-Host "[scarlet-run] Preparando build PROFILE instrumentado em build\profile..." -ForegroundColor Magenta
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO @BuildFlavorArgs
-    if ($LASTEXITCODE -ne 0) { throw "Build PROFILE falhou (exit $LASTEXITCODE). Envie scarlet_build_profile.log." }
+if ($Profile) {
+    $HaveProfileExe = Test-Path -LiteralPath $Exe -PathType Leaf
+    $HaveProfileDll = Test-Path -LiteralPath $GameDll -PathType Leaf
+    if (-not $HaveProfileDll -and -not $RebuildGameDll) {
+        throw "build\profile\lasgame.dll nao existe. A DLL do jogo esta congelada por padrao; use -RebuildGameDll somente quando voce quiser recompila-la explicitamente."
+    }
+    if (-not $HaveProfileExe -and $HaveProfileDll) {
+        Write-Host "[scarlet-run] PROFILE: reconstruindo somente ScarletRecomp.exe; lasgame.dll congelada." -ForegroundColor Magenta
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly -ThinLTO @BuildFlavorArgs
+        if ($LASTEXITCODE -ne 0) { throw "Build PROFILE do runtime falhou (exit $LASTEXITCODE). Envie scarlet_build_profile.log." }
+    }
+    elseif ((-not $HaveProfileExe -or -not $HaveProfileDll) -and $RebuildGameDll) {
+        Write-Host "[scarlet-run] PROFILE: recompilacao de lasgame.dll autorizada explicitamente." -ForegroundColor Yellow
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO @BuildFlavorArgs
+        if ($LASTEXITCODE -ne 0) { throw "Build PROFILE falhou (exit $LASTEXITCODE). Envie scarlet_build_profile.log." }
+    }
 }
 if ($DirectPackage) {
     $ExeFs = [string]$DirectPackageInfo.ExeFs
@@ -151,14 +164,17 @@ if ($RegenerateHot) {
         throw "generated\sdk ainda contem fast path antigo com 'false': $($StaleAtomic.Path):$($StaleAtomic.LineNumber)"
     }
 
-    # Generator/HLE metadata changes only become real CPU optimizations after the
-    # affected generated chunks are recompiled. Force one incremental game build;
-    # the normal and PROFILE variants remain isolated.
-    Write-Host "[scarlet-run] Recompilando somente os chunks gerados alterados..." -ForegroundColor Magenta
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO @BuildFlavorArgs
-    if ($LASTEXITCODE -ne 0) {
-        $WhichLog = if ($Profile) { "scarlet_build_profile.log" } else { "scarlet_build.log" }
-        throw "Build apos regeneracao falhou (exit $LASTEXITCODE). Envie $WhichLog."
+    # Never rebuild/relink the huge guest DLL implicitly. Generated changes stay
+    # staged until -RebuildGameDll is explicitly requested.
+    if ($RebuildGameDll) {
+        Write-Host "[scarlet-run] -RebuildGameDll autorizado: compilando chunks gerados alterados..." -ForegroundColor Magenta
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO @BuildFlavorArgs
+        if ($LASTEXITCODE -ne 0) {
+            $WhichLog = if ($Profile) { "scarlet_build_profile.log" } else { "scarlet_build.log" }
+            throw "Build apos regeneracao falhou (exit $LASTEXITCODE). Envie $WhichLog."
+        }
+    } else {
+        Write-Host "[scarlet-run] lasgame.dll CONGELADA: fontes geradas atualizadas, mas a DLL NAO sera recompilada." -ForegroundColor Green
     }
 }
 
@@ -180,7 +196,7 @@ if (Test-Path -LiteralPath $Exe -PathType Leaf) {
     }
     elseif (-not $BuiltHead -or $BuiltHead -ne $Head) {
         $NeedNativeBuild = $true
-        $RuntimeOnlyBuild = $false
+        $RuntimeOnlyBuild = -not $RebuildGameDll
         if ($BuiltHead -and $Head) {
             # The local checkout may be shallow while .runtime_build_head still
             # points at an older commit. Avoid revision syntax such as ^{commit}
@@ -197,7 +213,8 @@ if (Test-Path -LiteralPath $Exe -PathType Leaf) {
                 $ObjectOk = ($LASTEXITCODE -eq 0 -and $ObjectType -contains "commit")
 
                 if (-not $ObjectOk) {
-                    Write-Host "[scarlet-run] Nao foi possivel recuperar o commit antigo (fetch exit $FetchCode); usando build completo por seguranca." -ForegroundColor Yellow
+                    Write-Host "[scarlet-run] Nao foi possivel recuperar o commit antigo (fetch exit $FetchCode); lasgame.dll permanece congelada e somente o runtime sera recompilado." -ForegroundColor Yellow
+                    $RuntimeOnlyBuild = -not $RebuildGameDll
                 }
             }
 
@@ -214,7 +231,13 @@ if (Test-Path -LiteralPath $Exe -PathType Leaf) {
                         $_ -match "^runtime/(cpu[.]h|simd.*[.]h|gamelib[.]h|hle/hle_symbols[.]txt)$"
                     })
                     $NeedNativeBuild = $NativeChanged.Count -gt 0
-                    $RuntimeOnlyBuild = $NeedNativeBuild -and $GameCodeChanged.Count -eq 0
+                    # lasgame.dll is frozen by default. Even if generator/game-code
+                    # sources changed, automatic rebuilds update only the runtime.
+                    # Rebuilding the guest DLL requires explicit -RebuildGameDll.
+                    $RuntimeOnlyBuild = $NeedNativeBuild -and -not $RebuildGameDll
+                    if ($NeedNativeBuild -and $GameCodeChanged.Count -gt 0 -and -not $RebuildGameDll) {
+                        Write-Host "[scarlet-run] Mudancas de guest detectadas, mas lasgame.dll esta CONGELADA; recompilando somente o runtime." -ForegroundColor Green
+                    }
                 }
             }
         }
@@ -230,7 +253,7 @@ if (Test-Path -LiteralPath $Exe -PathType Leaf) {
                     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly @BuildFlavorArgs
                 }
             } else {
-                Write-Host "[scarlet-run] Codigo do jogo/runtime mudou; executando build completo..." -ForegroundColor Yellow
+                Write-Host "[scarlet-run] -RebuildGameDll autorizado; executando build completo..." -ForegroundColor Yellow
                 if (Test-Path -LiteralPath $ThinLtoMarker -PathType Leaf) {
                     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO @BuildFlavorArgs
                 } else {
