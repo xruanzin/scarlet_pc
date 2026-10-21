@@ -37,14 +37,10 @@ EXE_NAME  ?= lasrecomp
 CC       := clang $(CROSS)
 CXX      := clang++ $(CROSS)
 IMGUI    := third_party/imgui
-# Scarlet is CPU-bound in the lifted guest on crowded academy scenes.  -O3
-# keeps strict FP semantics but lets clang inline/vectorize the generated basic
-# blocks more aggressively; the GAMELIB_ID stamp below forces a one-time clean
-# rebuild so stale -O2 objects cannot be reused.
-# -fno-math-errno / -fno-trapping-math: the lifted FP keeps FPCR/FPSR in Cpu (simd.h), never reads errno or host FP
-# exception flags, so sqrt & co. may inline to single instructions and FP code may be scheduled/vectorized more freely.
-# Results stay IEEE-identical (no fast-math: no reassociation, no NaN/inf assumptions).
-GENFLAGS := -O3 -fno-strict-aliasing -fno-math-errno -fno-trapping-math -fno-semantic-interposition -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+# Match the original LASRecomp game-code build profile.
+# Keep Scarlet-specific module/layout support, but compile lifted guest code
+# with the upstream optimization policy to reduce code size and build cost.
+GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
 
 # Function-entry profiling/hooks are deliberately compiled out of the normal
 # performance build. They add an atomic load/branch to every lifted function.
@@ -90,7 +86,7 @@ else
 EXE      := $(B)/$(EXE_NAME).exe
 DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
 OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S -DWIN32_LEAN_AND_MEAN -DNOMINMAX
-GENARCH  ?= -march=x86-64-v3 -mtune=znver2  # x86-v3 compatibility, scheduled for Ryzen 4000G/Zen 2
+GENARCH  ?= -march=x86-64-v3  # same policy as upstream LASRecomp on Windows
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
             -lvulkan-1 -lwinmm -lgdi32 -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared \
@@ -108,12 +104,9 @@ GAMELIB_LDFLAGS := -shared -fuse-ld=lld $(B)/lasrecomp.dll.a
 GAMELIB_SHARED := -shared  # (+ the import library: runtime/gamebuild.c)
 endif
 
-# Optional ThinLTO for the lifted game library. Scarlet's generated code is
-# partitioned into many C translation units; without LTO, direct guest calls
-# that cross a chunk boundary cannot be inlined. ThinLTO keeps the build
-# parallel/scalable while allowing the hottest tiny wrappers and SDK helpers to
-# inline across chunks. It is enabled by default on this Scarlet branch; THINLTO=0 remains available for build troubleshooting.
-THINLTO ?= 1
+# Upstream LASRecomp does not use LTO for the generated game library.
+# Keep ThinLTO available only as an explicit experiment; default stays off.
+THINLTO ?= 0
 LTO_JOBS ?= 6
 ifeq ($(THINLTO),1)
 GENFLAGS += -flto=thin
