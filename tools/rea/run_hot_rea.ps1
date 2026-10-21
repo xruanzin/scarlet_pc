@@ -204,7 +204,11 @@ if ($UseWslGhidra) {
             $Run = Invoke-WslRaw $Cmd
             $Json = @($Run.Output | ForEach-Object { "$_" })
             if ($Run.ExitCode -ne 0) {
-                ($Json -join [Environment]::NewLine) | Set-Content -LiteralPath ($Out + ".error.txt") -Encoding UTF8
+                $ErrorPath = $Out + ".error.txt"
+                $ErrorText = ($Json -join [Environment]::NewLine)
+                $ErrorText | Set-Content -LiteralPath $ErrorPath -Encoding UTF8
+                Write-Host "[rea] ERRO em $Addr (exit $($Run.ExitCode)):" -ForegroundColor Red
+                if ($ErrorText) { Write-Host $ErrorText -ForegroundColor DarkYellow }
                 continue
             }
             ($Json -join [Environment]::NewLine) | Set-Content -LiteralPath $Out -Encoding UTF8
@@ -272,5 +276,12 @@ else {
 
 Write-Host "[rea] $Done dossiers -> $OutDir" -ForegroundColor Green
 if ($Done -eq 0) {
-    throw "REA nao conseguiu produzir nenhum dossier; veja analysis\rea\functions\*.error.txt"
+    $Errors = @(Get-ChildItem -LiteralPath $OutDir -File -Filter "*.error.txt" -ErrorAction SilentlyContinue)
+    if ($Errors.Count) {
+        Write-Host "[rea] Nenhum dossier concluido. Erros salvos:" -ForegroundColor Red
+        foreach ($Err in $Errors) {
+            Write-Host ("  " + $Err.FullName) -ForegroundColor DarkYellow
+        }
+    }
+    throw "REA nao conseguiu produzir nenhum dossier."
 }
