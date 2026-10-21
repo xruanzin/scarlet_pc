@@ -7,6 +7,7 @@ param(
     [switch]$GameDllOnly,
     [switch]$FunctionInstrument,
     [switch]$GuestForceInline,
+    [switch]$LegacyGameProfile,
     [switch]$ThinLTO,
     [switch]$NoThinLTO,  # compatibility switch; upstream-style game builds already default to no ThinLTO
     [int]$LtoJobs = 4
@@ -19,6 +20,12 @@ if ($RuntimeOnly -and $GameDllOnly) {
 }
 if ($ThinLTO -and $NoThinLTO) {
     throw "-ThinLTO e -NoThinLTO sao mutuamente exclusivos."
+}
+if ($LegacyGameProfile -and $GuestForceInline) {
+    throw "-LegacyGameProfile e -GuestForceInline sao mutuamente exclusivos no teste de controle."
+}
+if ($LegacyGameProfile -and $NoThinLTO) {
+    throw "-LegacyGameProfile exige ThinLTO como na DLL funcional antiga; remova -NoThinLTO."
 }
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -124,7 +131,10 @@ if ((-not $GameDllOnly) -and (-not $IncrementalRuntime -or $ForceRuntime)) {
 # Match upstream LASRecomp by default: no LTO for generated game code.
 # ThinLTO is now opt-in only via -ThinLTO.
 $PerfMake = " THINLTO=0"
-if ($ThinLTO) {
+if ($LegacyGameProfile) {
+    $PerfMake = " LEGACY_GAME_PROFILE=1 THINLTO=1 LTO_JOBS=$LtoJobs"
+    Write-Host "[scarlet-build] lasgame.dll: perfil LEGACY Scarlet 0b2bbdf (-O3 + FP opts + znver2 + ThinLTO)." -ForegroundColor Magenta
+} elseif ($ThinLTO) {
     $PerfMake = " THINLTO=1 LTO_JOBS=$LtoJobs"
     Write-Host "[scarlet-build] ThinLTO ativado explicitamente para lasgame.dll." -ForegroundColor Green
 } else {
