@@ -71,14 +71,22 @@ if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
             $ReaPath = (($FindRea.Output -join [Environment]::NewLine).Trim())
             if ($ReaPath) {
                 $QuotedRea = "'" + ($ReaPath -replace "'","'\\''") + "'"
-                $Bootstrap = 'export GHIDRA_INSTALL_DIR="$HOME/ghidra_12.1.4_PUBLIC"; export JAVA_HOME="/usr/lib/jvm/java-21-openjdk-amd64"; '
+                $ReaBin = [IO.Path]::GetDirectoryName($ReaPath).Replace("\\","/")
+                $QuotedBin = "'" + ($ReaBin -replace "'","'\\''") + "'"
+                # REA uses #!/usr/bin/env node. A non-interactive WSL shell
+                # does not source NVM, so put the REA/Node bin directory on PATH.
+                $Bootstrap = "export PATH=$QuotedBin`:`$PATH; export GHIDRA_INSTALL_DIR=`"`$HOME/ghidra_12.1.4_PUBLIC`"; export JAVA_HOME=`"/usr/lib/jvm/java-21-openjdk-amd64`"; "
                 $Doctor = Invoke-WslRaw ($Bootstrap + $QuotedRea + ' doctor --provider ghidra --json')
-                if ($Doctor.ExitCode -eq 0) {
-                    $DoctorText = ($Doctor.Output -join [Environment]::NewLine)
-                    if ($DoctorText -match '"ghidra"\s*,?' -and $DoctorText -match '"available"\s*:\s*true') {
-                        $UseWslGhidra = $true
-                        $ReaShell = $QuotedRea
-                    }
+                $DoctorText = ($Doctor.Output -join [Environment]::NewLine)
+                if ($Doctor.ExitCode -eq 0 -and $DoctorText -match '"available"\s*:\s*true') {
+                    $UseWslGhidra = $true
+                    $ReaShell = $QuotedRea
+                    $WslReaBootstrap = $Bootstrap
+                }
+                else {
+                    Write-Host "[rea] REA foi encontrado no WSL, mas o doctor do Ghidra falhou:" -ForegroundColor Red
+                    Write-Host $DoctorText -ForegroundColor DarkYellow
+                    throw "REA/Ghidra WSL encontrado, mas indisponivel. O fallback Rizin foi bloqueado para nao mascarar este erro."
                 }
             }
         }
@@ -159,7 +167,7 @@ if ($UseWslGhidra) {
             $Addr = [string]$Fn.address
             $Out = Join-Path $OutDir (($Addr -replace "^0x","") + ".json")
             Write-Host "[rea] Ghidra $Module $Addr" -ForegroundColor Cyan
-            $Cmd = "export GHIDRA_INSTALL_DIR=`"`$HOME/ghidra_12.1.4_PUBLIC`"; export JAVA_HOME=`"/usr/lib/jvm/java-21-openjdk-amd64`"; export REA_GHIDRA_SEED_FILE='$SeedsWsl'; $ReaShell function '$ImageWsl' '$Addr' --target-format raw-binary --architecture arm64 --entry-point '$Base' --provider ghidra --json"
+            $Cmd = $WslReaBootstrap + "export REA_GHIDRA_SEED_FILE='$SeedsWsl'; $ReaShell function '$ImageWsl' '$Addr' --target-format raw-binary --architecture arm64 --entry-point '$Base' --provider ghidra --json"
             $Run = Invoke-WslRaw $Cmd
             $Json = @($Run.Output | ForEach-Object { "$_" })
             if ($Run.ExitCode -ne 0) {
