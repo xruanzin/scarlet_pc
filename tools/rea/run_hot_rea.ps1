@@ -189,6 +189,82 @@ function Convert-WindowsPathToWsl([string]$Path) {
     throw "Caminho Windows nao suportado para WSL: $Path"
 }
 
+function New-FocusedRaw {
+    param(
+        [string]$Module,
+        $Info,
+        [string]$Addr
+    )
+
+    if ($FocusWindowMiB -lt 1) { throw "FocusWindowMiB deve ser >= 1." }
+
+    $Source = [string]$Info.image
+    if (-not [IO.Path]::IsPathRooted($Source)) { $Source = Join-Path $RepoRoot $Source }
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+        throw "Imagem raw nao encontrada: $Source"
+    }
+
+    $BaseNum = [Convert]::ToUInt64(([string]$Info.base).Substring(2), 16)
+    $AddrNum = [Convert]::ToUInt64($Addr.Substring(2), 16)
+    $FileLen = (Get-Item -LiteralPath $Source).Length
+    if ($AddrNum -lt $BaseNum) { throw "$Addr esta antes da base $($Info.base)." }
+
+    [long]$Offset = [long]($AddrNum - $BaseNum)
+    if ($Offset -ge $FileLen) { throw "$Addr esta fora da imagem $Module." }
+
+    [long]$Window = [long]$FocusWindowMiB * 1MB
+    if ($Window -gt $FileLen) { $Window = $FileLen }
+    [long]$Start = [Math]::Max(0, $Offset - [long]($Window / 2))
+    $Start = [long]([Math]::Floor($Start / 65536.0) * 65536)
+    if (($Start + $Window) -gt $FileLen) {
+        $Start = [Math]::Max(0, $FileLen - $Window)
+        $Start = [long]([Math]::Floor($Start / 65536.0) * 65536)
+    }
+    [long]$End = [Math]::Min($FileLen, $Start + $Window)
+    [long]$Length = $End - $Start
+
+    $FocusDir = Join-Path $RepoRoot "analysis\rea\focus"
+    $null = New-Item -ItemType Directory -Force -Path $FocusDir
+    $Tag = $Addr -replace "^0x",""
+    $Dest = Join-Path $FocusDir ("{0}.{1}.{2}MiB.bin" -f $Module,$Tag,$FocusWindowMiB)
+    $Seed = Join-Path $FocusDir ("{0}.{1}.seeds.tsv" -f $Module,$Tag)
+
+    $In = [IO.File]::OpenRead($Source)
+    $Out = [IO.File]::Create($Dest)
+    try {
+        $null = $In.Seek($Start, [IO.SeekOrigin]::Begin)
+        [long]$Remaining = $Length
+        $Buffer = New-Object byte[] (1MB)
+        while ($Remaining -gt 0) {
+            $Want = [int][Math]::Min($Buffer.Length, $Remaining)
+            $Read = $In.Read($Buffer, 0, $Want)
+            if ($Read -le 0) { throw "EOF inesperado criando imagem focada." }
+            $Out.Write($Buffer, 0, $Read)
+            $Remaining -= $Read
+        }
+    }
+    finally {
+        $Out.Dispose()
+        $In.Dispose()
+    }
+
+    $Tab = [char]9
+    @(
+        ("# address{0}kind{0}name" -f $Tab),
+        ("{0}{1}function{1}hot_{2}" -f $Addr,$Tab,$Tag)
+    ) | Set-Content -LiteralPath $Seed -Encoding ascii
+
+    $FocusedBaseNum = $BaseNum + [uint64]$Start
+    $FocusedBase = "0x{0:x}" -f $FocusedBaseNum
+    [PSCustomObject]@{
+        Image = $Dest
+        Seeds = $Seed
+        Base = $FocusedBase
+        Size = $Length
+        SourceOffset = $Start
+    }
+}
+
 function Resolve-WindowsRea {
     foreach ($Name in @("rea.cmd","rea.exe","rea")) {
         $Cmd = Get-Command $Name -ErrorAction SilentlyContinue
