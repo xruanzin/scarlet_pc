@@ -281,20 +281,44 @@ $Done = 0
 if ($UseWslGhidra) {
     Write-Host "[rea] backend: REA 6.7.0 / Ghidra / WSL" -ForegroundColor Green
     Write-Host "[rea] Ghidra startup timeout: $GhidraTimeoutMs ms; max heap: $GhidraMaxMem" -ForegroundColor DarkGray
+    if ($Focused) { Write-Host "[rea] focused window: $FocusWindowMiB MiB por hotspot" -ForegroundColor Green }
+    if ($FastAnalyzers) { Write-Host "[rea] fast analyzers: 3 passes caros desabilitados" -ForegroundColor Green }
 
     foreach ($Prop in $Manifest.modules.PSObject.Properties) {
         $Module = $Prop.Name
         $Info = $Prop.Value
-        $ImageWsl = Convert-WindowsPathToWsl ([string]$Info.image)
-        $SeedsWsl = Convert-WindowsPathToWsl ([string]$Info.seeds)
-        $Base = [string]$Info.base
+        $Fns = @($Info.hot_functions)
+        if ($Address) {
+            $Fns = @($Fns | Where-Object { ([string]$_.address).ToLowerInvariant() -eq $Address.ToLowerInvariant() })
+        }
+        else {
+            $Fns = @($Fns | Select-Object -First $Top)
+        }
 
-        foreach ($Fn in @($Info.hot_functions | Select-Object -First $Top)) {
+        foreach ($Fn in $Fns) {
             $Addr = [string]$Fn.address
             $Out = Join-Path $OutDir (($Addr -replace "^0x","") + ".json")
+
+            if ($Focused) {
+                $Focus = New-FocusedRaw -Module $Module -Info $Info -Addr $Addr
+                $ImageWsl = Convert-WindowsPathToWsl ([string]$Focus.Image)
+                $SeedsWsl = Convert-WindowsPathToWsl ([string]$Focus.Seeds)
+                $Base = [string]$Focus.Base
+                Write-Host ("[rea] focused: {0:N1} MiB, base {1}" -f ($Focus.Size / 1MB), $Base) -ForegroundColor Green
+            }
+            else {
+                $ImageWsl = Convert-WindowsPathToWsl ([string]$Info.image)
+                $SeedsWsl = Convert-WindowsPathToWsl ([string]$Info.seeds)
+                $Base = [string]$Info.base
+            }
+
             Write-Host "[rea] Ghidra $Module $Addr" -ForegroundColor Cyan
             Write-Host "[rea] image: $ImageWsl" -ForegroundColor DarkGray
-            $Cmd = $WslReaBootstrap + "export REA_GHIDRA_SEED_FILE='$SeedsWsl'; $ReaShell function '$ImageWsl' '$Addr' --target-format raw-binary --architecture arm64 --entry-point '$Base' --provider ghidra --json"
+            $FastEnv = ""
+            if ($FastAnalyzers) {
+                $FastEnv = "export REA_GHIDRA_DISABLED_ANALYZERS='Decompiler Switch Analysis,Decompiler Parameter ID,Call Convention ID'; "
+            }
+            $Cmd = $WslReaBootstrap + $FastEnv + "export REA_GHIDRA_SEED_FILE='$SeedsWsl'; $ReaShell function '$ImageWsl' '$Addr' --target-format raw-binary --architecture arm64 --entry-point '$Base' --provider ghidra --json"
             $Run = Invoke-WslRaw $Cmd
             $Json = @($Run.Output | ForEach-Object { "$_" })
             if ($Run.ExitCode -ne 0) {
