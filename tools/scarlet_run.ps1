@@ -540,6 +540,30 @@ if ($PerformanceDir) {
             if ($PyCmd) { $Python = $PyCmd.Source } else { $Python = $null }
         }
 
+        # Merge every FNPROF capture into a REA-ready ranking. Keep it inside
+        # the performance bundle so the next step never depends on a separate
+        # manual command.
+        $HotAnalyzer = Join-Path $PSScriptRoot 'rea\analyze_hot.py'
+        if ($Python -and (Test-Path -LiteralPath $HotAnalyzer -PathType Leaf)) {
+            try {
+                $ProfilesForRea = @(Get-ChildItem -LiteralPath $PerformanceDir -Filter 'fnprof-auto-*.txt' -File -ErrorAction SilentlyContinue | Sort-Object Name)
+                if (-not $ProfilesForRea.Count) {
+                    $ProfilesForRea = @(Get-ChildItem -LiteralPath $PerformanceDir -Filter 'fnprof.txt' -File -ErrorAction SilentlyContinue)
+                }
+                if ($ProfilesForRea.Count) {
+                    $HotJson = Join-Path $PerformanceDir 'hot_functions.json'
+                    $ProfileArgs = @($ProfilesForRea | ForEach-Object { $_.FullName })
+                    & $Python $HotAnalyzer @ProfileArgs -o $HotJson
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "[scarlet-run] Hotspots REA: $HotJson" -ForegroundColor Cyan
+                    }
+                }
+            }
+            catch {
+                Write-Host "[scarlet-run] Ranking REA dos hotspots falhou: $_" -ForegroundColor Yellow
+            }
+        }
+
         # Resolve/disassemble a small set of the hottest guest entries automatically.
         # This is diagnostic-only and runs after the game has exited.
         $Inspector = Join-Path $PSScriptRoot 'scarlet_inspect_addr.py'
