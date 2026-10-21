@@ -135,10 +135,20 @@ if ($RegenerateHot) {
     }
     foreach ($HotModule in @("sdk", "main")) {
         Write-Host "[scarlet-run] Regenerando modulo quente $HotModule a partir de $ExeFs ..." -ForegroundColor Magenta
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $GenerateScript -ExeFs $ExeFs -Module $HotModule
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $GenerateScript -ExeFs $ExeFs -Module $HotModule -Clean
         if ($LASTEXITCODE -ne 0) {
             throw "Geracao de $HotModule falhou (exit $LASTEXITCODE)."
         }
+    }
+
+    # Guard against stale generated chunks from an interrupted/older generator.
+    # The SignalLightEvent fast path must use an integer weak=false argument so
+    # generated C does not depend on <stdbool.h>.
+    $StaleAtomic = Get-ChildItem -LiteralPath (Join-Path $RepoRoot "generated\sdk") -Filter '*.c' -File -ErrorAction SilentlyContinue |
+        Select-String -SimpleMatch '__atomic_compare_exchange_n(_sle_state, &_sle_expected, 2, false' |
+        Select-Object -First 1
+    if ($StaleAtomic) {
+        throw "generated\sdk ainda contem fast path antigo com 'false': $($StaleAtomic.Path):$($StaleAtomic.LineNumber)"
     }
 
     # Generator/HLE metadata changes only become real CPU optimizations after the
