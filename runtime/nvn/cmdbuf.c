@@ -264,16 +264,37 @@ static uint64_t hostseg_take(NvnCmdBuf *cb, uint32_t need, uint32_t *actual_size
     uint32_t want = hostseg_alloc_size(need);
     pthread_mutex_lock(&g_hostseg_lock);
 
-    // BeginRecording overwrites exactly one tiny guest CMD_JUMP slot. Recycle
-    // the previous stream for that slot while we already hold the allocator
-    // lock, then immediately reuse a free segment below. This replaces two
-    // lock acquisitions + a separate range walk on every recorded list.
+    // BeginRecording overwrites exactly one tiny guest CMD_JUMP slot. In the
+    // common case the previous list used one unpinned 32 KiB segment. Reuse that
+    // exact segment in place instead of release -> free-list push -> free-list
+    // pop. Scarlet does this over a million times per run, so avoiding the
+    // allocator churn materially reduces BeginRecording CPU time.
     if (replace_slot) {
         int old_head = hostseg_head_from_slot_locked(replace_slot);
-        if (old_head >= 0) hostseg_release_chain_locked(old_head);
+        if (old_head >= 0) {
+            HostSeg *old = &g_hostseg[old_head];
+            if (!old->refs && old->size >= want) {
+                int tail = old->chain_next;
+                if (tail >= 0) hostseg_release_chain_locked(tail);
+                old->chain_next = -1;
+                old->chain_head = false;
+                old->pending_release = false;
+                old->busy = true;
+                old->origin_lo = cb->host_origin_lo;
+                old->origin_hi = cb->host_origin_hi;
+                old->born = g_take_count + 1;
+                old->free_next = -1;
+                old->on_free32 = false;
+                pick = old_head;
+                mem = old->mem;
+                *actual_size = old->size;
+            } else {
+                hostseg_release_chain_locked(old_head);
+            }
+        }
     }
 
-    pick = hostseg_best_free_locked(want);
+    if (!mem) pick = hostseg_best_free_locked(want);
     // Reclaim stale chains before growing a large backing pool. This is deliberately
     // opportunistic: live/pinned command streams are never reclaimed.
     if (pick < 0 && g_hostseg_bytes >= (256ull << 20)) {
