@@ -4,7 +4,8 @@ param(
     [int]$Top = 8,
     [string]$Distro = "",
     [switch]$ReuseRaw,
-    [int]$GhidraTimeoutMs = 1200000
+    [int]$GhidraTimeoutMs = 1200000,
+    [string]$GhidraMaxMem = "4G"
 )
 
 $ErrorActionPreference = "Stop"
@@ -106,7 +107,7 @@ if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
                 }
                 # REA uses #!/usr/bin/env node. A non-interactive WSL shell
                 # does not source NVM, so put the REA/Node bin directory on PATH.
-                $Bootstrap = ('export PATH={0}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export GHIDRA_INSTALL_DIR="$HOME/ghidra_12.1.4_PUBLIC"; export JAVA_HOME="/usr/lib/jvm/java-21-openjdk-amd64"; export REA_GHIDRA_STARTUP_TIMEOUT_MS="{1}"; ' -f $QuotedBin, $GhidraTimeoutMs)
+                $Bootstrap = ('export PATH={0}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export GHIDRA_INSTALL_DIR="$HOME/ghidra_12.1.4_PUBLIC"; export JAVA_HOME="/usr/lib/jvm/java-21-openjdk-amd64"; export REA_GHIDRA_STARTUP_TIMEOUT_MS="{1}"; export GHIDRA_HEADLESS_MAXMEM="{2}"; ' -f $QuotedBin, $GhidraTimeoutMs, $GhidraMaxMem)
                 Write-Host "[rea] WSL REA: $ReaPath" -ForegroundColor DarkGray
                 $Doctor = Invoke-WslRaw ($Bootstrap + $QuotedRea + ' doctor --provider ghidra --json')
                 $DoctorText = ($Doctor.Output -join [Environment]::NewLine)
@@ -199,7 +200,7 @@ function Resolve-WindowsRea {
 $Done = 0
 if ($UseWslGhidra) {
     Write-Host "[rea] backend: REA 6.7.0 / Ghidra / WSL" -ForegroundColor Green
-    Write-Host "[rea] Ghidra startup timeout: $GhidraTimeoutMs ms" -ForegroundColor DarkGray
+    Write-Host "[rea] Ghidra startup timeout: $GhidraTimeoutMs ms; max heap: $GhidraMaxMem" -ForegroundColor DarkGray
 
     foreach ($Prop in $Manifest.modules.PSObject.Properties) {
         $Module = $Prop.Name
