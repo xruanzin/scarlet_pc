@@ -484,7 +484,9 @@ void plat_init(void) {
     };
     SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof pt);
     SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
-    limit_process_memory();
+    // Do not impose a private-commit job limit here. Scarlet's guest heap can
+    // legitimately exceed the conservative boot-time cap while Windows still
+    // has ample system commit available through RAM + pagefile.
 }
 
 bool plat_exe_path(char *buf, size_t size) {
