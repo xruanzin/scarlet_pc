@@ -135,7 +135,7 @@ if ($RegenerateHot) {
     }
     foreach ($HotModule in @("sdk", "main")) {
         Write-Host "[scarlet-run] Regenerando modulo quente $HotModule a partir de $ExeFs ..." -ForegroundColor Magenta
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $GenerateScript -ExeFs $ExeFs -Module $HotModule -Clean
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $GenerateScript -ExeFs $ExeFs -Module $HotModule
         if ($LASTEXITCODE -ne 0) {
             throw "Geracao de $HotModule falhou (exit $LASTEXITCODE)."
         }
