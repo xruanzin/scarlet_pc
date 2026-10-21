@@ -72,9 +72,24 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "REA terminou com exit $LASTEXITCODE." }
 
     $ResultDir = Join-Path $RepoRoot "analysis\rea\functions"
+    $Stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+    $BundleDir = Join-Path $RepoRoot "analysis\rea"
+    $Zip = Join-Path $RepoRoot ("scarlet-rea-" + $Stamp + ".zip")
+    if (Test-Path -LiteralPath $Zip) { Remove-Item -LiteralPath $Zip -Force }
+    $BundleItems = @(
+        (Join-Path $RepoRoot "analysis\rea\functions"),
+        (Join-Path $RepoRoot "analysis\rea\raw\manifest.json")
+    ) | Where-Object { Test-Path -LiteralPath $_ }
+    if ($BundleItems.Count) {
+        Compress-Archive -Path $BundleItems -DestinationPath $Zip -CompressionLevel Fastest
+    }
+
     Write-Host ""
     Write-Host "[scarlet-rea] ANALISE REA CONCLUIDA" -ForegroundColor Green
     Write-Host "[scarlet-rea] Dossiers: $ResultDir" -ForegroundColor Cyan
+    if (Test-Path -LiteralPath $Zip) {
+        Write-Host "REA_ZIP=$Zip" -ForegroundColor Cyan
+    }
 }
 finally {
     if ($MountPid -gt 0) {
