@@ -101,8 +101,21 @@ elseif (-not (Test-Path -LiteralPath $GameRoot -PathType Container)) {
 
 . (Join-Path $PSScriptRoot "scarlet_graphics_backend.ps1")
 if (-not $DirectXDirectory) { $DirectXDirectory = Join-Path $RepoRoot "tools\directx\mesa" }
-$Exe = Join-Path $RepoRoot "build\ScarletRecomp.exe"
-$GameDll = Join-Path $RepoRoot "build\lasgame.dll"
+
+# Full profiling needs FN_ENTER compiled into every lifted guest function.
+# Keep that expensive diagnostic build isolated from the normal performance build.
+$BuildVariantDir = if ($Profile) { Join-Path $RepoRoot "build\profile" } else { Join-Path $RepoRoot "build" }
+$Exe = Join-Path $BuildVariantDir "ScarletRecomp.exe"
+$GameDll = Join-Path $BuildVariantDir "lasgame.dll"
+$BuildScript = Join-Path $PSScriptRoot "scarlet_build_windows.ps1"
+$BuildFlavorArgs = @()
+if ($Profile) { $BuildFlavorArgs += "-FunctionInstrument" }
+
+if ($Profile -and (-not (Test-Path -LiteralPath $Exe -PathType Leaf) -or -not (Test-Path -LiteralPath $GameDll -PathType Leaf))) {
+    Write-Host "[scarlet-run] Preparando build PROFILE instrumentado em build\profile..." -ForegroundColor Magenta
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO @BuildFlavorArgs
+    if ($LASTEXITCODE -ne 0) { throw "Build PROFILE falhou (exit $LASTEXITCODE). Envie scarlet_build_profile.log." }
+}
 if ($DirectPackage) {
     $ExeFs = [string]$DirectPackageInfo.ExeFs
     $RomFs = [string]$DirectPackageInfo.RomFsDir
@@ -120,7 +133,7 @@ if ($env:LARECOMP_SKIP_AUTO_BUILD) {
 if (Test-Path -LiteralPath $Exe -PathType Leaf) {
     $Head = (& git -C $RepoRoot rev-parse HEAD 2>$null)
     if ($LASTEXITCODE -ne 0 -or -not $Head) { $Head = "" } else { $Head = $Head.Trim() }
-    $Marker = Join-Path $RepoRoot "build\.runtime_build_head"
+    $Marker = Join-Path $BuildVariantDir ".runtime_build_head"
     $BuiltHead = if (Test-Path -LiteralPath $Marker) { (Get-Content -LiteralPath $Marker -Raw).Trim() } else { "" }
     Write-Host "[scarlet-run] Runtime HEAD atual: $Head"
     Write-Host "[scarlet-run] Runtime HEAD do EXE: $BuiltHead"
@@ -170,19 +183,18 @@ if (Test-Path -LiteralPath $Exe -PathType Leaf) {
         if (-not $NeedNativeBuild) {
             Write-Host "[scarlet-run] HEAD mudou apenas em scripts/docs; mantendo EXE/DLL ja compilados." -ForegroundColor DarkGray
         } else {
-            $BuildScript = Join-Path $PSScriptRoot "scarlet_build_windows.ps1"
-            $ThinLtoMarker = Join-Path $RepoRoot "build\.thinlto_enabled"
+            $ThinLtoMarker = Join-Path $BuildVariantDir ".thinlto_enabled"
             if ($RuntimeOnlyBuild) {
                 Write-Host "[scarlet-run] Mudou apenas o runtime; recompilando ScarletRecomp.exe sem relinkar lasgame.dll..." -ForegroundColor Yellow
                 if (Test-Path -LiteralPath $ThinLtoMarker -PathType Leaf) {
-                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly -ThinLTO
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime @BuildFlavorArgs -RuntimeOnly @BuildFlavorArgs -ThinLTO @BuildFlavorArgs
                 } else {
                     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly
                 }
             } else {
                 Write-Host "[scarlet-run] Codigo do jogo/runtime mudou; executando build completo..." -ForegroundColor Yellow
                 if (Test-Path -LiteralPath $ThinLtoMarker -PathType Leaf) {
-                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -ThinLTO @BuildFlavorArgs
                 } else {
                     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime
                 }
@@ -261,10 +273,13 @@ if ($DirectPackage) {
 }
 Write-Host "[scarlet-run] Log: $Log"
 $CurrentHead = (& git -C $RepoRoot rev-parse HEAD 2>$null)
-$MarkerNow = Join-Path $RepoRoot "build\.runtime_build_head"
+$MarkerNow = Join-Path $BuildVariantDir ".runtime_build_head"
 $BuiltHeadNow = if (Test-Path -LiteralPath $MarkerNow) { (Get-Content -LiteralPath $MarkerNow -Raw).Trim() } else { "<sem marcador>" }
 Write-Host "[scarlet-run] SCRIPT_REV=$($CurrentHead.Trim())"
 Write-Host "[scarlet-run] EXE_REV=$BuiltHeadNow"
+if ($Profile) {
+    Write-Host "[scarlet-run] PROFILE guest instrumentation: ON (build\profile, FNINSTRUMENT=1)" -ForegroundColor Magenta
+}
 Write-Host ""
 
 # Windows PowerShell 5.1 turns native stderr into NativeCommandError when
