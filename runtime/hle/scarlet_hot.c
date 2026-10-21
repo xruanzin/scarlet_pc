@@ -283,6 +283,11 @@ static bool scarlet_patch_guest(uint64_t addr, GuestFn helper, GuestFn *original
     }
 
     GuestFn original = *slot;
+    // Publish the untouched body before changing any call-site. Even if a
+    // later table-page protection fails, already-patched direct calls retain
+    // a valid exact fallback.
+    *original_out = original;
+
     int direct = scarlet_patch_direct_refs(original, helper);
     if (direct < 0) {
         LOG("[scarlet-hot] %llx: direct-call patch setup failed\n",
@@ -300,7 +305,6 @@ static bool scarlet_patch_guest(uint64_t addr, GuestFn helper, GuestFn *original
     DWORD ignored;
     VirtualProtect(slot, sizeof *slot, old_prot, &ignored);
 
-    *original_out = original;
     LOG("[scarlet-hot] %llx patched: %d direct CALL/JMP sites + function table\n",
         (unsigned long long)addr, direct);
     return true;
