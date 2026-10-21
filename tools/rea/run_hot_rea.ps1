@@ -66,11 +66,18 @@ if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
     if ($Probe.ExitCode -eq 0 -and (($Probe.Output -join "") -match "ready")) {
         # Prefer a directly installed REA under NVM. This works even when
         # ~/.bashrc is intentionally skipped by a non-interactive shell.
-        $FindRea = Invoke-WslRaw 'find "$HOME/.nvm/versions/node" -type f -path "*/bin/rea" -perm -u+x 2>/dev/null | sort -V | tail -n 1'
+        $FindRea = Invoke-WslRaw 'ls -1 "$HOME"/.nvm/versions/node/*/bin/rea 2>/dev/null | sort -V | tail -n 1'
         if ($FindRea.ExitCode -eq 0) {
             $ReaPath = (($FindRea.Output -join [Environment]::NewLine).Trim())
             if ($ReaPath -and $ReaPath -notmatch '^/') {
                 throw "Caminho REA invalido retornado pelo WSL: $ReaPath"
+            }
+            if (-not $ReaPath) {
+                $NvmDiag = Invoke-WslRaw 'ls -la "$HOME/.nvm/versions/node" 2>/dev/null; ls -la "$HOME"/.nvm/versions/node/*/bin/rea 2>/dev/null'
+                $NvmText = ($NvmDiag.Output -join [Environment]::NewLine)
+                Write-Host "[rea] WSL ativo, mas o REA do NVM nao foi localizado:" -ForegroundColor Red
+                if ($NvmText) { Write-Host $NvmText -ForegroundColor DarkYellow }
+                throw "REA instalado no WSL nao foi localizado; fallback Rizin bloqueado."
             }
             if ($ReaPath) {
                 $QuotedRea = "'" + ($ReaPath -replace "'","'\\''") + "'"
