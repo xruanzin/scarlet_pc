@@ -7,3 +7,8 @@ _ZN2nn2os11GetTlsValueENS0_7TlsSlotE
 
 memcpy
 strcmp
+memset
+strlen
+strcpy
+stpcpy
+strcat
