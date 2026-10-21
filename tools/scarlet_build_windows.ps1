@@ -15,7 +15,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $Bash = "C:\msys64\usr\bin\bash.exe"
 $BuildRel = if ($FunctionInstrument) { "build/profile" } else { "build" }
-$BuildDir = Join-Path $RepoRoot ($BuildRel -replace "/", "\")
+$BuildDir = Join-Path $RepoRoot $BuildRel
 $BuildLogName = if ($FunctionInstrument) { "scarlet_build_profile.log" } else { "scarlet_build.log" }
 
 if ($Setup -or -not (Test-Path -LiteralPath $Bash)) {
