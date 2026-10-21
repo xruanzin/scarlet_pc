@@ -66,13 +66,20 @@ if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
     if ($Probe.ExitCode -eq 0 -and (($Probe.Output -join "") -match "ready")) {
         # Prefer a directly installed REA under NVM. This works even when
         # ~/.bashrc is intentionally skipped by a non-interactive shell.
-        $FindRea = Invoke-WslRaw 'for p in "$HOME"/.nvm/versions/node/*/bin/rea "$HOME"/.local/bin/rea /usr/local/bin/rea /usr/bin/rea; do if [ -x "$p" ]; then printf "%s\n" "$p"; fi; done | sort -V | tail -n 1'
+        $FindRea = Invoke-WslRaw 'find "$HOME/.nvm/versions/node" -type f -path "*/bin/rea" -perm -u+x 2>/dev/null | sort -V | tail -n 1'
         if ($FindRea.ExitCode -eq 0) {
             $ReaPath = (($FindRea.Output -join [Environment]::NewLine).Trim())
+            if ($ReaPath -and $ReaPath -notmatch '^/') {
+                throw "Caminho REA invalido retornado pelo WSL: $ReaPath"
+            }
             if ($ReaPath) {
                 $QuotedRea = "'" + ($ReaPath -replace "'","'\\''") + "'"
                 $ReaBin = [IO.Path]::GetDirectoryName($ReaPath).Replace("\\","/")
                 $QuotedBin = "'" + ($ReaBin -replace "'","'\\''") + "'"
+                $NodeProbe = Invoke-WslRaw ("test -x " + $QuotedBin + "/node")
+                if ($NodeProbe.ExitCode -ne 0) {
+                    throw "Node do NVM nao encontrado ao lado do REA: $ReaBin/node"
+                }
                 # REA uses #!/usr/bin/env node. A non-interactive WSL shell
                 # does not source NVM, so put the REA/Node bin directory on PATH.
                 $Bootstrap = ('export PATH={0}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export GHIDRA_INSTALL_DIR="$HOME/ghidra_12.1.4_PUBLIC"; export JAVA_HOME="/usr/lib/jvm/java-21-openjdk-amd64"; ' -f $QuotedBin)
