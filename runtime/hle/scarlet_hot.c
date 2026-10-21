@@ -134,6 +134,6 @@ void scarlet_hot_configure(void) {
         return;
     }
 
-    hle_override(SCARLET_REF_ASSIGN, scarlet_ref_assign, "scarlet_ref_assign");
+    hle_override_cached(SCARLET_REF_ASSIGN, scarlet_ref_assign, "scarlet_ref_assign");
     LOG("[scarlet-hot] registered 700270c4ac runtime-only override\n");
 }
