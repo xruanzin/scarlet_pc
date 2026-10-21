@@ -45,18 +45,49 @@ if ($Distro) { $WslPrefix = @("-d", $Distro) }
 $UseWslGhidra = $false
 $ReaShell = ""
 
+# bash -lc does not reliably load Ubuntu's interactive .bashrc, and NVM is
+# normally registered there. Bootstrap NVM/JDK/Ghidra explicitly so REA works
+# from PowerShell exactly as it does in the user's interactive Ubuntu shell.
+$WslBootstrap = 'export NVM_DIR="$HOME/.nvm"; if [ -s "$NVM_DIR/nvm.sh" ]; then . "$NVM_DIR/nvm.sh"; fi; export GHIDRA_INSTALL_DIR="${GHIDRA_INSTALL_DIR:-$HOME/ghidra_12.1.4_PUBLIC}"; export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk-amd64}"; '
+
+function Invoke-WslCaptured([string]$Command) {
+    # Windows PowerShell 5.1 can turn native stderr into ErrorRecords when the
+    # global ErrorActionPreference is Stop. Warnings must not become failures;
+    # the native exit code is authoritative.
+    $SavedPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $Output = @(& wsl.exe @WslPrefix -- bash -lc ($WslBootstrap + $Command) 2>&1)
+        $Code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $SavedPreference
+    }
+    [PSCustomObject]@{ Output = $Output; ExitCode = $Code }
+}
+
 if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
-    $WslProbe = @(& wsl.exe @WslPrefix -- bash -lc "printf ready" 2>&1)
-    if ($LASTEXITCODE -eq 0 -and (($WslProbe -join "") -match "ready")) {
-        $WslRea = @(& wsl.exe @WslPrefix -- bash -lc "if command -v rea >/dev/null 2>&1; then echo rea; elif command -v npx >/dev/null 2>&1; then echo npx; fi" 2>&1)
-        if ($LASTEXITCODE -eq 0) {
-            $Which = ($WslRea -join "").Trim()
-            if ($Which -eq "rea") { $ReaShell = "rea" }
-            elseif ($Which -eq "npx") { $ReaShell = "npx -y rea-agents@6.7.0" }
+    $Probe = Invoke-WslCaptured "printf ready"
+    if ($Probe.ExitCode -eq 0 -and (($Probe.Output -join "") -match "ready")) {
+        $ReaProbe = Invoke-WslCaptured 'if command -v rea >/dev/null 2>&1; then command -v rea; elif command -v npx >/dev/null 2>&1; then echo __NPX__; fi'
+        if ($ReaProbe.ExitCode -eq 0) {
+            $Which = (($ReaProbe.Output | ForEach-Object { "$_" }) -join "").Trim()
+            if ($Which -and $Which -ne "__NPX__") {
+                # Use the absolute NVM-installed REA path to avoid PATH/profile drift.
+                $ReaShell = "'" + ($Which -replace "'","'\\''") + "'"
+            }
+            elseif ($Which -eq "__NPX__") {
+                $ReaShell = "npx -y rea-agents@6.7.0"
+            }
 
             if ($ReaShell) {
-                $Doctor = @(& wsl.exe @WslPrefix -- bash -lc "$ReaShell doctor --provider ghidra --json" 2>&1)
-                if ($LASTEXITCODE -eq 0) { $UseWslGhidra = $true }
+                $Doctor = Invoke-WslCaptured "$ReaShell doctor --provider ghidra --json"
+                if ($Doctor.ExitCode -eq 0) {
+                    $DoctorText = ($Doctor.Output | ForEach-Object { "$_" }) -join [Environment]::NewLine
+                    if ($DoctorText -match '"available"\s*:\s*true' -or $DoctorText -match '"healthy"\s*:\s*true') {
+                        $UseWslGhidra = $true
+                    }
+                }
             }
         }
     }
@@ -105,11 +136,19 @@ function Resolve-WindowsRea {
 }
 
 function Invoke-WslText([string[]]$Args) {
-    $r = & wsl.exe @WslPrefix -- @Args 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $SavedPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $r = @(& wsl.exe @WslPrefix -- @Args 2>&1)
+        $Code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $SavedPreference
+    }
+    if ($Code -ne 0) {
         throw ($r -join [Environment]::NewLine)
     }
-    return ($r -join [Environment]::NewLine).Trim()
+    return (($r | ForEach-Object { "$_" }) -join [Environment]::NewLine).Trim()
 }
 
 $Done = 0
@@ -129,8 +168,9 @@ if ($UseWslGhidra) {
             $Out = Join-Path $OutDir (($Addr -replace "^0x","") + ".json")
             Write-Host "[rea] Ghidra $Module $Addr" -ForegroundColor Cyan
             $Cmd = "export REA_GHIDRA_SEED_FILE='$SeedsWsl'; $ReaShell function '$ImageWsl' '$Addr' --target-format raw-binary --architecture arm64 --entry-point '$Base' --provider ghidra --json"
-            $Json = & wsl.exe @WslPrefix -- bash -lc $Cmd 2>&1
-            if ($LASTEXITCODE -ne 0) {
+            $Run = Invoke-WslCaptured $Cmd
+            $Json = @($Run.Output | ForEach-Object { "$_" })
+            if ($Run.ExitCode -ne 0) {
                 ($Json -join [Environment]::NewLine) | Set-Content -LiteralPath ($Out + ".error.txt") -Encoding UTF8
                 continue
             }
