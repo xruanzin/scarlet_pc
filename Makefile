@@ -42,6 +42,16 @@ IMGUI    := third_party/imgui
 # with the upstream optimization policy to reduce code size and build cost.
 GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
 
+# Optional A/B performance mode inspired by mature Switch static-recomp builds:
+# force only the tiny scalar guest helpers (flags/arithmetic/bit ops/division)
+# to inline. Memory accesses are already macros; atomics and dispatch stay
+# untouched to avoid code-size blowups. Off by default while the current DLL
+# rebuild regression is being isolated.
+GUEST_FORCE_INLINE ?= 0
+ifeq ($(GUEST_FORCE_INLINE),1)
+GENFLAGS += -DLARECOMP_GUEST_FORCE_INLINE=1
+endif
+
 # Function-entry profiling/hooks are deliberately compiled out of the normal
 # performance build. They add an atomic load/branch to every lifted function.
 # Re-enable only for targeted diagnostic builds.
