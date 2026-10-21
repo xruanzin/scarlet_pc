@@ -131,9 +131,9 @@ static void scarlet_ref_assign(Cpu *c) {
             return;
         }
         next_rc = (int32_t *)(uintptr_t)(next + 0x28);
-        int32_t before = __atomic_fetch_add(next_rc, 1, __ATOMIC_ACQ_REL);
-        if (__builtin_expect(before == -1, 0)) {
-            __atomic_fetch_sub(next_rc, 1, __ATOMIC_ACQ_REL);
+        int32_t after_inc = __atomic_add_fetch(next_rc, 1, __ATOMIC_ACQ_REL);
+        if (__builtin_expect(after_inc == 0, 0)) {
+            __atomic_sub_fetch(next_rc, 1, __ATOMIC_ACQ_REL);
             g_orig_ref_assign(c);
             return;
         }
@@ -144,18 +144,17 @@ static void scarlet_ref_assign(Cpu *c) {
     if (old) {
         if (__builtin_expect(!scarlet_guest_range(old, 0x2c), 0)) {
             ST64(owner + 0x38, old);
-            if (next_rc) __atomic_fetch_sub(next_rc, 1, __ATOMIC_ACQ_REL);
+            if (next_rc) __atomic_sub_fetch(next_rc, 1, __ATOMIC_ACQ_REL);
             g_orig_ref_assign(c);
             return;
         }
 
         int32_t *old_rc = (int32_t *)(uintptr_t)(old + 0x28);
-        int32_t before = __atomic_fetch_sub(old_rc, 1, __ATOMIC_ACQ_REL);
-        int32_t after = before - 1;
-        if (__builtin_expect(before == 0, 0)) {
-            __atomic_fetch_add(old_rc, 1, __ATOMIC_ACQ_REL);
+        int32_t after = __atomic_sub_fetch(old_rc, 1, __ATOMIC_ACQ_REL);
+        if (__builtin_expect(after == -1, 0)) {
+            __atomic_add_fetch(old_rc, 1, __ATOMIC_ACQ_REL);
             ST64(owner + 0x38, old);
-            if (next_rc) __atomic_fetch_sub(next_rc, 1, __ATOMIC_ACQ_REL);
+            if (next_rc) __atomic_sub_fetch(next_rc, 1, __ATOMIC_ACQ_REL);
             g_orig_ref_assign(c);
             return;
         }
@@ -163,9 +162,9 @@ static void scarlet_ref_assign(Cpu *c) {
         if (after == 0) {
             uint64_t vtbl = LD64(old);
             if (__builtin_expect(!scarlet_guest_range(vtbl, 0x18), 0)) {
-                __atomic_fetch_add(old_rc, 1, __ATOMIC_ACQ_REL);
+                __atomic_add_fetch(old_rc, 1, __ATOMIC_ACQ_REL);
                 ST64(owner + 0x38, old);
-                if (next_rc) __atomic_fetch_sub(next_rc, 1, __ATOMIC_ACQ_REL);
+                if (next_rc) __atomic_sub_fetch(next_rc, 1, __ATOMIC_ACQ_REL);
                 g_orig_ref_assign(c);
                 return;
             }
