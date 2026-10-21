@@ -56,9 +56,9 @@ void hle_strcat(Cpu *c) {
 }
 
 HLE_FUNC("memcpy", hle_import_memcpy) { hle_memcpy(c); }
-HLE_FUNC("memset", hle_import_memset) { hle_memset(c); }
-HLE_FUNC("strlen", hle_import_strlen) { hle_strlen(c); }
+
+
 HLE_FUNC("strcmp", hle_import_strcmp) { hle_strcmp(c); }
-HLE_FUNC("strcpy", hle_import_strcpy) { hle_strcpy(c); }
-HLE_FUNC("stpcpy", hle_import_stpcpy) { hle_stpcpy(c); }
-HLE_FUNC("strcat", hle_import_strcat) { hle_strcat(c); }
+
+
+
