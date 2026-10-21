@@ -75,7 +75,8 @@ if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
                 $QuotedBin = "'" + ($ReaBin -replace "'","'\\''") + "'"
                 # REA uses #!/usr/bin/env node. A non-interactive WSL shell
                 # does not source NVM, so put the REA/Node bin directory on PATH.
-                $Bootstrap = "export PATH=$QuotedBin`:`$PATH; export GHIDRA_INSTALL_DIR=`"`$HOME/ghidra_12.1.4_PUBLIC`"; export JAVA_HOME=`"/usr/lib/jvm/java-21-openjdk-amd64`"; "
+                $Bootstrap = ('export PATH={0}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export GHIDRA_INSTALL_DIR="$HOME/ghidra_12.1.4_PUBLIC"; export JAVA_HOME="/usr/lib/jvm/java-21-openjdk-amd64"; ' -f $QuotedBin)
+                Write-Host "[rea] WSL REA: $ReaPath" -ForegroundColor DarkGray
                 $Doctor = Invoke-WslRaw ($Bootstrap + $QuotedRea + ' doctor --provider ghidra --json')
                 $DoctorText = ($Doctor.Output -join [Environment]::NewLine)
                 if ($Doctor.ExitCode -eq 0 -and $DoctorText -match '"available"\s*:\s*true') {
