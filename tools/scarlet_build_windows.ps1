@@ -6,6 +6,7 @@ param(
     [switch]$RuntimeOnly,
     [switch]$GameDllOnly,
     [switch]$FunctionInstrument,
+    [switch]$GuestForceInline,
     [switch]$ThinLTO,
     [switch]$NoThinLTO,  # compatibility switch; upstream-style game builds already default to no ThinLTO
     [int]$LtoJobs = 4
@@ -130,6 +131,10 @@ if ($ThinLTO) {
     Write-Host "[scarlet-build] lasgame.dll: perfil upstream LASRecomp (sem ThinLTO)." -ForegroundColor Green
 }
 $InstrumentMake = if ($FunctionInstrument) { " FNINSTRUMENT=1 B=$BuildRel" } else { "" }
+$GuestInlineMake = if ($GuestForceInline) { " GUEST_FORCE_INLINE=1" } else { " GUEST_FORCE_INLINE=0" }
+if ($GuestForceInline) {
+    Write-Host "[scarlet-build] Guest scalar helpers: always_inline ATIVADO (A/B performance mode)." -ForegroundColor Green
+}
 
 # Runtime-only means exactly that: preserve the existing huge lasgame.dll and
 # compile the EXE against the DLL's existing GAMELIB_ID, even if generator/HLE
@@ -155,7 +160,7 @@ $Targets = if ($RuntimeOnly) {
 } else {
     "$BuildRel/ScarletRecomp.exe $BuildRel/lasgame.dll"
 }
-$Cmd = "set -o pipefail; export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin':`$PATH; cd '$RepoPosix'; make -j$Jobs EXE_NAME=ScarletRecomp$PerfMake$InstrumentMake$GameIdMake $Targets 2>&1 | tee $BuildLogName"
+$Cmd = "set -o pipefail; export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin':`$PATH; cd '$RepoPosix'; make -j$Jobs EXE_NAME=ScarletRecomp$PerfMake$InstrumentMake$GuestInlineMake$GameIdMake $Targets 2>&1 | tee $BuildLogName"
 
 & $Bash -lc $Cmd
 $Code = $LASTEXITCODE
