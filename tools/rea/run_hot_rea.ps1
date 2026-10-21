@@ -84,7 +84,10 @@ if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
                 # ReaPath is a POSIX path from WSL. Do not use System.IO.Path
                 # here: on Windows it rewrites /home/... as \home\..., which is
                 # invalid inside Bash. Strip the final /rea component manually.
-                $ReaBin = ($ReaPath -replace '/rea
+                $Slash = $ReaPath.LastIndexOf("/")
+                if ($Slash -le 0) { throw "Caminho REA POSIX invalido: $ReaPath" }
+                $ReaBin = $ReaPath.Substring(0, $Slash)
+                $QuotedBin = "'" + ($ReaBin -replace "'","'\\''") + "'"
                 $NodeProbe = Invoke-WslRaw ("test -x " + $QuotedBin + "/node")
                 if ($NodeProbe.ExitCode -ne 0) {
                     throw "Node do NVM nao encontrado ao lado do REA: $ReaBin/node"
