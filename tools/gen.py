@@ -58,6 +58,12 @@ SCARLET_MAIN_DIRECT_GUEST = {
     },
 }
 
+# Exact SDK entry where a tiny lock-free prefix can return before executing the
+# lifted body. Unlike a full HLE replacement, state==1 falls through to the
+# original AArch64 implementation so process-wide-key waiter semantics stay exact.
+SCARLET_SDK_SIGNAL_LIGHT_EVENT_BUILD = '3644a6760469451cabc99f00c540acc2a64aee41'
+SCARLET_SDK_SIGNAL_LIGHT_EVENT_OFF = 0x3720D0
+
 
 def sext26(w):
     v = w & 0x03FFFFFF
@@ -574,6 +580,26 @@ class Module:
                     '    goto L_dispatch;']
         else:
             out.append(f'    FN_ENTER({hx(entry)});')
+            if (self.name == 'sdk' and
+                    self.nso.build_id == SCARLET_SDK_SIGNAL_LIGHT_EVENT_BUILD and
+                    entry == self.base + SCARLET_SDK_SIGNAL_LIGHT_EVENT_OFF):
+                # SignalLightEvent's state word is at LightEventType+4. For both
+                # clear modes, state 2 is already signaled and state 0 can be
+                # promoted to 2 atomically. State 1 means a waiter exists: keep
+                # the original lifted body below for its process-wide-key wake.
+                out += [
+                    '    {',
+                    '        uint32_t *_sle_state = (uint32_t *)(uintptr_t)(c->x[0] + 4);',
+                    '        uint32_t _sle_cur = __atomic_load_n(_sle_state, __ATOMIC_ACQUIRE);',
+                    '        if (_sle_cur == 2) return;',
+                    '        if (_sle_cur == 0) {',
+                    '            uint32_t _sle_expected = 0;',
+                    '            if (__atomic_compare_exchange_n(_sle_state, &_sle_expected, 2, false,',
+                    '                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;',
+                    '            if (_sle_expected == 2) return;',
+                    '        }',
+                    '    }',
+                ]
             if resumable:
                 # Normal direct calls always start at entry. Only the runtime's
                 # range lookup calls _resume with an interior c->pc. Keep identical
