@@ -37,60 +37,68 @@ $null = New-Item -ItemType Directory -Force -Path $OutDir
 Get-ChildItem -LiteralPath $OutDir -File -ErrorAction SilentlyContinue |
     Remove-Item -Force -ErrorAction SilentlyContinue
 
-# Prefer REA/Ghidra in WSL when it is genuinely available. Windows Ghidra P0
-# does not admit raw ARM64, so on a Windows-only machine use REA's official
-# Rizin integration instead of forcing the user to install WSL.
+# Prefer the full REA/Ghidra lane in WSL. Do not depend on an interactive
+# shell profile: NVM is often unavailable to bash -lc even though REA works in
+# the user's Ubuntu terminal. Locate the installed REA binary directly.
 $WslPrefix = @()
 if ($Distro) { $WslPrefix = @("-d", $Distro) }
 $UseWslGhidra = $false
 $ReaShell = ""
 
-# bash -lc does not reliably load Ubuntu's interactive .bashrc, and NVM is
-# normally registered there. Bootstrap NVM/JDK/Ghidra explicitly so REA works
-# from PowerShell exactly as it does in the user's interactive Ubuntu shell.
-$WslBootstrap = 'export NVM_DIR="$HOME/.nvm"; if [ -s "$NVM_DIR/nvm.sh" ]; then . "$NVM_DIR/nvm.sh"; fi; export GHIDRA_INSTALL_DIR="${GHIDRA_INSTALL_DIR:-$HOME/ghidra_12.1.4_PUBLIC}"; export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk-amd64}"; '
-
-function Invoke-WslCaptured([string]$Command) {
-    # Windows PowerShell 5.1 can turn native stderr into ErrorRecords when the
-    # global ErrorActionPreference is Stop. Warnings must not become failures;
-    # the native exit code is authoritative.
+function Invoke-WslRaw([string]$Command) {
     $SavedPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        $Output = @(& wsl.exe @WslPrefix -- bash -lc ($WslBootstrap + $Command) 2>&1)
+        $Output = @(& wsl.exe @WslPrefix -- bash -lc $Command 2>&1)
         $Code = $LASTEXITCODE
     }
     finally {
         $ErrorActionPreference = $SavedPreference
     }
-    [PSCustomObject]@{ Output = $Output; ExitCode = $Code }
+    [PSCustomObject]@{
+        Output = @($Output | ForEach-Object { "$_" })
+        ExitCode = $Code
+    }
 }
 
 if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
-    $Probe = Invoke-WslCaptured "printf ready"
+    $Probe = Invoke-WslRaw 'printf ready'
     if ($Probe.ExitCode -eq 0 -and (($Probe.Output -join "") -match "ready")) {
-        $ReaProbe = Invoke-WslCaptured 'if command -v rea >/dev/null 2>&1; then command -v rea; elif command -v npx >/dev/null 2>&1; then echo __NPX__; fi'
-        if ($ReaProbe.ExitCode -eq 0) {
-            $Which = (($ReaProbe.Output | ForEach-Object { "$_" }) -join "").Trim()
-            if ($Which -and $Which -ne "__NPX__") {
-                # Use the absolute NVM-installed REA path to avoid PATH/profile drift.
-                $ReaShell = "'" + ($Which -replace "'","'\\''") + "'"
-            }
-            elseif ($Which -eq "__NPX__") {
-                $ReaShell = "npx -y rea-agents@6.7.0"
-            }
-
-            if ($ReaShell) {
-                $Doctor = Invoke-WslCaptured "$ReaShell doctor --provider ghidra --json"
+        # Prefer a directly installed REA under NVM. This works even when
+        # ~/.bashrc is intentionally skipped by a non-interactive shell.
+        $FindRea = Invoke-WslRaw 'for p in "$HOME"/.nvm/versions/node/*/bin/rea "$HOME"/.local/bin/rea /usr/local/bin/rea /usr/bin/rea; do if [ -x "$p" ]; then printf "%s\n" "$p"; fi; done | sort -V | tail -n 1'
+        if ($FindRea.ExitCode -eq 0) {
+            $ReaPath = (($FindRea.Output -join [Environment]::NewLine).Trim())
+            if ($ReaPath) {
+                $QuotedRea = "'" + ($ReaPath -replace "'","'\\''") + "'"
+                $Bootstrap = 'export GHIDRA_INSTALL_DIR="$HOME/ghidra_12.1.4_PUBLIC"; export JAVA_HOME="/usr/lib/jvm/java-21-openjdk-amd64"; '
+                $Doctor = Invoke-WslRaw ($Bootstrap + $QuotedRea + ' doctor --provider ghidra --json')
                 if ($Doctor.ExitCode -eq 0) {
-                    $DoctorText = ($Doctor.Output | ForEach-Object { "$_" }) -join [Environment]::NewLine
-                    if ($DoctorText -match '"available"\s*:\s*true' -or $DoctorText -match '"healthy"\s*:\s*true') {
+                    $DoctorText = ($Doctor.Output -join [Environment]::NewLine)
+                    if ($DoctorText -match '"ghidra"\s*,?' -and $DoctorText -match '"available"\s*:\s*true') {
                         $UseWslGhidra = $true
+                        $ReaShell = $QuotedRea
                     }
                 }
             }
         }
     }
+}
+
+function Invoke-WslText([string[]]$Args) {
+    $SavedPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $r = @(& wsl.exe @WslPrefix -- @Args 2>&1)
+        $Code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $SavedPreference
+    }
+    if ($Code -ne 0) {
+        throw (($r | ForEach-Object { "$_" }) -join [Environment]::NewLine)
+    }
+    return (($r | ForEach-Object { "$_" }) -join [Environment]::NewLine).Trim()
 }
 
 function Ensure-WindowsRizin {
@@ -167,8 +175,8 @@ if ($UseWslGhidra) {
             $Addr = [string]$Fn.address
             $Out = Join-Path $OutDir (($Addr -replace "^0x","") + ".json")
             Write-Host "[rea] Ghidra $Module $Addr" -ForegroundColor Cyan
-            $Cmd = "export REA_GHIDRA_SEED_FILE='$SeedsWsl'; $ReaShell function '$ImageWsl' '$Addr' --target-format raw-binary --architecture arm64 --entry-point '$Base' --provider ghidra --json"
-            $Run = Invoke-WslCaptured $Cmd
+            $Cmd = "export GHIDRA_INSTALL_DIR=\"$HOME/ghidra_12.1.4_PUBLIC\"; export JAVA_HOME=\"/usr/lib/jvm/java-21-openjdk-amd64\"; export REA_GHIDRA_SEED_FILE='$SeedsWsl'; $ReaShell function '$ImageWsl' '$Addr' --target-format raw-binary --architecture arm64 --entry-point '$Base' --provider ghidra --json"
+            $Run = Invoke-WslRaw $Cmd
             $Json = @($Run.Output | ForEach-Object { "$_" })
             if ($Run.ExitCode -ne 0) {
                 ($Json -join [Environment]::NewLine) | Set-Content -LiteralPath ($Out + ".error.txt") -Encoding UTF8
