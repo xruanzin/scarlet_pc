@@ -594,7 +594,7 @@ class Module:
                     '        if (_sle_cur == 2) return;',
                     '        if (_sle_cur == 0) {',
                     '            uint32_t _sle_expected = 0;',
-                    '            if (__atomic_compare_exchange_n(_sle_state, &_sle_expected, 2, false,',
+                    '            if (__atomic_compare_exchange_n(_sle_state, &_sle_expected, 2, 0,',
                     '                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;',
                     '            if (_sle_expected == 2) return;',
                     '        }',
