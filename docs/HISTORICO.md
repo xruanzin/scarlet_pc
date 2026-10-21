@@ -250,3 +250,26 @@ código em `runtime/hle/wildbattle.c`; opção "Batalhas selvagens (experimental
   minutos o que três rodadas manuais não mostraram. (3) O `LARECOMP_HOOK_DUMP` exige o endereço completo do guest.
 - **Falta:** XP dividido (metade ao derrotar, metade ao capturar), natureza e shiny do Pokémon tocado, formas
   regionais (a tabela de golpes usa o índice da espécie), batalha de Pokémon grandes/auras e teste em mais áreas.
+
+
+## Scarlet — escopos de imagem e espera de interpolação (20/10/2026)
+
+**Sintoma:** FPS baixo, tempo alto em `nvnQueuePresentTexture` e uma interpretação do log como
+milhares de barreiras completas e passes descartados. **Diagnóstico:** o contador antigo `barrier`
+mede flags de comandos NVN; zero não emite `vk_full_barrier`. `rdiscard` mede rasterizer discard
+usado no transform feedback. Esses contadores não provam o gargalo alegado. O código, porém,
+usava barreiras globais inclusive para cópias e passes internos de entradas conhecidas, e dormia
+com o lock global durante a apresentação de duas imagens interpoladas.
+
+**Correção:** `exec.c` usa dependências de imagem nos consumidores conhecidos, preservando escopos
+conservadores para guest/bindless/SSBO e readback compartilhado. `device.c` preserva a dependência
+STORE/LOAD da janela e ordena o gate de apresentação antes do lock global; durante o pacing solta
+só este último. Reapresentação e reinício usam a mesma ordem. `sync_profile.*` e o relatório separam
+as esperas e contam os helpers de barreira realmente emitidos. `LARECOMP_FULL_BARRIERS=1` permite
+comparar os novos escopos com barreiras globais.
+
+**Validação:** regressões nativas sem assets cobrem progresso concorrente durante o sleep,
+exclusividade do present, profundidade/stencil, camadas/mips, fallback global e retomada da janela;
+testes do relatório distinguem capturas antigas e dados sobrepostos. As cinco unidades C alteradas
+compilam com Clang via Zig e headers Vulkan/SDL3/VMA em Linux. Ganho de FPS e correção visual no
+Windows/driver do usuário ainda dependem de execução no jogo; não há benchmark da nova versão.

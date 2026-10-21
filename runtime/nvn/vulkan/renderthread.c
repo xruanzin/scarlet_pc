@@ -15,6 +15,7 @@
 
 #include "../../rt.h"
 #include "../nvn.h"
+#include "sync_profile.h"
 
 uint64_t renderer_fence_seq(void);
 void renderer_submit(void);
@@ -229,7 +230,9 @@ static void queue_and_wait(RenderJob j) {
 
 void renderthread_present_sync(NvnTexture *tex) {
     if (!tex) return;
+    uint64_t t = vk_sync_profile_begin();
     queue_and_wait((RenderJob){.kind = RJ_PRESENT, .tex = tex});
+    vk_sync_profile_end(SYNC_PRESENT_TICKET, t);
 }
 
 void renderthread_gpu_sync(void) {

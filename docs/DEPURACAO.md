@@ -141,3 +141,60 @@ fechado) copia o build atual para lá depois de validado. Assim, recompilar e te
 
 Para comparar áudio com o original:
 `ffmpeg -i <video>.webm -vn -f s16le -ar 48000 -ac 2 ref.raw` e correlacionar com a gravação (numpy no `.venv`).
+
+
+## Scarlet: sincronização Vulkan e pacing (20/10/2026)
+
+`tools/scarlet_run.ps1 -Profile -Backend Vulkan` acrescenta ao pacote de desempenho:
+
+- `[vk-sync]`: contagem real dos helpers instrumentados: `full`, `scoped-calls` e
+  `image-dependencies`. Uma chamada pode incluir mais de uma imagem. Transições de layout e
+  barreiras locais fora desses helpers não entram nesse total.
+- `[nvn-barrier-flags]`: comandos NVN por flags (antes chamado `[barrier]`). Flags zero não
+  chamam `vk_full_barrier` neste executor; não confundir a contagem com barreiras Vulkan.
+- `[sync-prof]`: tempo de parede em espera pelo lock global (`big-lock`), exclusividade do
+  present (`present-gate`), espera da interpolação (`interp-sleep`), preparação do frame
+  (`frame-begin`), aquisição da swapchain (`acquire`), `vkQueuePresentKHR` (`queue-present`),
+  present completo (`backend-present`), ritmo pedido pelo jogo (`guest-pace`), fila/execução
+  do present (`present-ticket`) e semáforo timeline (`gpu-wait`).
+
+`report.md` agrega esses dados e `renderer-timeline.txt` preserva as janelas. Os tempos são
+**inclusivos e sobrepostos**, não CPU ativa: `present-ticket` inclui fila anterior e backend;
+`backend-present` inclui locks, GPU e apresentação; `frame-begin` inclui acquire e espera do slot.
+Não somar as linhas. As chamadas são contabilizadas ao terminar; operações concorrentes podem
+cair em janelas vizinhas e o último intervalo pode faltar. `rdiscard` registra rasterizer discard
+(legítimo no transform feedback), não passes desperdiçados. Utilização GPU baixa não identifica
+sozinha uma causa de sincronização.
+
+As dependências com escopo de imagem cobrem cópias, snapshots de feedback, pós-processamento e
+scanout com entradas conhecidas. Mipmaps, camadas, profundidade/stencil e a leitura `LOAD` da
+janela retomada continuam ordenados. Passes guest, compute/bindless e o buffer compartilhado de
+readback preservam barreiras completas enquanto não há rastreamento de todos os recursos.
+O produtor ainda usa `ALL_COMMANDS`; o consumidor é limitado a transferência, fragment shader ou
+saída de cor. Não se trata de remover dependências.
+
+| Variável | Efeito |
+|---|---|
+| `LARECOMP_FULL_BARRIERS=1` | substitui os novos escopos por barreiras globais, para comparação e diagnóstico de regressão visual |
+| `LARECOMP_FULL_BARRIERS=0` ou ausente | dependências de imagens habilitadas (padrão) |
+| `LARECOMP_VK_PROF=1` | habilita os tempos separados de sincronização; `-Profile` configura isso automaticamente |
+
+Comparação no PowerShell, na mesma cena, resolução, configuração, duração e com cache aquecido:
+
+```powershell
+$env:LARECOMP_FULL_BARRIERS = '0'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\scarlet_run.ps1 -Profile -Backend Vulkan
+$env:LARECOMP_FULL_BARRIERS = '1'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\scarlet_run.ps1 -Profile -Backend Vulkan
+Remove-Item Env:LARECOMP_FULL_BARRIERS -ErrorAction SilentlyContinue
+```
+
+Essa comparação muda o escopo das barreiras novas; ambas as rodadas incluem a correção do pacing.
+O `run.json` registra o modo de barreiras, interpolação, FPS, render thread e tamanho do lote.
+Jogar sem `-Profile` mede melhor o FPS final, pois contagem de funções e instrumentação têm custo.
+A correção do sleep só atua quando há duas imagens interpoladas; ela mantém a exclusividade da
+apresentação, solta o lock de gravação enquanto dorme e fecha qualquer pass guest aberto nesse
+intervalo antes de retomar a janela. `backend_represent_now` usa a mesma ordem de locks.
+
+Referências de sincronização: [guia Vulkan](https://docs.vulkan.org/guide/latest/synchronization_examples.html)
+e [exemplo de escopo de estágios](https://docs.vulkan.org/samples/latest/samples/performance/pipeline_barriers/README.html).

@@ -4,6 +4,9 @@
 
 #include "../kernel.h"
 #include "nvn.h"
+#if !defined(__APPLE__)
+#include "vulkan/sync_profile.h"
+#endif
 
 void renderer_sync(void);
 
@@ -909,7 +912,13 @@ NVN(nvnQueuePresentTexture) {
     }
     g_last_interval = w->interval;
     { extern void fps60_present(void); fps60_present(); }
+#if !defined(__APPLE__)
+    uint64_t pace_start = vk_sync_profile_begin();
+#endif
     present_pace(w->interval);
+#if !defined(__APPLE__)
+    vk_sync_profile_end(SYNC_GUEST_PACE, pace_start);
+#endif
     if (i >= 0 && i < w->num) renderthread_present_sync(HOST(NvnTexture, w->textures[i]));
 }
 

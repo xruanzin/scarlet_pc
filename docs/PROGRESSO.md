@@ -1,5 +1,16 @@
 # Progresso
 
+## Scarlet — sincronização em validação (20/10/2026)
+
+Cópias, snapshots e pós-processamento com recursos conhecidos usam dependências de imagem.
+O pacing da interpolação libera a trava de gravação e mantém a apresentação exclusiva. O relatório
+agora distingue comandos NVN, barreiras Vulkan instrumentadas e esperas de CPU/fila/GPU.
+Testes nativos de sincronização e relatório passaram; unidades C compilaram em Linux.
+Pendente: comparar a mesma cena no Windows, conferir imagem/estabilidade e medir FPS com e sem
+`LARECOMP_FULL_BARRIERS=1`. Passes guest/bindless continuam conservadores. Não há ganho de FPS
+medido para este patch. Detalhes e comandos em [DEPURACAO.md](DEPURACAO.md#scarlet-sincronização-vulkan-e-pacing-20102026).
+
+
 Estado atual do port. A história completa, com cada problema e como foi resolvido, está em
 [HISTORICO.md](HISTORICO.md). As ferramentas de diagnóstico estão em [DEPURACAO.md](DEPURACAO.md).
 
