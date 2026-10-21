@@ -415,13 +415,22 @@ try {
         Remove-Item Env:LARECOMP_VK_PROF -ErrorAction SilentlyContinue
         Remove-Item Env:LARECOMP_HLE_PROF -ErrorAction SilentlyContinue
         Remove-Item Env:LARECOMP_FRAME_CSV -ErrorAction SilentlyContinue
-        Remove-Item Env:LARECOMP_FNPROF -ErrorAction SilentlyContinue
-        Remove-Item Env:LARECOMP_FNPROF_OUT -ErrorAction SilentlyContinue
-        Remove-Item Env:LARECOMP_FNPROF_AUTO_MS -ErrorAction SilentlyContinue
-        Remove-Item Env:LARECOMP_FNPROF_AUTO_CONSEC -ErrorAction SilentlyContinue
-        Remove-Item Env:LARECOMP_FNPROF_AUTO_FRAMES -ErrorAction SilentlyContinue
-        Remove-Item Env:LARECOMP_FNPROF_AUTO_STEP_MS -ErrorAction SilentlyContinue
-        Remove-Item Env:LARECOMP_FNPROF_AUTO_CAPTURES -ErrorAction SilentlyContinue
+        # Preserve an explicitly requested function-profile session even on a
+        # normal run. This lets developers arm FNPROF from PowerShell without
+        # enabling the heavier full -Profile capture.
+        $ManualFnProf = $env:LARECOMP_FNPROF -or $env:LARECOMP_FNPROF_AUTO_MS
+        if (-not $ManualFnProf) {
+            Remove-Item Env:LARECOMP_FNPROF -ErrorAction SilentlyContinue
+            Remove-Item Env:LARECOMP_FNPROF_OUT -ErrorAction SilentlyContinue
+            Remove-Item Env:LARECOMP_FNPROF_AUTO_MS -ErrorAction SilentlyContinue
+            Remove-Item Env:LARECOMP_FNPROF_AUTO_CONSEC -ErrorAction SilentlyContinue
+            Remove-Item Env:LARECOMP_FNPROF_AUTO_FRAMES -ErrorAction SilentlyContinue
+            Remove-Item Env:LARECOMP_FNPROF_AUTO_STEP_MS -ErrorAction SilentlyContinue
+            Remove-Item Env:LARECOMP_FNPROF_AUTO_CAPTURES -ErrorAction SilentlyContinue
+        } elseif (-not $env:LARECOMP_FNPROF_OUT) {
+            $env:LARECOMP_FNPROF_OUT = Join-Path $RepoRoot 'build\fnprof.txt'
+            Write-Host "[scarlet-run] FNPROF manual ativo: $env:LARECOMP_FNPROF_OUT" -ForegroundColor Cyan
+        }
         Remove-Item Env:LARECOMP_GPUPROF_AT -ErrorAction SilentlyContinue
         Remove-Item Env:LARECOMP_SLOW_FRAME_MS -ErrorAction SilentlyContinue
     }
