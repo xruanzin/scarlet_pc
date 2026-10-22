@@ -48,3 +48,6 @@ scarlet-aot-manifest.json
 
 # Scarlet PC self-built runtime source checkout
 /third_party/scarlet-runtime-src/
+
+# Downloaded build-time tools (prebuilt and hash-pinned)
+/third_party/tools/
