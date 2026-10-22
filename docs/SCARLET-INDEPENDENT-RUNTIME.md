@@ -43,3 +43,34 @@ The package is created at `dist\ScarletPC-Independent` and started with:
 ```
 
 The final player-facing goal is a normal Scarlet PC flow: select a legally obtained game once, prepare the local game-derived AOT cache, then launch from `ScarletPC.exe` without a separate runtime installation or terminal workflow.
+
+
+## Product-facing runtime layout
+
+The independent package exposes Scarlet-owned names:
+
+    ScarletPC.exe
+    aot/scarlet-main.dll
+    aot/scarlet-rtld.dll
+    aot/scarlet-multimedia.dll
+    aot/scarlet-sdk.dll
+    user/config/scarlet.ini
+    user/cache/scarlet/
+    mods/
+    licenses/third-party/
+
+The game window title is fixed to **Pokémon Scarlet**. Player-facing runtime messages use the Scarlet categories `Scarlet.Runtime`, `Scarlet.AOT`, `Scarlet.Graphics` and `Scarlet.Game`.
+
+The public runtime boundary is:
+
+    ScarletPC.exe
+          ↓
+    Scarlet::GameRuntime
+          ↓
+    Nswitch::Runtime
+          ↓
+    AOT / Vulkan / HLE / dynamic fallback
+
+The current executable is still a monolithic host internally. The planned `nswitch-runtime.dll`, `nswitch-video.dll` and `nswitch-audio.dll` split is intentionally deferred until those components have real stable ABI boundaries; the project does not ship fake placeholder DLLs.
+
+The launcher vocabulary is defined in `config/scarlet-ui.json`: the normal UI says **Jogar**, **Desempenho**, **Qualidade visual**, **Controles** and **Idioma**, while container/runtime implementation terms stay out of the player-facing flow.
