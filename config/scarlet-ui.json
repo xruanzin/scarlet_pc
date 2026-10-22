@@ -1,0 +1,26 @@
+{
+  "product": "Scarlet PC",
+  "game_title": "Pokémon Scarlet",
+  "window_title": "Pokémon Scarlet",
+  "primary_action": "Jogar",
+  "sections": [
+    "Desempenho",
+    "Qualidade visual",
+    "Controles",
+    "Idioma"
+  ],
+  "player_facing_terms": {
+    "game_source": "Jogo",
+    "prepare": "Preparar para jogar",
+    "ready": "Tudo pronto"
+  },
+  "hidden_technical_terms": [
+    "NSP",
+    "NCA",
+    "NSO",
+    "suyu-cmd",
+    "ArmRecomp",
+    "Dynarmic",
+    "AOT ABI"
+  ]
+}
