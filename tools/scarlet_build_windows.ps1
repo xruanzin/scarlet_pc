@@ -22,7 +22,11 @@ if ($ThinLTO -and $NoThinLTO) {
     throw "-ThinLTO e -NoThinLTO sao mutuamente exclusivos."
 }
 if ($RuntimeOnly -and ($CompactGameDll -or $GuestForceInline -or $ThinLTO -or $NoThinLTO)) {
-    throw "-RuntimeOnly preserva a lasgame.dll existente; opcoes de perfil da DLL nao se aplicam."
+    Write-Host "[scarlet-build] RuntimeOnly: ignorando opcoes de perfil da lasgame.dll; DLL congelada sera preservada." -ForegroundColor DarkGray
+    $CompactGameDll = $false
+    $GuestForceInline = $false
+    $ThinLTO = $false
+    $NoThinLTO = $false
 }
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -125,9 +129,9 @@ if ((-not $GameDllOnly) -and (-not $IncrementalRuntime -or $ForceRuntime)) {
 }
 
 # Game DLL profiles:
-# default = last known-good Scarlet build (-O3 + strict-FP-friendly opts + znver2 + ThinLTO)
-# -CompactGameDll = the smaller upstream-style -O1/no-LTO experiment.
-$EffectiveThinLto = -not $CompactGameDll
+# default = the confirmed bootable compact baseline from 2026-10-20:
+# -O3, x86-64-v3, no ThinLTO. -CompactGameDll keeps the later -O1 experiment.
+$EffectiveThinLto = $false
 if ($ThinLTO) { $EffectiveThinLto = $true }
 if ($NoThinLTO) { $EffectiveThinLto = $false }
 
@@ -135,21 +139,23 @@ $PerfMake = if ($CompactGameDll) { " COMPACT_GAMEDLL=1" } else { " COMPACT_GAMED
 $PerfMake += if ($EffectiveThinLto) { " THINLTO=1 LTO_JOBS=$LtoJobs" } else { " THINLTO=0" }
 
 if ($CompactGameDll) {
-    Write-Host "[scarlet-build] lasgame.dll: perfil COMPACTO experimental (-O1)." -ForegroundColor Yellow
+    Write-Host "[scarlet-build] lasgame.dll: perfil -O1 experimental." -ForegroundColor Yellow
 } else {
-    Write-Host "[scarlet-build] lasgame.dll: perfil CONHECIDO FUNCIONAL (-O3 + FP opts + znver2)." -ForegroundColor Green
+    Write-Host "[scarlet-build] lasgame.dll: baseline FUNCIONAL compacta (-O3, x86-64-v3, sem LTO)." -ForegroundColor Green
 }
-Write-Host ("[scarlet-build] ThinLTO: " + $(if ($EffectiveThinLto) { "ON" } else { "OFF" })) -ForegroundColor Green
+Write-Host ("[scarlet-build] ThinLTO: " + $(if ($EffectiveThinLto) { "ON (experimento)" } else { "OFF" })) -ForegroundColor Green
 
-$GuestInlineMake = if ($GuestForceInline) { " GUEST_FORCE_INLINE=1" } else { " GUEST_FORCE_INLINE=0" }
+# GuestForceInline is intentionally disabled until the bootable baseline is
+# reconfirmed with the historical cpu.h. Reintroduce it only after that A/B point.
+$GuestInlineMake = ""
 if ($GuestForceInline) {
-    Write-Host "[scarlet-build] Guest scalar helpers: always_inline ATIVADO (experimento derivado do scarlet-recomp)." -ForegroundColor Magenta
+    throw "-GuestForceInline esta temporariamente desativado ate a baseline funcional ser reconfirmada."
 }
 $InstrumentMake = if ($FunctionInstrument) { " FNINSTRUMENT=1 B=$BuildRel" } else { "" }
 
 # Before an experimental game-DLL rebuild, preserve the current pair once. This
 # prevents another optimization experiment from destroying the bootable baseline.
-if ($GameDllOnly -and ($CompactGameDll -or $GuestForceInline -or $NoThinLTO)) {
+if ($GameDllOnly -and ($CompactGameDll -or $ThinLTO -or $NoThinLTO)) {
     $ExistingDll = Join-Path $BuildDir "lasgame.dll"
     $ExistingId = Join-Path $BuildDir "lasgame.dll.id"
     if ((Test-Path -LiteralPath $ExistingDll -PathType Leaf) -and (Test-Path -LiteralPath $ExistingId -PathType Leaf)) {
