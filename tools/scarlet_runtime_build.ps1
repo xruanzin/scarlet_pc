@@ -164,6 +164,8 @@ try {
     Pop-Location
 }
 
+& (Join-Path $PSScriptRoot 'scarlet_runtime_overlay.ps1') -SourceDir $SourceDir
+
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
 $cmakeHelp = (& cmake --help | Out-String)
@@ -239,9 +241,14 @@ Get-ChildItem $BuildDir -Recurse -File -Filter '*.dll' |
     no_jit           = $false
     aot_primary      = $true
     jit_fallback     = $true
-    host_source      = $runtimeExe.FullName
-    generated_at_utc = [DateTime]::UtcNow.ToString('o')
-} | ConvertTo-Json | Set-Content (Join-Path $stage 'runtime-build.json') -Encoding UTF8
+    runtime_interface = 'nswitch'
+    host              = 'ScarletPC.exe'
+    window_title      = 'Pokémon Scarlet'
+    config_file       = 'user/config/scarlet.ini'
+    aot_directory     = 'aot'
+    aot_modules       = @('scarlet-main.dll', 'scarlet-rtld.dll', 'scarlet-multimedia.dll', 'scarlet-sdk.dll')
+    generated_at_utc  = [DateTime]::UtcNow.ToString('o')
+} | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $stage 'scarlet_runtime_manifest.json') -Encoding UTF8
 
 Write-Host ''
 Write-Host '[Scarlet PC] Self-built runtime host ready:' -ForegroundColor Green
