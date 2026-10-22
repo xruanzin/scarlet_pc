@@ -45,3 +45,6 @@ scarlet_*.json
 recompiled_*.dll
 ScarletPC.exe
 scarlet-aot-manifest.json
+
+# Scarlet PC self-built runtime source checkout
+/third_party/scarlet-runtime-src/
