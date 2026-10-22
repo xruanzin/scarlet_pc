@@ -29,7 +29,7 @@ $game = (Resolve-Path $GamePath).Path
 
 Push-Location $package
 try {
-    $env:SUYU_RECOMP_STRICT = '1'
+    $env:SUYU_RECOMP_STRICT = '0'
     & $exe -g $game
     $code = $LASTEXITCODE
     if ($code -ne 0) {
