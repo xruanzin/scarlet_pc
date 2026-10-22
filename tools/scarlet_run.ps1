@@ -120,7 +120,7 @@ if ($Profile) {
     }
     if (-not $HaveExe -and $HaveDll) {
         Write-Host "[scarlet-run] PROFILE por amostragem: reconstruindo somente ScarletRecomp.exe; lasgame.dll congelada." -ForegroundColor Magenta
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly -ThinLTO
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly
         if ($LASTEXITCODE -ne 0) { throw "Build do runtime falhou (exit $LASTEXITCODE). Envie scarlet_build.log." }
     }
     elseif ((-not $HaveExe -or -not $HaveDll) -and $RebuildGameDll) {
@@ -247,7 +247,7 @@ if (Test-Path -LiteralPath $Exe -PathType Leaf) {
             if ($RuntimeOnlyBuild) {
                 Write-Host "[scarlet-run] Mudou apenas o runtime; recompilando ScarletRecomp.exe sem relinkar lasgame.dll..." -ForegroundColor Yellow
                 if (Test-Path -LiteralPath $ThinLtoMarker -PathType Leaf) {
-                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly -ThinLTO @BuildFlavorArgs
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly @BuildFlavorArgs
                 } else {
                     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -ForceRuntime -RuntimeOnly @BuildFlavorArgs
                 }
