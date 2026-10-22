@@ -5,6 +5,14 @@
 #include <stdatomic.h>
 #include <string.h>
 
+/* Optional performance mode inspired by the user's scarlet-recomp/OpenSmash
+ * fork. Keep it opt-in so the last known-good game DLL remains reproducible. */
+#if defined(LARECOMP_GUEST_FORCE_INLINE) && (defined(__clang__) || defined(__GNUC__))
+#define GUEST_ALWAYS_INLINE static __inline__ __attribute__((always_inline))
+#else
+#define GUEST_ALWAYS_INLINE static inline
+#endif
+
 typedef struct __attribute__((aligned(16))) Cpu {
     uint64_t x[32];          // x0-x30 (x[31] unused; sp is separate)
     uint64_t sp;             // 256
@@ -259,43 +267,43 @@ static inline __uint128_t casp_pair64(uint64_t a, uint64_t exp0, uint64_t exp1,
 #define MKFLAGS(n, z, cy, v) \
     (((uint64_t)(n) << 31) | ((uint64_t)(z) << 30) | ((uint64_t)(cy) << 29) | ((uint64_t)(v) << 28))
 
-static inline uint64_t adds64(Cpu *c, uint64_t a, uint64_t b) {
+GUEST_ALWAYS_INLINE uint64_t adds64(Cpu *c, uint64_t a, uint64_t b) {
     uint64_t r = a + b;
     c->nzcv = MKFLAGS(r >> 63, r == 0, r < a, ((a ^ r) & (b ^ r)) >> 63);
     return r;
 }
-static inline uint64_t subs64(Cpu *c, uint64_t a, uint64_t b) {
+GUEST_ALWAYS_INLINE uint64_t subs64(Cpu *c, uint64_t a, uint64_t b) {
     uint64_t r = a - b;
     c->nzcv = MKFLAGS(r >> 63, r == 0, a >= b, ((a ^ b) & (a ^ r)) >> 63);
     return r;
 }
-static inline uint32_t adds32(Cpu *c, uint32_t a, uint32_t b) {
+GUEST_ALWAYS_INLINE uint32_t adds32(Cpu *c, uint32_t a, uint32_t b) {
     uint32_t r = a + b;
     c->nzcv = MKFLAGS(r >> 31, r == 0, r < a, ((a ^ r) & (b ^ r)) >> 31);
     return r;
 }
-static inline uint32_t subs32(Cpu *c, uint32_t a, uint32_t b) {
+GUEST_ALWAYS_INLINE uint32_t subs32(Cpu *c, uint32_t a, uint32_t b) {
     uint32_t r = a - b;
     c->nzcv = MKFLAGS(r >> 31, r == 0, a >= b, ((a ^ b) & (a ^ r)) >> 31);
     return r;
 }
-static inline uint64_t logic64(Cpu *c, uint64_t r) { c->nzcv = MKFLAGS(r >> 63, r == 0, 0, 0); return r; }
-static inline uint32_t logic32(Cpu *c, uint32_t r) { c->nzcv = MKFLAGS(r >> 31, r == 0, 0, 0); return r; }
+GUEST_ALWAYS_INLINE uint64_t logic64(Cpu *c, uint64_t r) { c->nzcv = MKFLAGS(r >> 63, r == 0, 0, 0); return r; }
+GUEST_ALWAYS_INLINE uint32_t logic32(Cpu *c, uint32_t r) { c->nzcv = MKFLAGS(r >> 31, r == 0, 0, 0); return r; }
 
 #define ADC_IMPL(N, S)                                                                     \
-    static inline uint##N##_t adc##N(Cpu *c, uint##N##_t a, uint##N##_t b) {               \
+    GUEST_ALWAYS_INLINE uint##N##_t adc##N(Cpu *c, uint##N##_t a, uint##N##_t b) {               \
         return a + b + (uint##N##_t)FLAG_C(c);                                             \
     }                                                                                      \
-    static inline uint##N##_t sbc##N(Cpu *c, uint##N##_t a, uint##N##_t b) {               \
+    GUEST_ALWAYS_INLINE uint##N##_t sbc##N(Cpu *c, uint##N##_t a, uint##N##_t b) {               \
         return a - b - 1 + (uint##N##_t)FLAG_C(c);                                         \
     }                                                                                      \
-    static inline uint##N##_t adcs##N(Cpu *c, uint##N##_t a, uint##N##_t b) {              \
+    GUEST_ALWAYS_INLINE uint##N##_t adcs##N(Cpu *c, uint##N##_t a, uint##N##_t b) {              \
         uint##N##_t cin = FLAG_C(c), r = a + b + cin;                                      \
         int carry = cin ? r <= a : r < a;                                                  \
         c->nzcv = MKFLAGS(r >> (N - 1), r == 0, carry, ((a ^ r) & (b ^ r)) >> (N - 1));    \
         return r;                                                                          \
     }                                                                                      \
-    static inline uint##N##_t sbcs##N(Cpu *c, uint##N##_t a, uint##N##_t b) {              \
+    GUEST_ALWAYS_INLINE uint##N##_t sbcs##N(Cpu *c, uint##N##_t a, uint##N##_t b) {              \
         return adcs##N(c, a, (uint##N##_t)~b);                                             \
     }
 ADC_IMPL(64, )
@@ -304,27 +312,27 @@ ADC_IMPL(32, )
 // ---- bit ops
 #define ROR64(v, r) ((uint64_t)(v) >> ((r) & 63) | (uint64_t)(v) << ((64 - ((r) & 63)) & 63))
 #define ROR32(v, r) ((uint32_t)(v) >> ((r) & 31) | (uint32_t)(v) << ((32 - ((r) & 31)) & 31))
-static inline uint64_t clz64(uint64_t v) { return v ? __builtin_clzll(v) : 64; }
-static inline uint32_t clz32(uint32_t v) { return v ? __builtin_clz(v) : 32; }
-static inline uint64_t cls64(uint64_t v) { return clz64(v ^ (uint64_t)((int64_t)v >> 1)) - 1; }
-static inline uint32_t cls32(uint32_t v) { return clz32(v ^ (uint32_t)((int32_t)v >> 1)) - 1; }
-static inline uint64_t rbit64(uint64_t v) { return __builtin_bitreverse64(v); }
-static inline uint32_t rbit32(uint32_t v) { return __builtin_bitreverse32(v); }
-static inline uint32_t rev16_32(uint32_t v) { return ((v & 0x00ff00ffu) << 8) | ((v >> 8) & 0x00ff00ffu); }
-static inline uint64_t rev16_64(uint64_t v) {
+GUEST_ALWAYS_INLINE uint64_t clz64(uint64_t v) { return v ? __builtin_clzll(v) : 64; }
+GUEST_ALWAYS_INLINE uint32_t clz32(uint32_t v) { return v ? __builtin_clz(v) : 32; }
+GUEST_ALWAYS_INLINE uint64_t cls64(uint64_t v) { return clz64(v ^ (uint64_t)((int64_t)v >> 1)) - 1; }
+GUEST_ALWAYS_INLINE uint32_t cls32(uint32_t v) { return clz32(v ^ (uint32_t)((int32_t)v >> 1)) - 1; }
+GUEST_ALWAYS_INLINE uint64_t rbit64(uint64_t v) { return __builtin_bitreverse64(v); }
+GUEST_ALWAYS_INLINE uint32_t rbit32(uint32_t v) { return __builtin_bitreverse32(v); }
+GUEST_ALWAYS_INLINE uint32_t rev16_32(uint32_t v) { return ((v & 0x00ff00ffu) << 8) | ((v >> 8) & 0x00ff00ffu); }
+GUEST_ALWAYS_INLINE uint64_t rev16_64(uint64_t v) {
     return ((v & 0x00ff00ff00ff00ffull) << 8) | ((v >> 8) & 0x00ff00ff00ff00ffull);
 }
-static inline uint64_t rev32_64(uint64_t v) {
+GUEST_ALWAYS_INLINE uint64_t rev32_64(uint64_t v) {
     return ((uint64_t)__builtin_bswap32((uint32_t)v)) | ((uint64_t)__builtin_bswap32((uint32_t)(v >> 32)) << 32);
 }
-static inline uint64_t udiv64(uint64_t a, uint64_t b) { return b ? a / b : 0; }
-static inline uint32_t udiv32(uint32_t a, uint32_t b) { return b ? a / b : 0; }
-static inline uint64_t sdiv64(uint64_t a, uint64_t b) {
+GUEST_ALWAYS_INLINE uint64_t udiv64(uint64_t a, uint64_t b) { return b ? a / b : 0; }
+GUEST_ALWAYS_INLINE uint32_t udiv32(uint32_t a, uint32_t b) { return b ? a / b : 0; }
+GUEST_ALWAYS_INLINE uint64_t sdiv64(uint64_t a, uint64_t b) {
     if (!b) return 0;
     if ((int64_t)a == INT64_MIN && (int64_t)b == -1) return a;
     return (uint64_t)((int64_t)a / (int64_t)b);
 }
-static inline uint32_t sdiv32(uint32_t a, uint32_t b) {
+GUEST_ALWAYS_INLINE uint32_t sdiv32(uint32_t a, uint32_t b) {
     if (!b) return 0;
     if ((int32_t)a == INT32_MIN && (int32_t)b == -1) return a;
     return (uint32_t)((int32_t)a / (int32_t)b);
