@@ -16,7 +16,7 @@ Validated Scarlet configuration:
 
 The package builds its own host as `ScarletPC.exe`, loads the game-derived AOT modules locally, and keeps the fallback engine inside the same runtime instead of requiring a separately installed emulator package.
 
-Scarlet PC owns and maintains its Pokémon Scarlet-specific integration, automation, diagnostics, packaging, compatibility patches and performance work.
+Scarlet PC's Pokémon Scarlet-specific functions, AOT integration, runtime compatibility work, automation, diagnostics, packaging, port-specific patches and performance optimizations are implemented and maintained by **xruanzin** for this port.
 
 No game files, console keys, firmware, Nintendo assets or generated game-derived AOT binaries belong in this repository.
 
