@@ -30,39 +30,99 @@ function Get-ScarletGlslangValidator {
     }
 
     $version = '16.6.0'
-    $sha256 = '82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b'
-    $toolsRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'third_party\tools'
-    $root = Join-Path $toolsRoot "glslang-$version-windows-x86_64"
-    $exe = Get-ChildItem $root -Recurse -File -Filter 'glslangValidator.exe' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
+    $revision = 'e1b562a8bed273a02f30b59b66a5d499793cede5'
+    $repoRoot = Split-Path $PSScriptRoot -Parent
+    $toolsRoot = Join-Path $repoRoot 'third_party\tools'
+    $source = Join-Path $toolsRoot "glslang-$version-src"
+    $build = Join-Path $repoRoot "build\tools\glslang-$version"
 
+    $exe = Get-ChildItem $build -Recurse -File -Filter 'glslangValidator.exe' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $exe) {
+        $exe = Get-ChildItem $build -Recurse -File -Filter 'glslang.exe' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    }
     if ($exe) {
+        Write-Host "[Scarlet PC] Reusing shader compiler: $($exe.FullName)" -ForegroundColor DarkGray
         return $exe.FullName
     }
 
     New-Item -ItemType Directory -Force -Path $toolsRoot | Out-Null
-    $zip = Join-Path $toolsRoot "glslang-$version-windows-x86_64-release.zip"
-    $url = "https://github.com/KhronosGroup/glslang/releases/download/$version/glslang-$version-windows-x86_64-release.zip"
 
-    Write-Host "[Scarlet PC] Fetching pinned shader compiler glslang $version..." -ForegroundColor Cyan
-    Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-
-    $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actual -ne $sha256) {
-        Remove-Item $zip -Force -ErrorAction SilentlyContinue
-        throw "glslang archive SHA256 mismatch. Expected $sha256, got $actual"
+    if (-not (Test-Path (Join-Path $source '.git'))) {
+        Write-Host "[Scarlet PC] Fetching pinned glslang source $version..." -ForegroundColor Cyan
+        & git clone --filter=blob:none --branch $version --depth 1 https://github.com/KhronosGroup/glslang.git $source
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not clone glslang source."
+        }
     }
 
-    if (Test-Path $root) {
-        Remove-Item $root -Recurse -Force
-    }
-    New-Item -ItemType Directory -Force -Path $root | Out-Null
-    Expand-Archive -Path $zip -DestinationPath $root -Force
+    Push-Location $source
+    try {
+        & git fetch origin $revision --depth 1
+        if ($LASTEXITCODE -ne 0) { throw "Could not fetch pinned glslang revision." }
 
-    $exe = Get-ChildItem $root -Recurse -File -Filter 'glslangValidator.exe' |
+        & git checkout --detach $revision
+        if ($LASTEXITCODE -ne 0) { throw "Could not checkout pinned glslang revision." }
+
+        $actual = (& git rev-parse HEAD).Trim()
+        if ($actual -ne $revision) {
+            throw "glslang revision mismatch: $actual"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+
+    $cmakeHelp = (& cmake --help | Out-String)
+    if ($cmakeHelp -match 'Visual Studio 18 2026') {
+        $generator = @('-G', 'Visual Studio 18 2026', '-A', 'x64')
+    }
+    elseif ($cmakeHelp -match 'Visual Studio 17 2022') {
+        $generator = @('-G', 'Visual Studio 17 2022', '-A', 'x64')
+    }
+    elseif (Get-Command ninja -ErrorAction SilentlyContinue) {
+        $generator = @('-G', 'Ninja')
+    }
+    else {
+        throw "No supported generator available to build glslang."
+    }
+
+    New-Item -ItemType Directory -Force -Path $build | Out-Null
+
+    Write-Host "[Scarlet PC] Building pinned glslangValidator locally..." -ForegroundColor Cyan
+    $configureGlslang = @(
+        '-S', $source,
+        '-B', $build
+    ) + $generator + @(
+        '-DGLSLANG_TESTS=OFF',
+        '-DGLSLANG_ENABLE_INSTALL=OFF',
+        '-DENABLE_GLSLANG_BINARIES=ON',
+        '-DENABLE_OPT=OFF',
+        '-DBUILD_EXTERNAL=OFF',
+        '-DENABLE_HLSL=OFF'
+    )
+
+    & cmake @configureGlslang
+    if ($LASTEXITCODE -ne 0) {
+        throw "glslang CMake configure failed."
+    }
+
+    & cmake --build $build --config Release --target glslang-standalone --parallel 1
+    if ($LASTEXITCODE -ne 0) {
+        throw "glslang build failed."
+    }
+
+    $exe = Get-ChildItem $build -Recurse -File -Filter 'glslangValidator.exe' |
+        Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
     if (-not $exe) {
-        throw "Downloaded glslang package does not contain glslangValidator.exe"
+        $exe = Get-ChildItem $build -Recurse -File -Filter 'glslang.exe' |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+    }
+    if (-not $exe) {
+        throw "glslang build completed but no shader compiler executable was found."
     }
 
     Write-Host "[Scarlet PC] Shader compiler ready: $($exe.FullName)" -ForegroundColor Green
