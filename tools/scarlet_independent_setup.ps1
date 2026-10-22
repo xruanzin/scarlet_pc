@@ -56,5 +56,5 @@ $localConfig = Join-Path $repoRoot 'build\scarlet-independent-local.json'
 
 Write-Host ''
 Write-Host '[Scarlet PC] Independent bootstrap complete.' -ForegroundColor Green
-Write-Host '[Scarlet PC] No external suyu installation is required by the package.' -ForegroundColor Green
+Write-Host '[Scarlet PC] Standalone runtime package ready.' -ForegroundColor Green
 Write-Host '[Scarlet PC] Run with: .\tools\scarlet_independent_run.ps1' -ForegroundColor Green
