@@ -194,14 +194,14 @@ if ($usingNinja -and (Test-Path $cache)) {
 
 Write-Host '[Scarlet PC] Configuring self-built runtime.' -ForegroundColor Cyan
 Write-Host "[Scarlet PC] Runtime revision: $revision" -ForegroundColor Cyan
-Write-Host '[Scarlet PC] Dynarmic/JIT: disabled' -ForegroundColor Cyan
+Write-Host '[Scarlet PC] AOT primary; Dynarmic/JIT fallback: enabled' -ForegroundColor Cyan
 
 $configure = @('-S', $SourceDir, '-B', $BuildDir) + $generatorArgs
 if ($usingNinja) { $configure += '-DCMAKE_BUILD_TYPE=Release' }
 $configure += @(
     '-DENABLE_QT=OFF',
     '-DYUZU_CMD=ON',
-    '-DSUYU_NO_JIT=ON',
+    '-DSUYU_NO_JIT=OFF',
     '-DENABLE_OPENGL=OFF',
     '-DENABLE_WEB_SERVICE=OFF',
     '-DENABLE_UPDATE_CHECKER=OFF',
@@ -236,7 +236,9 @@ Get-ChildItem $BuildDir -Recurse -File -Filter '*.dll' |
     project          = 'Scarlet PC'
     runtime_revision = $revision
     source_origin    = $upstream
-    no_jit           = $true
+    no_jit           = $false
+    aot_primary      = $true
+    jit_fallback     = $true
     host_source      = $runtimeExe.FullName
     generated_at_utc = [DateTime]::UtcNow.ToString('o')
 } | ConvertTo-Json | Set-Content (Join-Path $stage 'runtime-build.json') -Encoding UTF8
