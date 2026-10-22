@@ -2,16 +2,30 @@
   "project": "Scarlet PC",
   "title_id": "0100A3D008C5C000",
   "target": "Windows x86-64",
-  "cpu_backend": "Hybrid AOT shared modules",
+  "cpu_backend": "AOT-first with dynamic fallback",
   "runtime_base": {
     "project": "suyu",
     "version": "v14.1.0",
     "validated_revision": "347fcf91d95cd39cb5c3db50f1b6d827ad699311"
   },
   "modules": [
-    { "switch_module": "rtld",    "host_binary": "recompiled_rtld.dll" },
-    { "switch_module": "main",    "host_binary": "recompiled_image.dll" },
-    { "switch_module": "subsdk0", "host_binary": "recompiled_subsdk0.dll" },
-    { "switch_module": "sdk",     "host_binary": "recompiled_sdk.dll" }
-  ]
+    {
+      "switch_module": "rtld",
+      "host_binary": "aot/scarlet-rtld.dll"
+    },
+    {
+      "switch_module": "main",
+      "host_binary": "aot/scarlet-main.dll"
+    },
+    {
+      "switch_module": "subsdk0",
+      "host_binary": "aot/scarlet-multimedia.dll"
+    },
+    {
+      "switch_module": "sdk",
+      "host_binary": "aot/scarlet-sdk.dll"
+    }
+  ],
+  "runtime_interface": "nswitch",
+  "window_title": "Pokémon Scarlet"
 }
