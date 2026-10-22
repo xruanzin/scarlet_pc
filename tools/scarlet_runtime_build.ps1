@@ -219,12 +219,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Scarlet runtime CMake configure failed.' }
 & cmake --build $BuildDir --config Release --target suyu-cmd --parallel $Jobs
 if ($LASTEXITCODE -ne 0) { throw 'Scarlet runtime build failed.' }
 
-$host = Get-ChildItem $BuildDir -Recurse -File -Filter 'suyu-cmd.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $host) { throw 'Runtime build succeeded but suyu-cmd.exe was not found.' }
+$runtimeExe = Get-ChildItem $BuildDir -Recurse -File -Filter 'suyu-cmd.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $runtimeExe) { throw 'Runtime build succeeded but suyu-cmd.exe was not found.' }
 
 $stage = Join-Path $BuildDir 'scarlet-stage'
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
-Copy-Item $host.FullName (Join-Path $stage 'ScarletPC.exe') -Force
+Copy-Item $runtimeExe.FullName (Join-Path $stage 'ScarletPC.exe') -Force
 
 Get-ChildItem $BuildDir -Recurse -File -Filter '*.dll' |
     Where-Object { $_.FullName -notlike "$stage*" } |
@@ -237,7 +237,7 @@ Get-ChildItem $BuildDir -Recurse -File -Filter '*.dll' |
     runtime_revision = $revision
     source_origin    = $upstream
     no_jit           = $true
-    host_source      = $host.FullName
+    host_source      = $runtimeExe.FullName
     generated_at_utc = [DateTime]::UtcNow.ToString('o')
 } | ConvertTo-Json | Set-Content (Join-Path $stage 'runtime-build.json') -Encoding UTF8
 
