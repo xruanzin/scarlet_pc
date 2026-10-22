@@ -33,7 +33,10 @@ Write-Host "[Scarlet PC] Starting: $game" -ForegroundColor Cyan
 Push-Location $PackageDir
 try {
     & $exe -g $game
-    exit $LASTEXITCODE
+    $code = $LASTEXITCODE
+    if ($code -ne 0) {
+        throw "ScarletPC.exe exited with code $code"
+    }
 }
 finally {
     Pop-Location
