@@ -6,8 +6,10 @@ param(
     [switch]$RuntimeOnly,
     [switch]$GameDllOnly,
     [switch]$FunctionInstrument,
+    [switch]$CompactGameDll,
+    [switch]$GuestForceInline,
     [switch]$ThinLTO,
-    [switch]$NoThinLTO,  # compatibility switch; upstream-style game builds already default to no ThinLTO
+    [switch]$NoThinLTO,
     [int]$LtoJobs = 4
 )
 
@@ -18,6 +20,9 @@ if ($RuntimeOnly -and $GameDllOnly) {
 }
 if ($ThinLTO -and $NoThinLTO) {
     throw "-ThinLTO e -NoThinLTO sao mutuamente exclusivos."
+}
+if ($RuntimeOnly -and ($CompactGameDll -or $GuestForceInline -or $ThinLTO -or $NoThinLTO)) {
+    throw "-RuntimeOnly preserva a lasgame.dll existente; opcoes de perfil da DLL nao se aplicam."
 }
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -119,17 +124,43 @@ if ((-not $GameDllOnly) -and (-not $IncrementalRuntime -or $ForceRuntime)) {
     }
 }
 
-# The backtick keeps $PATH for Bash instead of expanding it in PowerShell.
-# Match upstream LASRecomp by default: no LTO for generated game code.
-# ThinLTO is now opt-in only via -ThinLTO.
-$PerfMake = " THINLTO=0"
-if ($ThinLTO) {
-    $PerfMake = " THINLTO=1 LTO_JOBS=$LtoJobs"
-    Write-Host "[scarlet-build] ThinLTO ativado explicitamente para lasgame.dll." -ForegroundColor Green
+# Game DLL profiles:
+# default = last known-good Scarlet build (-O3 + strict-FP-friendly opts + znver2 + ThinLTO)
+# -CompactGameDll = the smaller upstream-style -O1/no-LTO experiment.
+$EffectiveThinLto = -not $CompactGameDll
+if ($ThinLTO) { $EffectiveThinLto = $true }
+if ($NoThinLTO) { $EffectiveThinLto = $false }
+
+$PerfMake = if ($CompactGameDll) { " COMPACT_GAMEDLL=1" } else { " COMPACT_GAMEDLL=0" }
+$PerfMake += if ($EffectiveThinLto) { " THINLTO=1 LTO_JOBS=$LtoJobs" } else { " THINLTO=0" }
+
+if ($CompactGameDll) {
+    Write-Host "[scarlet-build] lasgame.dll: perfil COMPACTO experimental (-O1)." -ForegroundColor Yellow
 } else {
-    Write-Host "[scarlet-build] lasgame.dll: perfil upstream LASRecomp (sem ThinLTO)." -ForegroundColor Green
+    Write-Host "[scarlet-build] lasgame.dll: perfil CONHECIDO FUNCIONAL (-O3 + FP opts + znver2)." -ForegroundColor Green
+}
+Write-Host ("[scarlet-build] ThinLTO: " + $(if ($EffectiveThinLto) { "ON" } else { "OFF" })) -ForegroundColor Green
+
+$GuestInlineMake = if ($GuestForceInline) { " GUEST_FORCE_INLINE=1" } else { " GUEST_FORCE_INLINE=0" }
+if ($GuestForceInline) {
+    Write-Host "[scarlet-build] Guest scalar helpers: always_inline ATIVADO (experimento derivado do scarlet-recomp)." -ForegroundColor Magenta
 }
 $InstrumentMake = if ($FunctionInstrument) { " FNINSTRUMENT=1 B=$BuildRel" } else { "" }
+
+# Before an experimental game-DLL rebuild, preserve the current pair once. This
+# prevents another optimization experiment from destroying the bootable baseline.
+if ($GameDllOnly -and ($CompactGameDll -or $GuestForceInline -or $NoThinLTO)) {
+    $ExistingDll = Join-Path $BuildDir "lasgame.dll"
+    $ExistingId = Join-Path $BuildDir "lasgame.dll.id"
+    if ((Test-Path -LiteralPath $ExistingDll -PathType Leaf) -and (Test-Path -LiteralPath $ExistingId -PathType Leaf)) {
+        $BackupDir = Join-Path $BuildDir "gamedll-backups"
+        New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
+        $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        Copy-Item -LiteralPath $ExistingDll -Destination (Join-Path $BackupDir "lasgame-pre-experiment-$Stamp.dll")
+        Copy-Item -LiteralPath $ExistingId -Destination (Join-Path $BackupDir "lasgame-pre-experiment-$Stamp.dll.id")
+        Write-Host "[scarlet-build] DLL anterior preservada em $BackupDir" -ForegroundColor Cyan
+    }
+}
 
 # Runtime-only means exactly that: preserve the existing huge lasgame.dll and
 # compile the EXE against the DLL's existing GAMELIB_ID, even if generator/HLE
@@ -155,7 +186,7 @@ $Targets = if ($RuntimeOnly) {
 } else {
     "$BuildRel/ScarletRecomp.exe $BuildRel/lasgame.dll"
 }
-$Cmd = "set -o pipefail; export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin':`$PATH; cd '$RepoPosix'; make -j$Jobs EXE_NAME=ScarletRecomp$PerfMake$InstrumentMake$GameIdMake $Targets 2>&1 | tee $BuildLogName"
+$Cmd = "set -o pipefail; export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin':`$PATH; cd '$RepoPosix'; make -j$Jobs EXE_NAME=ScarletRecomp$PerfMake$GuestInlineMake$InstrumentMake$GameIdMake $Targets 2>&1 | tee $BuildLogName"
 
 & $Bash -lc $Cmd
 $Code = $LASTEXITCODE
@@ -187,7 +218,7 @@ if (-not $GameDllOnly) {
 
 $ThinLtoMarker = Join-Path $BuildDir ".thinlto_enabled"
 if (-not $RuntimeOnly) {
-    if ($ThinLTO) {
+    if ($EffectiveThinLto) {
         Set-Content -LiteralPath $ThinLtoMarker -Value "1" -Encoding ASCII
     }
     elseif (Test-Path -LiteralPath $ThinLtoMarker) {
