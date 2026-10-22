@@ -25,8 +25,12 @@ Require-Command cmake
 function Get-ScarletGlslangValidator {
     $existing = Get-Command glslangValidator.exe -ErrorAction SilentlyContinue
     if ($existing) {
-        Write-Host "[Scarlet PC] Using glslangValidator: $($existing.Source)" -ForegroundColor DarkGray
-        return $existing.Source
+        $repoRoot = Split-Path $PSScriptRoot -Parent
+        $stableDir = Join-Path $repoRoot 'build\tools\glslang-bin'
+        New-Item -ItemType Directory -Force -Path $stableDir | Out-Null
+        $stableExe = Join-Path $stableDir 'glslangValidator.exe'
+        Copy-Item $existing.Source $stableExe -Force
+        return ($stableExe -replace '\\','/')
     }
 
     $version = '16.6.0'
@@ -43,8 +47,11 @@ function Get-ScarletGlslangValidator {
             Select-Object -First 1
     }
     if ($exe) {
-        Write-Host "[Scarlet PC] Reusing shader compiler: $($exe.FullName)" -ForegroundColor DarkGray
-        return $exe.FullName
+        $stableDir = Join-Path $repoRoot 'build\tools\glslang-bin'
+        New-Item -ItemType Directory -Force -Path $stableDir | Out-Null
+        $stableExe = Join-Path $stableDir 'glslangValidator.exe'
+        Copy-Item $exe.FullName $stableExe -Force
+        return ($stableExe -replace '\\','/')
     }
 
     New-Item -ItemType Directory -Force -Path $toolsRoot | Out-Null
@@ -125,8 +132,16 @@ function Get-ScarletGlslangValidator {
         throw "glslang build completed but no shader compiler executable was found."
     }
 
-    Write-Host "[Scarlet PC] Shader compiler ready: $($exe.FullName)" -ForegroundColor Green
-    return $exe.FullName
+    $stableDir = Join-Path $repoRoot 'build\tools\glslang-bin'
+    New-Item -ItemType Directory -Force -Path $stableDir | Out-Null
+    $stableExe = Join-Path $stableDir 'glslangValidator.exe'
+    Copy-Item $exe.FullName $stableExe -Force
+
+    # CMake/Visual Studio custom shader commands are sensitive to Windows path
+    # quoting. Hand them one short, stable, slash-normalized executable path.
+    $stableForCmake = $stableExe -replace '\\','/'
+    Write-Host "[Scarlet PC] Shader compiler ready: $stableExe" -ForegroundColor Green
+    return $stableForCmake
 }
 
 $glslangValidator = Get-ScarletGlslangValidator
@@ -198,7 +213,7 @@ $configure = @(
     '-DYUZU_ROOM_STANDALONE=OFF',
     '-DBUILD_TESTING=OFF',
     '-DYUZU_TESTS=OFF',
-    "-DGLSLANGVALIDATOR=$glslangValidator"
+    "-DGLSLANGVALIDATOR:FILEPATH=$glslangValidator"
 )
 
 & cmake @configure
