@@ -1,5 +1,4 @@
 param(
-    [Parameter(Mandatory = $true)]
     [string]$ExportRoot,
 
     [Parameter(Mandatory = $true)]
@@ -8,7 +7,9 @@ param(
     [ValidateRange(1, 4)]
     [int]$Jobs = 1,
 
-    [switch]$RefreshRuntimeSource
+    [switch]$RefreshRuntimeSource,
+
+    [switch]$RebuildAot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,7 +20,30 @@ $game = (Resolve-Path $GamePath).Path
 
 Write-Host '=== Scarlet PC self-built runtime bootstrap ===' -ForegroundColor Magenta
 
-& (Join-Path $PSScriptRoot 'scarlet_aot_build.ps1') -ExportRoot $ExportRoot -Jobs $Jobs
+$aotDir = Join-Path $repoRoot 'build\aot\modules'
+$aotModules = @(
+    'recompiled_image.dll',
+    'recompiled_rtld.dll',
+    'recompiled_subsdk0.dll',
+    'recompiled_sdk.dll'
+)
+$haveAot = $true
+foreach ($module in $aotModules) {
+    if (-not (Test-Path (Join-Path $aotDir $module) -PathType Leaf)) {
+        $haveAot = $false
+        break
+    }
+}
+
+if ($haveAot -and -not $RebuildAot) {
+    Write-Host '[Scarlet PC] Reusing existing Scarlet AOT modules.' -ForegroundColor Green
+}
+else {
+    if ([string]::IsNullOrWhiteSpace($ExportRoot)) {
+        throw 'AOT modules are missing. Pass -ExportRoot once, or use -RebuildAot with a valid export.'
+    }
+    & (Join-Path $PSScriptRoot 'scarlet_aot_build.ps1') -ExportRoot $ExportRoot -Jobs $Jobs
+}
 & (Join-Path $PSScriptRoot 'scarlet_runtime_build.ps1') -Jobs $Jobs -RefreshSource:$RefreshRuntimeSource
 & (Join-Path $PSScriptRoot 'scarlet_independent_package.ps1')
 
