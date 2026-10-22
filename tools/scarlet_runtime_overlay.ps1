@@ -197,8 +197,23 @@ if (Test-Path $projectIcon -PathType Leaf) {
     Copy-Item $projectIcon $runtimeIcon -Force
 }
 
-# Project-owned config name.
+# Project-owned config and cache names.
 Replace-Literal 'src\frontend_common\config.cpp' 'FS::GetSuyuPath(FS::SuyuPath::ConfigDir) / "sdl2-config.ini";' 'FS::GetSuyuPath(FS::SuyuPath::ConfigDir) / "scarlet.ini";'
+
+$old = @'
+for (const char* sub : {"config", "cache", "cache/shader", "log", "nand", "sdmc", "dump",
+                                     "load", "screenshots", "play_time", "crash_dumps", "amiibo", "tas",
+                                     "icons", "themes"}) {
+'@
+$new = @'
+for (const char* sub : {"config", "cache", "cache/scarlet", "cache/scarlet/shader", "log", "nand", "sdmc", "dump",
+                                     "load", "screenshots", "play_time", "crash_dumps", "amiibo", "tas",
+                                     "icons", "themes"}) {
+'@
+Replace-Literal 'src\suyu_cmd\suyu.cpp' $old.Trim() $new.Trim()
+
+Replace-Literal 'src\suyu_cmd\suyu.cpp' 'FS::SetSuyuPath(FS::SuyuPath::CacheDir, user_root / "cache");' 'FS::SetSuyuPath(FS::SuyuPath::CacheDir, user_root / "cache" / "scarlet");'
+Replace-Literal 'src\suyu_cmd\suyu.cpp' 'FS::SetSuyuPath(FS::SuyuPath::ShaderDir, user_root / "cache" / "shader");' 'FS::SetSuyuPath(FS::SuyuPath::ShaderDir, user_root / "cache" / "scarlet" / "shader");'
 
 # Public nswitch fallback contract; the old variable remains a developer compatibility alias.
 $old = @'
