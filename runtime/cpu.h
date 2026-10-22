@@ -2,7 +2,6 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
-#include <stdatomic.h>
 #include <string.h>
 
 typedef struct __attribute__((aligned(16))) Cpu {
@@ -31,43 +30,8 @@ _Static_assert(offsetof(Cpu, v) == 512, "v");
 
 typedef void (*GuestFn)(Cpu *);
 
-// WindowSmash-style two-way inline cache for one indirect guest call
-// site. The generated DLL keeps one tiny cache next to each hot BLR. A
-// hit avoids the shared dispatch hash/table entirely; misses still go through
-// dispatch.c, which deliberately never puts HLE/native overrides in this cache.
-typedef struct {
-    // Two targets cover the overwhelmingly common C++ virtual-call pattern in
-    // Scarlet: one call site alternating between two concrete object types.
-    // Slot 0 stays sticky; slot 1 is the replaceable secondary target.
-    _Atomic(uintptr_t) fn[2];
-    _Atomic uint64_t key[2];
-} RtCallCache;
-#define RT_CALL_CACHE_MIX(p) ((uint64_t)(uintptr_t)(p) * 0x9E3779B97F4A7C15ull)
-
 // ---- runtime services (runtime/*.c)
 void rt_dispatch(Cpu *c);                 // call function at c->pc
-GuestFn rt_dispatch_cached_slow(Cpu *c, RtCallCache *cache);
-static inline void rt_dispatch_cached(Cpu *c, RtCallCache *cache) {
-    // Guest longjmp returns are recognized by rt_dispatch. Do not let a hot
-    // branch-site cache bypass that uncommon control-flow escape.
-    if (__builtin_expect(c->pc == c->x[30], 0)) {
-        rt_dispatch(c);
-        return;
-    }
-
-    uintptr_t hit0 = atomic_load_explicit(&cache->fn[0], memory_order_relaxed);
-    uint64_t key0 = atomic_load_explicit(&cache->key[0], memory_order_acquire);
-    if (__builtin_expect(hit0 && (key0 ^ RT_CALL_CACHE_MIX(hit0)) == c->pc, 1)) {
-        ((GuestFn)hit0)(c);
-        return;
-    }
-
-    uintptr_t hit1 = atomic_load_explicit(&cache->fn[1], memory_order_relaxed);
-    uint64_t key1 = atomic_load_explicit(&cache->key[1], memory_order_acquire);
-    GuestFn f = hit1 && (key1 ^ RT_CALL_CACHE_MIX(hit1)) == c->pc
-        ? (GuestFn)hit1 : rt_dispatch_cached_slow(c, cache);
-    f(c);
-}
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc);
 void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) __attribute__((noreturn));
 void rt_udf(Cpu *c, uint64_t pc) __attribute__((noreturn));
@@ -96,25 +60,14 @@ typedef uint8_t __attribute__((may_alias)) u8a;
 // Function-entry profiler (runtime/fnprof.c, LARECOMP_FNPROF): one predictable branch per call when off.
 // Function hooks (runtime/fnhook.c): while any is registered, rt_fnhook may handle the call (returns 1: the guest
 // function returns at once, with the registers the hook left).
-enum { FN_FLAG_PROF = 1u, FN_FLAG_HOOK = 2u };
-extern volatile unsigned g_fn_enter_flags;
+extern volatile int g_fnprof;
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
+extern volatile int g_fnhook;
 int rt_fnhook(Cpu *c, uint64_t addr);
-#ifdef LARECOMP_FN_INSTRUMENT
-#define FN_ENTER(a) do {                                                                 \
-        unsigned _ff = __atomic_load_n(&g_fn_enter_flags, __ATOMIC_RELAXED);               \
-        if (__builtin_expect(_ff != 0, 0)) {                                               \
-            if (_ff & FN_FLAG_PROF) fnprof_hit(a, c->x[30], c->x[0]);                     \
-            if ((_ff & FN_FLAG_HOOK) && rt_fnhook(c, a)) return;                          \
-        }                                                                                  \
+#define FN_ENTER(a) do {                                                             \
+        if (__builtin_expect(g_fnprof, 0)) fnprof_hit(a, c->x[30], c->x[0]);         \
+        if (__builtin_expect(g_fnhook, 0) && rt_fnhook(c, a)) return;                \
     } while (0)
-#else
-// Performance build: Scarlet can enter ~180k lifted functions per frame.
-// Do not pay even one atomic load/branch per entry for disabled diagnostics.
-// Use make FNINSTRUMENT=1 (or the diagnostic build helper) when function-entry
-// profiling/hooks are explicitly required.
-#define FN_ENTER(a) do { (void)sizeof(a); } while (0)
-#endif
 
 #define LD8(a)  (*(const u8a *)(uintptr_t)(a))
 #define LD16(a) (*(const u16u *)(uintptr_t)(a))
