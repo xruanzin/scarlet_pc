@@ -37,10 +37,22 @@ EXE_NAME  ?= lasrecomp
 CC       := clang $(CROSS)
 CXX      := clang++ $(CROSS)
 IMGUI    := third_party/imgui
-# Match the original LASRecomp game-code build profile.
-# Keep Scarlet-specific module/layout support, but compile lifted guest code
-# with the upstream optimization policy to reduce code size and build cost.
+# Scarlet known-good game-code profile. This is the profile used by the last
+# lasgame.dll known to boot/play before the compact-DLL experiments.
+# Keep strict guest FP semantics: these flags do not enable fast-math.
+COMPACT_GAMEDLL ?= 0
+ifeq ($(COMPACT_GAMEDLL),1)
 GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+else
+GENFLAGS := -O3 -fno-strict-aliasing -fno-math-errno -fno-trapping-math -fno-semantic-interposition -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+endif
+
+# OpenSmash/SSBU-recomp-derived experiment: force only tiny scalar helpers to
+# inline. Off by default so the known-good DLL profile remains reproducible.
+GUEST_FORCE_INLINE ?= 0
+ifeq ($(GUEST_FORCE_INLINE),1)
+GENFLAGS += -DLARECOMP_GUEST_FORCE_INLINE=1
+endif
 
 # Function-entry profiling/hooks are deliberately compiled out of the normal
 # performance build. They add an atomic load/branch to every lifted function.
@@ -86,7 +98,11 @@ else
 EXE      := $(B)/$(EXE_NAME).exe
 DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
 OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S -DWIN32_LEAN_AND_MEAN -DNOMINMAX
-GENARCH  ?= -march=x86-64-v3  # same policy as upstream LASRecomp on Windows
+ifeq ($(COMPACT_GAMEDLL),1)
+GENARCH  ?= -march=x86-64-v3
+else
+GENARCH  ?= -march=x86-64-v3 -mtune=znver2  # last known-good Scarlet DLL profile on Ryzen/Zen 2
+endif
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
             -lvulkan-1 -lwinmm -lgdi32 -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared \
@@ -104,9 +120,13 @@ GAMELIB_LDFLAGS := -shared -fuse-ld=lld $(B)/lasrecomp.dll.a
 GAMELIB_SHARED := -shared  # (+ the import library: runtime/gamebuild.c)
 endif
 
-# Upstream LASRecomp does not use LTO for the generated game library.
-# Keep ThinLTO available only as an explicit experiment; default stays off.
+# The last known-good Scarlet DLL used ThinLTO. Compact mode keeps the former
+# upstream-style no-LTO experiment available explicitly.
+ifeq ($(COMPACT_GAMEDLL),1)
 THINLTO ?= 0
+else
+THINLTO ?= 1
+endif
 LTO_JOBS ?= 6
 ifeq ($(THINLTO),1)
 GENFLAGS += -flto=thin
