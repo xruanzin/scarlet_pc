@@ -118,107 +118,11 @@ function Get-ScarletGlslangValidator {
     }
 
     $cmakeHelp = (& cmake --help | Out-String)
-    if ($cmakeHelp -match 'Visual Studio 18 2026') {
-        $generator = @('-G', 'Visual Studio 18 2026', '-A', 'x64')
-    }
-    elseif ($cmakeHelp -match 'Visual Studio 17 2022') {
-        $generator = @('-G', 'Visual Studio 17 2022', '-A', 'x64')
-    }
-    elseif (Get-Command ninja -ErrorAction SilentlyContinue) {
-        $generator = @('-G', 'Ninja')
-    }
-    else {
-        throw "No supported generator available to build glslang."
-    }
-
-    New-Item -ItemType Directory -Force -Path $build | Out-Null
-
-    Write-Host "[Scarlet PC] Building pinned glslangValidator locally..." -ForegroundColor Cyan
-    $configureGlslang = @(
-        '-S', $source,
-        '-B', $build
-    ) + $generator + @(
-        '-DGLSLANG_TESTS=OFF',
-        '-DGLSLANG_ENABLE_INSTALL=OFF',
-        '-DENABLE_GLSLANG_BINARIES=ON',
-        '-DENABLE_OPT=OFF',
-        '-DBUILD_EXTERNAL=OFF',
-        '-DENABLE_HLSL=OFF'
-    )
-
-    & cmake @configureGlslang
-    if ($LASTEXITCODE -ne 0) {
-        throw "glslang CMake configure failed."
-    }
-
-    & cmake --build $build --config Release --target glslang-standalone --parallel 1
-    if ($LASTEXITCODE -ne 0) {
-        throw "glslang build failed."
-    }
-
-    $exe = Get-ChildItem $build -Recurse -File -Filter 'glslangValidator.exe' |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1
-    if (-not $exe) {
-        $exe = Get-ChildItem $build -Recurse -File -Filter 'glslang.exe' |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
-    }
-    if (-not $exe) {
-        throw "glslang build completed but no shader compiler executable was found."
-    }
-
-    $stableDir = Join-Path $repoRoot 'build\tools\glslang-bin'
-    New-Item -ItemType Directory -Force -Path $stableDir | Out-Null
-    $stableExe = Join-Path $stableDir 'glslangValidator.exe'
-    Copy-Item $exe.FullName $stableExe -Force
-
-    # CMake/Visual Studio custom shader commands are sensitive to Windows path
-    # quoting. Hand them one short, stable, slash-normalized executable path.
-    $stableForCmake = $stableExe -replace '\\','/'
-    Write-Host "[Scarlet PC] Shader compiler ready: $stableExe" -ForegroundColor Green
-    return $stableForCmake
-}
-
-$glslangValidator = Get-ScarletGlslangValidator
-
-if ($RefreshSource -and (Test-Path $SourceDir)) {
-    Remove-Item $SourceDir -Recurse -Force
-}
-
-if (-not (Test-Path (Join-Path $SourceDir '.git'))) {
-    New-Item -ItemType Directory -Force -Path (Split-Path $SourceDir -Parent) | Out-Null
-    Write-Host "[Scarlet PC] Fetching pinned runtime source..." -ForegroundColor Cyan
-    & git clone --filter=blob:none --recurse-submodules $upstream $SourceDir
-    if ($LASTEXITCODE -ne 0) { throw "Runtime source clone failed." }
-}
-
-Push-Location $SourceDir
-try {
-    & git fetch origin $revision --depth 1
-    if ($LASTEXITCODE -ne 0) { throw "Could not fetch pinned runtime revision." }
-
-    & git checkout --detach $revision
-    if ($LASTEXITCODE -ne 0) { throw "Could not checkout pinned runtime revision." }
-
-    & git submodule update --init --recursive
-    if ($LASTEXITCODE -ne 0) { throw "Runtime submodule update failed." }
-
-    $actual = (& git rev-parse HEAD).Trim()
-    if ($actual -ne $revision) {
-        throw "Runtime source revision mismatch: $actual"
-    }
-}
-finally {
-    Pop-Location
-}
-
-New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
-
-$cmakeHelp = (& cmake --help | Out-String)
 $generatorArgs = @()
 $usingNinja = $false
 
+# Upstream Windows builds use Ninja. It also avoids MSBuild custom-command
+# quoting failures when invoking glslang for the host SPIR-V shaders.
 if (Get-Command ninja.exe -ErrorAction SilentlyContinue) {
     Import-MsvcEnvironment
     $generatorArgs = @('-G', 'Ninja')
@@ -231,13 +135,18 @@ elseif ($cmakeHelp -match 'Visual Studio 17 2022') {
     $generatorArgs = @('-G', 'Visual Studio 17 2022', '-A', 'x64')
 }
 else {
-    throw "No supported Visual Studio or Ninja CMake generator was found."
+    throw 'No supported Visual Studio or Ninja CMake generator was found.'
 }
 
 $cache = Join-Path $BuildDir 'CMakeCache.txt'
 if ($usingNinja -and (Test-Path $cache)) {
-    $cachedGenerator = Select-String -Path $cache -Pattern '^CMAKE_GENERATOR:INTERNAL=(.+)
-
+    $cachedGenerator = Select-String -Path $cache -Pattern '^CMAKE_GENERATOR:INTERNAL=(.+)$' | Select-Object -First 1
+    if ($cachedGenerator -and $cachedGenerator.Matches[0].Groups[1].Value -ne 'Ninja') {
+        Write-Host '[Scarlet PC] Switching runtime build from MSBuild to Ninja; clearing only the runtime build directory.' -ForegroundColor Yellow
+        Remove-Item $BuildDir -Recurse -Force
+        New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+    }
+}
 Write-Host "[Scarlet PC] Configuring self-built runtime." -ForegroundColor Cyan
 Write-Host "[Scarlet PC] Runtime revision: $revision" -ForegroundColor Cyan
 Write-Host "[Scarlet PC] Dynarmic/JIT: disabled" -ForegroundColor Cyan
