@@ -1,32 +1,40 @@
-# Scarlet PC — self-built runtime path
+# Scarlet PC — independent runtime path
 
-Scarlet PC must not require a separately installed suyu package.
+Scarlet PC is designed to run without requiring a separately installed emulator/runtime package.
 
-The first independence milestone is: the repository fetches one pinned GPL runtime source revision, builds its own Windows host, combines it with Scarlet's AOT modules, and produces `ScarletPC.exe`.
+The current independence milestone is: the repository builds its own Windows host, combines it with Scarlet's AOT modules, and produces `ScarletPC.exe`.
 
-This is runtime/package independence. The inherited runtime foundation remains GPL-derived work and keeps its provenance.
+Eden was used as a technical reference for runtime architecture, build organization and integration ideas while shaping this path. Scarlet PC keeps its own Pokémon Scarlet-specific AOT integration, packaging, diagnostics, compatibility work and performance changes.
+
+This is runtime/package independence. Third-party code provenance and licensing are documented separately in `THIRD_PARTY.md`.
 
 ## CPU path
 
-The self-built host is configured with `SUYU_NO_JIT=ON`, so Dynarmic/JIT is not part of this host. The validated Scarlet run already showed no static-to-JIT transitions and no unimplemented opcode transitions in the observed execution.
+The self-built host is AOT-first.
 
-The runner also sets `SUYU_RECOMP_STRICT=1`, so an uncovered AOT address fails explicitly instead of silently using a fallback.
+Scarlet's four recompiled modules are loaded natively and remain the primary execution path. Dynarmic/JIT is compiled into the Scarlet PC runtime only as a guarded fallback for code that is generated, modified or otherwise unavailable to the static AOT image at runtime.
 
-## Pinned runtime source
+The runner uses the non-strict fallback policy so a guarded AOT mismatch can hand execution to the internal fallback instead of terminating the process. When execution returns to covered code, the runtime can resume the static AOT path.
+
+## Runtime baseline
+
+Validated runtime revision:
 
 `347fcf91d95cd39cb5c3db50f1b6d827ad699311`
 
-The source is fetched into `third_party/scarlet-runtime-src` and treated as a build input, not as original Scarlet PC authorship.
+The source is fetched into `third_party/scarlet-runtime-src` and treated as a third-party build input, not as original Scarlet PC authorship.
+
+Technical architecture/build decisions for the independent host were informed by Eden as a reference. Exact third-party provenance is kept in `THIRD_PARTY.md`.
 
 ## Build
 
 Run:
 
 ```powershell
-.\tools\scarlet_independent_setup.ps1 -ExportRoot "D:\scarlet\Pokémon Scarlet - Hybrid AOT + JIT" -GamePath "$env:USERPROFILE\Downloads\Pokemon Scarlet\Pokemon Scarlet.nsp" -Jobs 1
+.\tools\scarlet_independent_setup.ps1 -GamePath "$env:USERPROFILE\Downloads\Pokemon Scarlet\Pokemon Scarlet.nsp" -Jobs 1
 ```
 
-There is no `-SuyuDir` argument.
+Existing Scarlet AOT modules are reused when present.
 
 The package is created at `dist\ScarletPC-Independent` and started with:
 
@@ -34,4 +42,4 @@ The package is created at `dist\ScarletPC-Independent` and started with:
 .\tools\scarlet_independent_run.ps1
 ```
 
-After validating this host, the next milestone is moving Source-export generation into Scarlet PC too, so the user no longer supplies `ExportRoot` manually.
+The final player-facing goal is a normal Scarlet PC flow: select a legally obtained game once, prepare the local game-derived AOT cache, then launch from `ScarletPC.exe` without a separate runtime installation or terminal workflow.
