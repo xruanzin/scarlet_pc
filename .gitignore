@@ -38,3 +38,10 @@ scarlet_*.json
 
 # Portable Mesa Dozen package (downloaded locally, never committed)
 /tools/directx/
+
+# Scarlet PC shared-AOT generated outputs
+/dist/
+/aot_cache/
+recompiled_*.dll
+ScarletPC.exe
+scarlet-aot-manifest.json
