@@ -18,8 +18,58 @@ function Require-Command([string]$Name) {
     }
 }
 
+
 Require-Command git
 Require-Command cmake
+
+function Get-ScarletGlslangValidator {
+    $existing = Get-Command glslangValidator.exe -ErrorAction SilentlyContinue
+    if ($existing) {
+        Write-Host "[Scarlet PC] Using glslangValidator: $($existing.Source)" -ForegroundColor DarkGray
+        return $existing.Source
+    }
+
+    $version = '16.6.0'
+    $sha256 = '82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b'
+    $toolsRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'third_party\tools'
+    $root = Join-Path $toolsRoot "glslang-$version-windows-x86_64"
+    $exe = Get-ChildItem $root -Recurse -File -Filter 'glslangValidator.exe' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+
+    if ($exe) {
+        return $exe.FullName
+    }
+
+    New-Item -ItemType Directory -Force -Path $toolsRoot | Out-Null
+    $zip = Join-Path $toolsRoot "glslang-$version-windows-x86_64-release.zip"
+    $url = "https://github.com/KhronosGroup/glslang/releases/download/$version/glslang-$version-windows-x86_64-release.zip"
+
+    Write-Host "[Scarlet PC] Fetching pinned shader compiler glslang $version..." -ForegroundColor Cyan
+    Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+
+    $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $sha256) {
+        Remove-Item $zip -Force -ErrorAction SilentlyContinue
+        throw "glslang archive SHA256 mismatch. Expected $sha256, got $actual"
+    }
+
+    if (Test-Path $root) {
+        Remove-Item $root -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $root | Out-Null
+    Expand-Archive -Path $zip -DestinationPath $root -Force
+
+    $exe = Get-ChildItem $root -Recurse -File -Filter 'glslangValidator.exe' |
+        Select-Object -First 1
+    if (-not $exe) {
+        throw "Downloaded glslang package does not contain glslangValidator.exe"
+    }
+
+    Write-Host "[Scarlet PC] Shader compiler ready: $($exe.FullName)" -ForegroundColor Green
+    return $exe.FullName
+}
+
+$glslangValidator = Get-ScarletGlslangValidator
 
 if ($RefreshSource -and (Test-Path $SourceDir)) {
     Remove-Item $SourceDir -Recurse -Force
@@ -87,7 +137,8 @@ $configure = @(
     '-DYUZU_ROOM=OFF',
     '-DYUZU_ROOM_STANDALONE=OFF',
     '-DBUILD_TESTING=OFF',
-    '-DYUZU_TESTS=OFF'
+    '-DYUZU_TESTS=OFF',
+    "-DGLSLANGVALIDATOR=$glslangValidator"
 )
 
 & cmake @configure
