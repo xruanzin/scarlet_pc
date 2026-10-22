@@ -29,7 +29,7 @@ $game = (Resolve-Path $GamePath).Path
 
 Push-Location $package
 try {
-    $env:SUYU_RECOMP_STRICT = '0'
+    $env:NSWITCH_AOT_FALLBACK = '1'
     & $exe -g $game
     $code = $LASTEXITCODE
     if ($code -ne 0) {
@@ -37,6 +37,6 @@ try {
     }
 }
 finally {
-    Remove-Item Env:SUYU_RECOMP_STRICT -ErrorAction SilentlyContinue
+    Remove-Item Env:NSWITCH_AOT_FALLBACK -ErrorAction SilentlyContinue
     Pop-Location
 }
