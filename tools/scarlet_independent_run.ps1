@@ -32,9 +32,19 @@ if (-not (Test-Path $prodKeys -PathType Leaf)) {
     throw 'Scarlet PC cannot decrypt the game because user\keys\prod.keys is missing. Re-run scarlet_independent_setup.ps1 with -KeysPath pointing to your legally obtained prod.keys or keys folder.'
 }
 
+$provenancePath = Join-Path $repoRoot 'licenses\third-party\runtime-provenance.json'
+$legacyStrictEnv = $null
+if (Test-Path $provenancePath -PathType Leaf) {
+    $provenance = Get-Content $provenancePath -Raw | ConvertFrom-Json
+    $legacyStrictEnv = [string]$provenance.legacy.strict_env
+}
+
 Push-Location $package
 try {
     $env:NSWITCH_AOT_FALLBACK = '1'
+    if (-not [string]::IsNullOrWhiteSpace($legacyStrictEnv)) {
+        Set-Item -Path ("Env:" + $legacyStrictEnv) -Value '0'
+    }
     & $exe -g $game
     $code = $LASTEXITCODE
     if ($code -ne 0) {
@@ -43,5 +53,8 @@ try {
 }
 finally {
     Remove-Item Env:NSWITCH_AOT_FALLBACK -ErrorAction SilentlyContinue
+    if (-not [string]::IsNullOrWhiteSpace($legacyStrictEnv)) {
+        Remove-Item -Path ("Env:" + $legacyStrictEnv) -ErrorAction SilentlyContinue
+    }
     Pop-Location
 }
