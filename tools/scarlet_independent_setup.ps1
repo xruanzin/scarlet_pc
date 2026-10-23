@@ -4,6 +4,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$GamePath,
 
+    [string]$UpdatePath,
+
     [string]$KeysPath,
 
     [string]$IconPath,
@@ -21,6 +23,19 @@ Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $game = (Resolve-Path $GamePath).Path
+
+$update = $null
+if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
+    $update = (Resolve-Path $UpdatePath).Path
+}
+else {
+    $gameDir = Split-Path $game -Parent
+    $autoUpdate = Join-Path $gameDir 'Pokemon Scarlet v4.0.0.nsp'
+    if (Test-Path $autoUpdate -PathType Leaf) {
+        $update = (Resolve-Path $autoUpdate).Path
+        Write-Host "[Scarlet PC] Auto-detected update 4.0.0: $update" -ForegroundColor Green
+    }
+}
 
 Write-Host '=== Scarlet PC self-built runtime bootstrap ===' -ForegroundColor Magenta
 
@@ -120,6 +135,7 @@ if (-not (Test-Path (Join-Path $packageKeys 'prod.keys') -PathType Leaf)) {
 $localConfig = Join-Path $repoRoot 'build\scarlet-independent-local.json'
 [ordered]@{
     game_path   = $game
+    update_path = $update
     title_id    = '0100A3D008C5C000'
     package_dir = $packageDir
 } | ConvertTo-Json | Set-Content $localConfig -Encoding UTF8
