@@ -89,6 +89,16 @@ function Replace-RegexOnce([string]$RelativePath, [string]$Pattern, [string]$Rep
     }
 }
 
+# Build the host directly with the Scarlet PC executable name.
+$old = @'
+set(__UPPER___CMD_TARGETS __COMMAND__)
+'@
+$new = @'
+set(__UPPER___CMD_TARGETS __COMMAND__)
+    set_target_properties(__COMMAND__ PROPERTIES OUTPUT_NAME "ScarletPC")
+'@
+Replace-Literal 'src\__PRODUCT___cmd\CMakeLists.txt' $old.Trim() $new.Trim()
+
 # Player-facing Scarlet PC identity.
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' 'LOG_INFO(Frontend, "__COMMAND__ starting up...");' 'LOG_INFO(Frontend, "[Scarlet.Runtime] Scarlet PC starting");'
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' 'LOG_INFO(Frontend, "__COMMAND__: Initializing system...");' 'LOG_INFO(Frontend, "[Scarlet.Runtime] Initializing runtime");'
