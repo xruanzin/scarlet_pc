@@ -26,19 +26,51 @@ foreach ($sourceName in $aotMap.Keys) {
     }
 }
 
+$preservedUser = Join-Path $repoRoot 'build\scarlet-package-user-preserve'
+if (Test-Path $preservedUser) {
+    Remove-Item $preservedUser -Recurse -Force
+}
 if (Test-Path $OutputDir) {
+    $existingUser = Join-Path $OutputDir 'user'
+    if (Test-Path $existingUser -PathType Container) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $preservedUser -Parent) | Out-Null
+        Move-Item $existingUser $preservedUser -Force
+    }
     Remove-Item $OutputDir -Recurse -Force
 }
 
 $aotOut = Join-Path $OutputDir 'aot'
 $runtimeOut = Join-Path $OutputDir 'runtime\nswitch'
-$userConfig = Join-Path $OutputDir 'user\config'
-$userCache = Join-Path $OutputDir 'user\cache\scarlet'
+$userRoot = Join-Path $OutputDir 'user'
+$userConfig = Join-Path $userRoot 'config'
+$userCache = Join-Path $userRoot 'cache\scarlet'
+$userKeys = Join-Path $userRoot 'keys'
+$userNand = Join-Path $userRoot 'nand'
+$userSdmc = Join-Path $userRoot 'sdmc'
+$userLoad = Join-Path $userRoot 'load'
+$userLog = Join-Path $userRoot 'log'
+$userDump = Join-Path $userRoot 'dump'
+$userScreenshots = Join-Path $userRoot 'screenshots'
+$userPlayTime = Join-Path $userRoot 'play_time'
+$userCrashDumps = Join-Path $userRoot 'crash_dumps'
+$userAmiibo = Join-Path $userRoot 'amiibo'
+$userTas = Join-Path $userRoot 'tas'
+$userIcons = Join-Path $userRoot 'icons'
+$userThemes = Join-Path $userRoot 'themes'
 $modsOut = Join-Path $OutputDir 'mods'
 $licensesOut = Join-Path $OutputDir 'licenses\third-party'
 
-foreach ($dir in @($OutputDir, $aotOut, $runtimeOut, $userConfig, $userCache, $modsOut, $licensesOut)) {
+foreach ($dir in @(
+    $OutputDir, $aotOut, $runtimeOut, $userRoot, $userConfig, $userCache, $userKeys,
+    $userNand, $userSdmc, $userLoad, $userLog, $userDump, $userScreenshots, $userPlayTime,
+    $userCrashDumps, $userAmiibo, $userTas, $userIcons, $userThemes, $modsOut, $licensesOut
+)) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
+}
+
+if (Test-Path $preservedUser -PathType Container) {
+    Copy-Item (Join-Path $preservedUser '*') $userRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $preservedUser -Recurse -Force
 }
 
 Copy-Item $runtimeHostPath (Join-Path $OutputDir 'ScarletPC.exe') -Force
