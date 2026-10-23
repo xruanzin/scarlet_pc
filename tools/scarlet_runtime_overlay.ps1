@@ -20,6 +20,18 @@ $legacyUpper = [string]$provenance.legacy.upper
 $legacyCommandName = [string]$provenance.legacy.command_target
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 
+# Scarlet PC owns the software-keyboard frontend used by every swkbd applet call.
+$keyboardSourceDir = Join-Path $repoRoot 'runtime\nswitch'
+$keyboardTargetDir = Join-Path $SourceDir 'src\__PRODUCT___cmd'
+foreach ($name in @('scarlet_software_keyboard.h', 'scarlet_software_keyboard.cpp')) {
+    $src = Join-Path $keyboardSourceDir $name
+    $dst = Join-Path (Expand-Legacy $keyboardTargetDir) $name
+    if (-not (Test-Path $src -PathType Leaf)) {
+        throw "Missing Scarlet keyboard source: $src"
+    }
+    Copy-Item $src $dst -Force
+}
+
 function Expand-Legacy([string]$Text) {
     return $Text.Replace('__PRODUCT__', $legacyProduct).
         Replace('__PASCAL__', $legacyPascal).
@@ -90,6 +102,46 @@ function Replace-RegexOnce([string]$RelativePath, [string]$Pattern, [string]$Rep
         throw "Scarlet runtime overlay: expected pattern not found in $displayPath"
     }
 }
+
+# Build the Scarlet virtual-keyboard frontend into the command host.
+$old = @'
+        native_status.cpp
+        native_status.h
+        sdl_config.cpp
+'@
+$new = @'
+        native_status.cpp
+        native_status.h
+        scarlet_software_keyboard.cpp
+        scarlet_software_keyboard.h
+        sdl_config.cpp
+'@
+Replace-Literal 'src\__PRODUCT___cmd\CMakeLists.txt' $old.Trim() $new.Trim()
+
+# Register the Scarlet software keyboard before Core initializes default applets.
+$old = @'
+#include "__PRODUCT___cmd/native_status.h"
+'@
+$new = @'
+#include "__PRODUCT___cmd/native_status.h"
+#include "__PRODUCT___cmd/scarlet_software_keyboard.h"
+#include "core/hle/service/am/frontend/applets.h"
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    Core::System system{};
+    system.Initialize();
+'@
+$new = @'
+    Core::System system{};
+    Service::AM::Frontend::FrontendAppletSet scarlet_applets{};
+    scarlet_applets.software_keyboard =
+        std::make_unique<ScarletPC::SoftwareKeyboardApplet>();
+    system.SetFrontendAppletSet(std::move(scarlet_applets));
+    system.Initialize();
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
 # Build the host directly with the Scarlet PC executable name.
 $old = @'
