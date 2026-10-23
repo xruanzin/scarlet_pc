@@ -944,7 +944,15 @@ Replace-Literal 'src\core\hle\service\nvnflinger\hardware_composer.cpp' $old.Tri
 # through SCARLET_TARGET_FPS and remain real-time because the normal 100% speed limiter
 # stays enabled. Clamp to a sane desktop range; >60 is experimental for frame-bound
 # animations in Scarlet v1.0.0.
-Replace-Literal 'src\core\hle\service\vi\conductor.cpp' '#include "common/settings.h"' "#include <cstdlib>`n`n#include \"common/settings.h\""
+$old = @'
+#include "common/settings.h"
+'@
+$new = @'
+#include <cstdlib>
+
+#include "common/settings.h"
+'@
+Replace-Literal 'src\core\hle\service\vi\conductor.cpp' $old.Trim() $new.Trim()
 
 $old = @'
 constexpr auto FrameNs = std::chrono::nanoseconds{1000000000 / 60};
