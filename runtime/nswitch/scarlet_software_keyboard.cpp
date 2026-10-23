@@ -657,9 +657,9 @@ LRESULT CALLBACK KeyboardWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         }
 
         if (id == kIdError && !state->error_text.empty()) {
-            SetTextColor(dc, RGB(255, 120, 120));
+            SetTextColor(dc, RGB(205, 45, 45));
         } else {
-            SetTextColor(dc, RGB(255, 255, 255));
+            SetTextColor(dc, RGB(35, 35, 35));
         }
         return reinterpret_cast<LRESULT>(state->transparent_brush);
     }
@@ -936,36 +936,52 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
         .params = std::move(params),
         .error_text = std::move(error),
         .owner = owner,
-        .transparent_brush = CreateSolidBrush(kTransparentKey),
+        .transparent_brush = CreateSolidBrush(RGB(250, 250, 250)),
         .panel_brush = CreateSolidBrush(RGB(239, 239, 239)),
         .edit_brush = CreateSolidBrush(RGB(255, 255, 255)),
     };
 
-    // Eden/Yuzu places its software keyboard over the framebuffer, not in a separate
-    // desktop window. The scrim and keyboard below are child windows of the game HWND,
-    // so Alt-Tab/taskbar never sees another Scarlet PC window.
-    state.scrim = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TRANSPARENT, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_BLACKRECT,
-        0, 0, width, height, owner, nullptr, GetModuleHandleW(nullptr), nullptr);
-    if (state.scrim != nullptr) {
-        SetLayeredWindowAttributes(state.scrim, 0, 82, LWA_ALPHA);
-    }
-
+    // Creating a WS_CHILD directly from the applet worker thread fails on some
+    // Windows/SDL Vulkan window configurations. Create the keyboard hidden as a
+    // tool popup first (the path known to work), reparent it before it is ever shown,
+    // then convert it to a real child of the game HWND. The player never gets a
+    // separate taskbar/Alt-Tab window.
     state.hwnd = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_CONTROLPARENT, kKeyboardClass, L"",
-        WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, width, height, owner,
+        WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT, kKeyboardClass, L"",
+        WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, width, height, nullptr,
         nullptr, GetModuleHandleW(nullptr), &state);
 
     if (state.hwnd == nullptr) {
-        if (state.scrim != nullptr) DestroyWindow(state.scrim);
+        const DWORD error_code = GetLastError();
         DeleteObject(state.transparent_brush);
         DeleteObject(state.panel_brush);
         DeleteObject(state.edit_brush);
-        LOG_ERROR(Service_AM, "[Scarlet.Keyboard] Failed to create in-game keyboard overlay");
+        LOG_ERROR(Service_AM,
+                  "[Scarlet.Keyboard] Failed to create keyboard host, Win32 error={}",
+                  error_code);
         return {};
     }
 
-    SetLayeredWindowAttributes(state.hwnd, kTransparentKey, 255, LWA_COLORKEY);
+    SetLastError(ERROR_SUCCESS);
+    if (SetParent(state.hwnd, owner) == nullptr && GetLastError() != ERROR_SUCCESS) {
+        const DWORD error_code = GetLastError();
+        DestroyWindow(state.hwnd);
+        DeleteObject(state.transparent_brush);
+        DeleteObject(state.panel_brush);
+        DeleteObject(state.edit_brush);
+        LOG_ERROR(Service_AM,
+                  "[Scarlet.Keyboard] Failed to attach keyboard to game window, Win32 error={}",
+                  error_code);
+        return {};
+    }
+
+    LONG_PTR style = GetWindowLongPtrW(state.hwnd, GWL_STYLE);
+    style &= ~static_cast<LONG_PTR>(WS_POPUP);
+    style |= static_cast<LONG_PTR>(WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
+    SetWindowLongPtrW(state.hwnd, GWL_STYLE, style);
+    SetWindowPos(state.hwnd, HWND_TOP, 0, 0, width, height,
+                 SWP_FRAMECHANGED | SWP_NOACTIVATE);
+
     BuildKeyboardUi(state);
     SetTimer(state.hwnd, 1, 16, nullptr);
     g_keyboard_window.store(state.hwnd, std::memory_order_release);
@@ -977,9 +993,7 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
     }
 
     SetForegroundWindow(owner);
-    BringWindowToTop(state.scrim);
     BringWindowToTop(state.hwnd);
-    ShowWindow(state.scrim, SW_SHOW);
     ShowWindow(state.hwnd, SW_SHOW);
     UpdateWindow(state.hwnd);
     if (!state.nav_rows.empty()) FocusControl(state.nav_rows.front().front());
