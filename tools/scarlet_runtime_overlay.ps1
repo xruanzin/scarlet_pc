@@ -524,7 +524,8 @@ $new = @'
             const u32 rm = (opcode >> 16) & 31U;
             const u32 rd = opcode & 31U;
             if (rd != 31U) {
-                ctx.x[rd] = is64 ? ctx.x[rm] : static_cast<u32>(ctx.x[rm]);
+                const u64 source = rm == 31U ? 0 : ctx.x[rm];
+                ctx.x[rd] = is64 ? source : static_cast<u32>(source);
             }
             ctx.pc += 4;
             return true;
