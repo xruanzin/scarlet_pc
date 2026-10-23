@@ -450,6 +450,17 @@ $new = @'
 '@
 Replace-Literal 'src\__PRODUCT___cmd\native_status.h' $old.Trim() $new.Trim()
 
+$old = @'
+    out += " | ";
+    out += NativeBackendName(ClassifyGameBackend(s));
+    out += GameBackendQualifier(s);
+
+'@
+$new = @'
+
+'@
+Replace-Literal 'src\__PRODUCT___cmd\native_status.h' $old $new
+
 Replace-Literal 'src\__PRODUCT___cmd\native_status.h' 'return "suyu static AOT";' 'return "AOT";'
 Replace-Literal 'src\__PRODUCT___cmd\native_status.h' 'return "suyu Hybrid JIT + AOT";' 'return "AOT + dynamic fallback";'
 Replace-Literal 'src\__PRODUCT___cmd\native_status.h' 'return "suyu Dynarmic JIT";' 'return "Dynamic fallback";'
