@@ -4,7 +4,7 @@ Scarlet PC is designed to run without requiring a separately installed emulator/
 
 The current independence milestone is: the repository builds its own Windows host, combines it with Scarlet's AOT modules, and produces `ScarletPC.exe`.
 
-Eden was used as a technical reference for runtime architecture, build organization and integration ideas while shaping this path. The Pokémon Scarlet-specific AOT integration, packaging, diagnostics, compatibility work, port-specific functions and performance optimizations are implemented and maintained by **xruanzin** for Scarlet PC.
+The Pokémon Scarlet-specific AOT integration, packaging, diagnostics, compatibility work, port-specific functions and performance optimizations are implemented and maintained by **xruanzin** for Scarlet PC.
 
 This is runtime/package independence. Third-party code provenance and licensing are documented separately in `THIRD_PARTY.md`.
 
@@ -24,7 +24,7 @@ Validated runtime revision:
 
 The source is fetched into `third_party/scarlet-runtime-src` and treated as a third-party build input, not as original Scarlet PC authorship.
 
-Technical architecture/build decisions for the independent host were informed by Eden as a reference. Exact third-party provenance is kept in `THIRD_PARTY.md`.
+Exact third-party provenance for the runtime foundation is kept separately in `THIRD_PARTY.md`.
 
 ## Build
 
