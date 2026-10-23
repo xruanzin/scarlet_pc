@@ -100,7 +100,21 @@ set(__UPPER___CMD_TARGETS __COMMAND__)
 Replace-Literal 'src\__PRODUCT___cmd\CMakeLists.txt' $old.Trim() $new.Trim()
 
 # Player-facing Scarlet PC identity.
-Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' 'LOG_INFO(Frontend, "__COMMAND__ starting up...");' 'LOG_INFO(Frontend, "[Scarlet.Runtime] Scarlet PC starting");'
+$old = @'
+LOG_INFO(Frontend, "__COMMAND__ starting up...");
+'@
+$new = @'
+LOG_INFO(Frontend, "[Scarlet.Runtime] Scarlet PC starting");
+    const char* nswitch_fallback = std::getenv("NSWITCH_AOT_FALLBACK");
+    if (!nswitch_fallback || *nswitch_fallback != '0') {
+#ifdef _WIN32
+        _putenv_s("__UPPER___RECOMP_STRICT", "0");
+#else
+        setenv("__UPPER___RECOMP_STRICT", "0", 0);
+#endif
+    }
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' 'LOG_INFO(Frontend, "__COMMAND__: Initializing system...");' 'LOG_INFO(Frontend, "[Scarlet.Runtime] Initializing runtime");'
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' 'LOG_INFO(Frontend, "__COMMAND__: System initialized.");' 'LOG_INFO(Frontend, "[Scarlet.Runtime] Runtime initialized");'
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' 'LOG_INFO(Frontend, "__COMMAND__: Window created, loading game...");' 'LOG_INFO(Frontend, "[Scarlet.Runtime] Window ready");'
