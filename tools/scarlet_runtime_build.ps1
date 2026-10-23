@@ -9,8 +9,17 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$upstream = 'https://github.com/suyu-emu/suyu-main.git'
-$revision = '347fcf91d95cd39cb5c3db50f1b6d827ad699311'
+$repoRoot = Split-Path $PSScriptRoot -Parent
+$provenancePath = Join-Path $repoRoot 'licenses\third-party\runtime-provenance.json'
+if (-not (Test-Path $provenancePath -PathType Leaf)) {
+    throw "Missing runtime provenance file: $provenancePath"
+}
+$provenance = Get-Content $provenancePath -Raw | ConvertFrom-Json
+$upstream = [string]$provenance.source_url
+$revision = [string]$provenance.validated_revision
+$legacyTarget = [string]$provenance.legacy.command_target
+$legacyExeName = [string]$provenance.legacy.command_executable
+$legacyNoJitOption = [string]$provenance.legacy.no_jit_option
 
 function Require-Command([string]$Name) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
@@ -203,7 +212,7 @@ if ($usingNinja) { $configure += '-DCMAKE_BUILD_TYPE=Release' }
 $configure += @(
     '-DENABLE_QT=OFF',
     '-DYUZU_CMD=ON',
-    '-DSUYU_NO_JIT=OFF',
+    ("-D{0}=OFF" -f $legacyNoJitOption),
     '-DENABLE_OPENGL=OFF',
     '-DENABLE_WEB_SERVICE=OFF',
     '-DENABLE_UPDATE_CHECKER=OFF',
@@ -218,11 +227,11 @@ $configure += @(
 & cmake @configure
 if ($LASTEXITCODE -ne 0) { throw 'Scarlet runtime CMake configure failed.' }
 
-& cmake --build $BuildDir --config Release --target suyu-cmd --parallel $Jobs
+& cmake --build $BuildDir --config Release --target $legacyTarget --parallel $Jobs
 if ($LASTEXITCODE -ne 0) { throw 'Scarlet runtime build failed.' }
 
-$runtimeExe = Get-ChildItem $BuildDir -Recurse -File -Filter 'suyu-cmd.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $runtimeExe) { throw 'Runtime build succeeded but suyu-cmd.exe was not found.' }
+$runtimeExe = Get-ChildItem $BuildDir -Recurse -File -Filter $legacyExeName | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $runtimeExe) { throw 'Runtime build succeeded but its host executable was not found.' }
 
 $stage = Join-Path $BuildDir 'scarlet-stage'
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
@@ -237,7 +246,6 @@ Get-ChildItem $BuildDir -Recurse -File -Filter '*.dll' |
 [ordered]@{
     project          = 'Scarlet PC'
     runtime_revision = $revision
-    source_origin    = $upstream
     no_jit           = $false
     aot_primary      = $true
     jit_fallback     = $true
