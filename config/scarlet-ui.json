@@ -18,9 +18,7 @@
     "NSP",
     "NCA",
     "NSO",
-    "suyu-cmd",
-    "ArmRecomp",
-    "Dynarmic",
+    "runtime internals",
     "AOT ABI"
   ]
 }
