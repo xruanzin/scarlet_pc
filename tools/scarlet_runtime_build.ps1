@@ -239,7 +239,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Scarlet runtime CMake configure failed.' }
 & cmake --build $BuildDir --config Release --target $legacyTarget --parallel $Jobs
 if ($LASTEXITCODE -ne 0) { throw 'Scarlet runtime build failed.' }
 
-$runtimeExe = Get-ChildItem $BuildDir -Recurse -File -Filter $legacyExeName | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$runtimeExe = Get-ChildItem $BuildDir -Recurse -File -Filter 'ScarletPC.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $runtimeExe) { throw 'Runtime build succeeded but its host executable was not found.' }
 
 $stage = Join-Path $BuildDir 'scarlet-stage'
