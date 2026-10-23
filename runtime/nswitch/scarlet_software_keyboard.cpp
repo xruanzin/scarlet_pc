@@ -119,7 +119,7 @@ HWND FindGameWindow() {
                 return TRUE;
             }
             wchar_t title[256]{};
-            GetWindowTextW(hwnd, title, static_cast<int>(std::size(title)));
+            GetWindowTextW(hwnd, title, 256);
             if (title[0] == L'\0') {
                 return TRUE;
             }
@@ -479,6 +479,11 @@ void BuildKeyboardUi(DialogState& state) {
         }
         AddCharacterRow(state, font, last, y, 82, key_h, gap, width);
         y += key_h + 12;
+        if (state.params.enable_backspace_button) {
+            CreateControl(state.hwnd, L"BUTTON", L"Apagar", BS_PUSHBUTTON | WS_TABSTOP,
+                          (width - 150) / 2, y, 150, 42, kIdBackspace, font);
+            y += 54;
+        }
     } else {
         AddCharacterRow(state, font, L"1234567890", y, 66, key_h, gap, width);
         y += key_h + gap;
@@ -498,8 +503,10 @@ void BuildKeyboardUi(DialogState& state) {
         if (CharacterDisabled(state.params, L' ')) {
             EnableWindow(space, FALSE);
         }
-        CreateControl(state.hwnd, L"BUTTON", L"Apagar", BS_PUSHBUTTON | WS_TABSTOP,
-                      width - 220, y, 110, 42, kIdBackspace, font);
+        if (state.params.enable_backspace_button) {
+            CreateControl(state.hwnd, L"BUTTON", L"Apagar", BS_PUSHBUTTON | WS_TABSTOP,
+                          width - 220, y, 110, 42, kIdBackspace, font);
+        }
         y += 54;
     }
 
