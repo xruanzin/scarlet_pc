@@ -12,7 +12,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cwctype>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -152,10 +154,10 @@ fs::path g_ini_path;
 
 std::wstring GetText(HWND hwnd) {
     const int len = GetWindowTextLengthW(hwnd);
-    std::wstring text(static_cast<size_t>(len), L'\0');
-    if (len > 0) {
-        GetWindowTextW(hwnd, text.data(), len + 1);
-    }
+    if (len <= 0) return {};
+    std::wstring text(static_cast<size_t>(len) + 1, L'\0');
+    GetWindowTextW(hwnd, text.data(), len + 1);
+    text.resize(static_cast<size_t>(len));
     return text;
 }
 
