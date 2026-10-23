@@ -409,6 +409,46 @@ Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' 'FS::Set__PASCAL__Path(FS::__PASCAL__Path::CacheDir, user_root / "cache");' 'FS::Set__PASCAL__Path(FS::__PASCAL__Path::CacheDir, user_root / "cache" / "scarlet");'
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' 'FS::Set__PASCAL__Path(FS::__PASCAL__Path::ShaderDir, user_root / "cache" / "shader");' 'FS::Set__PASCAL__Path(FS::__PASCAL__Path::ShaderDir, user_root / "cache" / "scarlet" / "shader");'
 
+# Scarlet PC performance profile. Keep emulation/game speed at 100%, but move
+# presentation and shader compilation off the hot CPU path. The environment escape
+# hatch is useful for A/B testing driver-specific regressions.
+$old = @'
+        g_native_export_mode = true;
+
+        // Decode video on the CPU unless the user has chosen otherwise.
+'@
+$new = @'
+        g_native_export_mode = true;
+
+        const char* scarlet_perf = std::getenv("SCARLET_PERF_PROFILE");
+        const bool scarlet_perf_enabled =
+            scarlet_perf == nullptr || *scarlet_perf == '\0' || *scarlet_perf != '0';
+        if (scarlet_perf_enabled) {
+            // Do not unlock emulation speed: Scarlet's simulation still expects real time.
+            Settings::values.use_speed_limit.SetValue(true);
+            Settings::values.speed_limit.SetValue(100);
+
+            // Keep the GPU fed while the CPU continues guest/AOT work, and prevent
+            // vkQueuePresent / shader creation from serialising the main emulation path.
+            Settings::values.use_asynchronous_gpu_emulation.SetValue(true);
+            Settings::values.async_presentation.SetValue(true);
+            Settings::values.use_asynchronous_shaders.SetValue(true);
+            Settings::values.use_disk_shader_cache.SetValue(true);
+            Settings::values.use_vulkan_driver_pipeline_cache.SetValue(true);
+            Settings::values.sync_memory_operations.SetValue(false);
+
+            // Auto pacing follows the swapchain/monitor rather than imposing a 30/60 host cap.
+            // The guest-side Scarlet timing is handled separately; this only removes a host cap.
+            Settings::values.frame_pacing_mode.SetValue(Settings::FramePacingMode::Target_Auto);
+
+            LOG_INFO(Frontend,
+                     "[Scarlet.Perf] Async GPU/presentation/shaders enabled; game speed locked at 100%");
+        }
+
+        // Decode video on the CPU unless the user has chosen otherwise.
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
 # Public nswitch fallback contract; the old variable remains a developer compatibility alias.
 $old = @'
 bool StrictNoFallback() {
