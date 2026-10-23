@@ -1,5 +1,8 @@
 param(
-    [string]$GamePath
+    [string]$GamePath,
+
+    [ValidateRange(30, 240)]
+    [int]$TargetFps = 60
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,6 +45,8 @@ if (Test-Path $provenancePath -PathType Leaf) {
 Push-Location $package
 try {
     $env:NSWITCH_AOT_FALLBACK = '1'
+    $env:SCARLET_TARGET_FPS = [string]$TargetFps
+    Write-Host ("[Scarlet PC] Target presentation: {0} FPS" -f $TargetFps) -ForegroundColor Cyan
     if (-not [string]::IsNullOrWhiteSpace($legacyStrictEnv)) {
         Set-Item -Path ("Env:" + $legacyStrictEnv) -Value '0'
     }
@@ -57,6 +62,7 @@ try {
 }
 finally {
     Remove-Item Env:NSWITCH_AOT_FALLBACK -ErrorAction SilentlyContinue
+    Remove-Item Env:SCARLET_TARGET_FPS -ErrorAction SilentlyContinue
     if (-not [string]::IsNullOrWhiteSpace($legacyStrictEnv)) {
         Remove-Item -Path ("Env:" + $legacyStrictEnv) -ErrorAction SilentlyContinue
     }
