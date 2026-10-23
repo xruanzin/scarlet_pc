@@ -397,6 +397,59 @@ return fmt::format("[{:4d}.{:06d}] {} <{}> {}", time_seconds, time_fractional,
 Replace-Literal 'src\common\logging\text_formatter.cpp' $old.Trim() $new.Trim()
 
 # Scarlet-facing live title: FPS, frametime, shader activity and fallback transitions.
+# Keep an accumulated compiled-shader counter for the Scarlet title bar.
+$old = @'
+    [[nodiscard]] int ShadersBuilding() noexcept;
+
+    void MarkShaderComplete() noexcept {
+'@
+$new = @'
+    [[nodiscard]] int ShadersBuilding() noexcept;
+    [[nodiscard]] int ShadersCompiled() const noexcept {
+        return num_complete.load(std::memory_order_relaxed);
+    }
+
+    void MarkShaderComplete() noexcept {
+'@
+Replace-Literal 'src\video_core\shader_notify.h' $old.Trim() $new.Trim()
+
+$old = @'
+    int shaders_building{};
+'@
+$new = @'
+    int shaders_building{};
+    int shaders_compiled{};
+'@
+Replace-Literal 'src\__PRODUCT___cmd\native_status.h' $old.Trim() $new.Trim()
+
+$old = @'
+    if (display.game_running) {
+        display.shaders_building = system.GPU().ShaderNotify().ShadersBuilding();
+    }
+'@
+$new = @'
+    if (display.game_running) {
+        display.shaders_building = system.GPU().ShaderNotify().ShadersBuilding();
+        display.shaders_compiled = system.GPU().ShaderNotify().ShadersCompiled();
+    }
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    // Shown only while it is happening, so a stutter can be matched to it.
+    if (s.shaders_building > 0) {
+        out += " | Building " + std::to_string(s.shaders_building) +
+               (s.shaders_building == 1 ? " shader" : " shaders");
+    }
+'@
+$new = @'
+    out += " | Shaders: " + std::to_string(s.shaders_compiled);
+    if (s.shaders_building > 0) {
+        out += " (building " + std::to_string(s.shaders_building) + ")";
+    }
+'@
+Replace-Literal 'src\__PRODUCT___cmd\native_status.h' $old.Trim() $new.Trim()
+
 Replace-Literal 'src\__PRODUCT___cmd\native_status.h' 'return "suyu static AOT";' 'return "AOT";'
 Replace-Literal 'src\__PRODUCT___cmd\native_status.h' 'return "suyu Hybrid JIT + AOT";' 'return "AOT + dynamic fallback";'
 Replace-Literal 'src\__PRODUCT___cmd\native_status.h' 'return "suyu Dynarmic JIT";' 'return "Dynamic fallback";'
