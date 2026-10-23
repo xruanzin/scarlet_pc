@@ -27,9 +27,10 @@ function Expand-Legacy([string]$Text) {
 
 function Replace-Literal([string]$RelativePath, [string]$Old, [string]$New) {
     $RelativePath = Expand-Legacy $RelativePath
+    $displayPath = $RelativePath.Replace($legacyProduct, 'runtime').Replace($legacyPascal, 'Runtime')
     $path = Join-Path $SourceDir $RelativePath
     if (-not (Test-Path $path -PathType Leaf)) {
-        throw "Scarlet runtime overlay: missing file $RelativePath"
+        throw "Scarlet runtime overlay: missing runtime source file $displayPath"
     }
     $Old = Expand-Legacy $Old
     $New = Expand-Legacy $New
@@ -61,11 +62,12 @@ function Replace-Literal([string]$RelativePath, [string]$Old, [string]$New) {
     $preview = $oldLf
     if ($preview.Length -gt 180) { $preview = $preview.Substring(0, 180) + '...' }
     $preview = $preview.Replace("`n", ' / ')
-    throw "Scarlet runtime overlay: expected source text not found in $RelativePath :: $preview"
+    throw "Scarlet runtime overlay: expected source text not found in $displayPath :: $preview"
 }
 
 function Replace-RegexOnce([string]$RelativePath, [string]$Pattern, [string]$Replacement) {
     $RelativePath = Expand-Legacy $RelativePath
+    $displayPath = $RelativePath.Replace($legacyProduct, 'runtime').Replace($legacyPascal, 'Runtime')
     $path = Join-Path $SourceDir $RelativePath
     if (-not (Test-Path $path -PathType Leaf)) {
         throw "Scarlet runtime overlay: missing file $RelativePath"
@@ -83,7 +85,7 @@ function Replace-RegexOnce([string]$RelativePath, [string]$Pattern, [string]$Rep
         return
     }
     if (-not $text.Contains($Replacement.Trim())) {
-        throw "Scarlet runtime overlay: expected pattern not found in $RelativePath"
+        throw "Scarlet runtime overlay: expected pattern not found in $displayPath"
     }
 }
 
