@@ -940,6 +940,51 @@ s32 NormalizeSwapInterval(f32* out_speed_scale, s32 swap_interval) {
 '@
 Replace-Literal 'src\core\hle\service\nvnflinger\hardware_composer.cpp' $old.Trim() $new.Trim()
 
+# Variable Scarlet presentation clock. Default is 60 Hz; higher targets are opt-in
+# through SCARLET_TARGET_FPS and remain real-time because the normal 100% speed limiter
+# stays enabled. Clamp to a sane desktop range; >60 is experimental for frame-bound
+# animations in Scarlet v1.0.0.
+Replace-Literal 'src\core\hle\service\vi\conductor.cpp' '#include "common/settings.h"' "#include <cstdlib>`n`n#include \"common/settings.h\""
+
+$old = @'
+constexpr auto FrameNs = std::chrono::nanoseconds{1000000000 / 60};
+'@
+$new = @'
+namespace {
+
+int ScarletTargetFps() {
+    static const int target = [] {
+        const char* value = std::getenv("SCARLET_TARGET_FPS");
+        int fps = value && *value ? std::atoi(value) : 60;
+        if (fps < 30) {
+            fps = 30;
+        } else if (fps > 240) {
+            fps = 240;
+        }
+        return fps;
+    }();
+    return target;
+}
+
+std::chrono::nanoseconds ScarletFrameNs() {
+    return std::chrono::nanoseconds{1000000000 / ScarletTargetFps()};
+}
+
+} // namespace
+'@
+Replace-Literal 'src\core\hle\service\vi\conductor.cpp' $old.Trim() $new.Trim()
+
+Replace-Literal 'src\core\hle\service\vi\conductor.cpp' 'system.CoreTiming().ScheduleLoopingEvent(FrameNs, FrameNs, m_event);' 'system.CoreTiming().ScheduleLoopingEvent(ScarletFrameNs(), ScarletFrameNs(), m_event);'
+
+$old = @'
+    const f32 effective_fps = 60.f / static_cast<f32>(m_swap_interval);
+'@
+$new = @'
+    const f32 effective_fps =
+        static_cast<f32>(ScarletTargetFps()) / static_cast<f32>(m_swap_interval);
+'@
+Replace-Literal 'src\core\hle\service\vi\conductor.cpp' $old.Trim() $new.Trim()
+
 # Scarlet graphics identity in the Vulkan bring-up log.
 $old = @'
 CollectPhysicalMemoryInfo();
