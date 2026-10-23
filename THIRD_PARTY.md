@@ -29,7 +29,7 @@ https://github.com/suyu-emu/suyu-main
 
 The validated upstream baseline is suyu v14.1.0 / revision `347fcf91d95cd39cb5c3db50f1b6d827ad699311`.
 
-suyu is licensed under GNU GPL v3 and documents its own upstream lineage, including Eden and yuzu.
+suyu is licensed under GNU GPL v3 and retains its own upstream lineage and notices.
 
 Scarlet PC does not claim authorship of the original suyu runtime/recompiler. Credit to suyu applies to the third-party foundation from which portions of the runtime were derived.
 
