@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
     [string]$SourceDir
 )
@@ -117,15 +117,12 @@ case Core::SystemResultStatus::Success:
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
-$old = @'
-LOG_INFO(Frontend, "Native recompiled module [{}] loaded from {} — ArmRecomp active",
-                         s_recomp_modules.size() - 1, Common::UTF16ToUTF8(dll_name));
-'@
-$new = @'
+$pattern = 'LOG_INFO\(Frontend, "Native recompiled module \[\{\}\] loaded from \{\} [^"]*ArmRecomp active",\s*s_recomp_modules\.size\(\) - 1, Common::UTF16ToUTF8\(dll_name\)\);'
+$replacement = @'
 LOG_INFO(Frontend, "[Scarlet.AOT] Module [{}] {} loaded",
                          s_recomp_modules.size() - 1, Common::UTF16ToUTF8(dll_name));
 '@
-Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+Replace-RegexOnce 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $pattern $replacement.Trim()
 
 $old = @'
 LOG_INFO(Frontend, "Recompiled instruction guard-v2: {}",
