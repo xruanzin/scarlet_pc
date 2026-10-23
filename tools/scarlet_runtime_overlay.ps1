@@ -238,6 +238,51 @@ std::string module_name = Common::UTF16ToUTF8(dll_name);
 '@
 Replace-RegexOnce 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $pattern $replacement.Trim()
 
+# On Windows, ScarletPC.exe owns the window/taskbar icon. Always use PE icon resource 1
+# instead of falling back to the third-party embedded BMP when native-export mode is off.
+$pattern = 'void EmuWindow_SDL2::SetWindowIcon\(\) \{\s*#ifdef _WIN32\s*// Native game exports.*?if \(g_native_export_mode\) \{\s*const HICON hicon = static_cast<HICON>\(\s*LoadImageW\(GetModuleHandleW\(nullptr\), MAKEINTRESOURCEW\(1\), IMAGE_ICON, 256, 256,\s*LR_DEFAULTCOLOR\)\);'
+$replacement = @'
+void EmuWindow_SDL2::SetWindowIcon() {
+#ifdef _WIN32
+    {
+        const HICON hicon = static_cast<HICON>(
+            LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1), IMAGE_ICON, 256, 256,
+                       LR_DEFAULTCOLOR));
+'@
+Replace-RegexOnce 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $pattern $replacement.Trim()
+
+# Do not fall back to the embedded legacy BMP on Windows. If the PE resource cannot be
+# loaded, leave the window icon unset rather than showing an unrelated product icon.
+$old = @'
+        LOG_WARNING(Frontend, "Native export: failed to load game icon from exe resources, "
+                               "falling back to __PRODUCT__ icon.");
+    }
+#endif
+    SDL_IOStream* const __PRODUCT___icon_stream = SDL_IOFromConstMem((void*)__PRODUCT___icon, __PRODUCT___icon_size);
+'@
+$new = @'
+        LOG_WARNING(Frontend, "[Scarlet.Runtime] Failed to load Scarlet PC icon from executable resources.");
+        return;
+    }
+#else
+    SDL_IOStream* const __PRODUCT___icon_stream = SDL_IOFromConstMem((void*)__PRODUCT___icon, __PRODUCT___icon_size);
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
+
+# Close the non-Windows fallback branch after the embedded BMP path.
+$old = @'
+    SDL_SetWindowIcon(render_window, window_icon);
+    SDL_DestroySurface(window_icon);
+}
+'@
+$new = @'
+    SDL_SetWindowIcon(render_window, window_icon);
+    SDL_DestroySurface(window_icon);
+#endif
+}
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
+
 # Fixed game window title.
 Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2_vk.cpp' 'return exe.empty() ? std::string{"__PRODUCT__"} : exe.stem().string();' 'return std::string{"Pokémon Scarlet"};'
 
