@@ -6,6 +6,8 @@ param(
 
     [string]$KeysPath,
 
+    [string]$IconPath,
+
     [ValidateRange(1, 4)]
     [int]$Jobs = 1,
 
@@ -46,7 +48,46 @@ else {
     }
     & (Join-Path $PSScriptRoot 'scarlet_aot_build.ps1') -ExportRoot $ExportRoot -Jobs $Jobs
 }
-& (Join-Path $PSScriptRoot 'scarlet_runtime_build.ps1') -Jobs $Jobs -RefreshSource:$RefreshRuntimeSource
+$resolvedIcon = $null
+if (-not [string]::IsNullOrWhiteSpace($IconPath)) {
+    $iconSource = (Resolve-Path $IconPath).Path
+    if (Test-Path $iconSource -PathType Container) {
+        $candidate = Join-Path $iconSource 'icon.ico'
+        if (-not (Test-Path $candidate -PathType Leaf)) {
+            throw 'IconPath directory must contain icon.ico.'
+        }
+        $resolvedIcon = $candidate
+    }
+    elseif ([IO.Path]::GetExtension($iconSource).Equals('.zip', [StringComparison]::OrdinalIgnoreCase)) {
+        $iconImportDir = Join-Path $repoRoot 'build\scarlet-icon-import'
+        Remove-Item $iconImportDir -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force -Path $iconImportDir | Out-Null
+        Expand-Archive $iconSource -DestinationPath $iconImportDir -Force
+        $candidate = Join-Path $iconImportDir 'icon.ico'
+        if (-not (Test-Path $candidate -PathType Leaf)) {
+            $candidate = Get-ChildItem $iconImportDir -Recurse -File -Filter '*.ico' | Select-Object -First 1 | ForEach-Object FullName
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$candidate) -or -not (Test-Path $candidate -PathType Leaf)) {
+            throw 'IconPath ZIP must contain an .ico file.'
+        }
+        $resolvedIcon = $candidate
+    }
+    elseif ([IO.Path]::GetExtension($iconSource).Equals('.ico', [StringComparison]::OrdinalIgnoreCase)) {
+        $resolvedIcon = $iconSource
+    }
+    else {
+        throw 'IconPath must point to an .ico file, a ZIP containing an .ico, or a directory containing icon.ico.'
+    }
+}
+
+$runtimeArgs = @{
+    Jobs = $Jobs
+    RefreshSource = $RefreshRuntimeSource
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedIcon)) {
+    $runtimeArgs.IconPath = $resolvedIcon
+}
+& (Join-Path $PSScriptRoot 'scarlet_runtime_build.ps1') @runtimeArgs
 & (Join-Path $PSScriptRoot 'scarlet_independent_package.ps1')
 
 $packageDir = Join-Path $repoRoot 'dist\ScarletPC-Independent'
