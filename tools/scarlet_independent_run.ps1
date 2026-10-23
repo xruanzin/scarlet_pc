@@ -5,7 +5,7 @@ param(
     [ValidateRange(30, 240)]
     [int]$TargetFps = 60,
 
-    [switch]$ExperimentalAsyncShaders
+    [switch]$SynchronousShaders
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,13 +65,13 @@ try {
     $env:SCARLET_TARGET_FPS = [string]$TargetFps
     Write-Host ("[Scarlet PC] Target presentation: {0} FPS" -f $TargetFps) -ForegroundColor Cyan
 
-    if ($ExperimentalAsyncShaders) {
-        $env:SCARLET_ASYNC_SHADERS = '1'
-        Write-Warning '[Scarlet PC] Experimental async shaders enabled; transient missing draws may occur.'
+    if ($SynchronousShaders) {
+        $env:SCARLET_ASYNC_SHADERS = '0'
+        Write-Host '[Scarlet PC] Synchronous shader compilation enabled.' -ForegroundColor Yellow
     }
     else {
-        $env:SCARLET_ASYNC_SHADERS = '0'
-        Write-Host '[Scarlet PC] Stable shader mode: synchronous shader compilation.' -ForegroundColor Green
+        $env:SCARLET_ASYNC_SHADERS = '1'
+        Write-Host '[Scarlet PC] Asynchronous shader compilation enabled.' -ForegroundColor Green
     }
 
     if (-not [string]::IsNullOrWhiteSpace($legacyStrictEnv)) {
