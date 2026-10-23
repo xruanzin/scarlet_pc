@@ -39,9 +39,29 @@ function Replace-Literal([string]$RelativePath, [string]$Old, [string]$New) {
         [IO.File]::WriteAllText($path, $text, $utf8)
         return
     }
-    if (-not $text.Contains($New)) {
-        throw "Scarlet runtime overlay: expected source text not found in $RelativePath"
+
+    # Match multiline patches independently of Git/Windows LF vs CRLF conversion.
+    $hadCrLf = $text.Contains("`r`n")
+    $textLf = $text.Replace("`r`n", "`n")
+    $oldLf = $Old.Replace("`r`n", "`n")
+    $newLf = $New.Replace("`r`n", "`n")
+    if ($textLf.Contains($oldLf)) {
+        $textLf = $textLf.Replace($oldLf, $newLf)
+        if ($hadCrLf) {
+            $textLf = $textLf.Replace("`n", "`r`n")
+        }
+        [IO.File]::WriteAllText($path, $textLf, $utf8)
+        return
     }
+
+    if ($text.Contains($New) -or $textLf.Contains($newLf)) {
+        return
+    }
+
+    $preview = $oldLf
+    if ($preview.Length -gt 180) { $preview = $preview.Substring(0, 180) + '...' }
+    $preview = $preview.Replace("`n", ' / ')
+    throw "Scarlet runtime overlay: expected source text not found in $RelativePath :: $preview"
 }
 
 function Replace-RegexOnce([string]$RelativePath, [string]$Pattern, [string]$Replacement) {
