@@ -487,6 +487,83 @@ $new = @'
             return false;
         }
 
+        // RET is by far Scarlet's hottest AOT gap. Returning through Dynarmic for
+        // every lifted function destroys the benefit of static recompilation.
+        // RET Xn simply transfers control to Xn without touching flags.
+        if ((opcode & 0xFFFFFC1FU) == 0xD65F0000U) {
+            const u32 rn = (opcode >> 5) & 31U;
+            if (rn == 31U) {
+                return false;
+            }
+            ctx.pc = ctx.x[rn];
+            return true;
+        }
+
+        // ADD/SUB (immediate), without flag updates. This covers the extremely hot
+        // stack-pointer adjustments emitted in function prologues/epilogues such as
+        // ADD SP,SP,#imm and SUB SP,SP,#imm.
+        if ((opcode & 0x1F000000U) == 0x11000000U &&
+            (opcode & 0x20000000U) == 0) {
+            const bool is64 = (opcode & 0x80000000U) != 0;
+            const bool subtract = (opcode & 0x40000000U) != 0;
+            const u32 rn = (opcode >> 5) & 31U;
+            const u32 rd = opcode & 31U;
+            const u64 imm12 = (opcode >> 10) & 0xFFFU;
+            const u64 immediate = imm12 << (((opcode >> 22) & 1U) ? 12U : 0U);
+            const u64 lhs = is64 ? ctx.x[rn] : static_cast<u32>(ctx.x[rn]);
+            const u64 raw = subtract ? lhs - immediate : lhs + immediate;
+            const u64 result = is64 ? raw : static_cast<u32>(raw);
+            ctx.x[rd] = result;
+            ctx.pc += 4;
+            return true;
+        }
+
+        // MOV register aliases (ORR W/Xd, W/XZR, W/Xm with LSL #0).
+        if ((opcode & 0x7FE0FFE0U) == 0x2A0003E0U) {
+            const bool is64 = (opcode & 0x80000000U) != 0;
+            const u32 rm = (opcode >> 16) & 31U;
+            const u32 rd = opcode & 31U;
+            if (rd != 31U) {
+                ctx.x[rd] = is64 ? ctx.x[rm] : static_cast<u32>(ctx.x[rm]);
+            }
+            ctx.pc += 4;
+            return true;
+        }
+
+        // MOVZ W/Xd,#imm{,LSL #16/#32/#48}.
+        if ((opcode & 0x7F800000U) == 0x52800000U) {
+            const bool is64 = (opcode & 0x80000000U) != 0;
+            const u32 hw = (opcode >> 21) & 3U;
+            if (!is64 && hw > 1U) {
+                return false;
+            }
+            const u32 rd = opcode & 31U;
+            const u64 imm16 = (opcode >> 5) & 0xFFFFU;
+            const u64 value = imm16 << (hw * 16U);
+            if (rd != 31U) {
+                ctx.x[rd] = is64 ? value : static_cast<u32>(value);
+            }
+            ctx.pc += 4;
+            return true;
+        }
+
+        // ADRP Xd,label. Keep PC-relative address formation inside AOT rather than
+        // crossing into JIT for a single constant-page calculation.
+        if ((opcode & 0x9F000000U) == 0x90000000U) {
+            const u32 rd = opcode & 31U;
+            s64 imm21 = static_cast<s64>(((opcode >> 29) & 3U) |
+                                         (((opcode >> 5) & 0x7FFFFU) << 2));
+            if ((imm21 & (1LL << 20)) != 0) {
+                imm21 -= (1LL << 21);
+            }
+            if (rd != 31U) {
+                const u64 page = ctx.pc & ~0xFFFULL;
+                ctx.x[rd] = page + static_cast<u64>(imm21 * 4096LL);
+            }
+            ctx.pc += 4;
+            return true;
+        }
+
         // Integer LDR/STR (unsigned immediate), byte/half/word/dword.
         // These are extremely common in SDK/runtime code and are safe to execute
         // directly through the same memory callbacks used by generated AOT code.
