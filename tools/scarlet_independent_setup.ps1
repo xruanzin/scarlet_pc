@@ -103,6 +103,12 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedIcon)) {
     $runtimeArgs.IconPath = $resolvedIcon
 }
 & (Join-Path $PSScriptRoot 'scarlet_runtime_build.ps1') @runtimeArgs
+
+$launcherArgs = @{}
+if (-not [string]::IsNullOrWhiteSpace($resolvedIcon)) {
+    $launcherArgs.IconPath = $resolvedIcon
+}
+& (Join-Path $PSScriptRoot 'scarlet_launcher_build.ps1') @launcherArgs
 & (Join-Path $PSScriptRoot 'scarlet_independent_package.ps1')
 
 $packageDir = Join-Path $repoRoot 'dist\ScarletPC-Independent'
@@ -132,6 +138,37 @@ if (-not (Test-Path (Join-Path $packageKeys 'prod.keys') -PathType Leaf)) {
     Write-Warning '[Scarlet PC] prod.keys is missing. Re-run setup with -KeysPath pointing to your legally obtained prod.keys or keys folder before launching.'
 }
 
+# Seed the launcher only on first setup. Rebuilds preserve the player's launcher choices.
+$launcherConfig = Join-Path $packageDir 'user\config\scarlet_launcher.ini'
+if (-not (Test-Path $launcherConfig -PathType Leaf)) {
+    $seedKeys = Join-Path $packageKeys 'prod.keys'
+    $seedUpdate = if ($update) { $update } else { '' }
+    @"
+[Game]
+game=$game
+update=$seedUpdate
+keys=$seedKeys
+dlc_count=0
+
+[Graphics]
+resolution=2
+display_mode=1
+fps=1
+upscaler=0
+quality=0
+frame_generation=0
+async_shaders=1
+
+[Controls]
+style=0
+auto_assign=1
+
+[General]
+language=0
+close_on_launch=0
+"@ | Set-Content $launcherConfig -Encoding Unicode
+}
+
 $localConfig = Join-Path $repoRoot 'build\scarlet-independent-local.json'
 [ordered]@{
     game_path   = $game
@@ -143,4 +180,5 @@ $localConfig = Join-Path $repoRoot 'build\scarlet-independent-local.json'
 Write-Host ''
 Write-Host '[Scarlet PC] Independent bootstrap complete.' -ForegroundColor Green
 Write-Host '[Scarlet PC] Standalone runtime package ready.' -ForegroundColor Green
-Write-Host '[Scarlet PC] Run with: .\tools\scarlet_independent_run.ps1' -ForegroundColor Green
+Write-Host "[Scarlet PC] Launcher: $packageDir\ScarletLauncher.exe" -ForegroundColor Green
+Write-Host '[Scarlet PC] Direct runtime test: .\tools\scarlet_independent_run.ps1' -ForegroundColor DarkGray
