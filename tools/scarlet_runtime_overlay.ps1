@@ -22,10 +22,10 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 
 # Scarlet PC owns the software-keyboard frontend used by every swkbd applet call.
 $keyboardSourceDir = Join-Path $repoRoot 'runtime\nswitch'
-$keyboardTargetDir = Join-Path $SourceDir 'src\__PRODUCT___cmd'
+$keyboardTargetDir = Join-Path $SourceDir ('src\' + [string]$provenance.legacy.command_dir)
 foreach ($name in @('scarlet_software_keyboard.h', 'scarlet_software_keyboard.cpp')) {
     $src = Join-Path $keyboardSourceDir $name
-    $dst = Join-Path (Expand-Legacy $keyboardTargetDir) $name
+    $dst = Join-Path $keyboardTargetDir $name
     if (-not (Test-Path $src -PathType Leaf)) {
         throw "Missing Scarlet keyboard source: $src"
     }
