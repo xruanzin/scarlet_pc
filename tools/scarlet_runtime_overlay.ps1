@@ -1066,6 +1066,319 @@ $new = @'
 '@
 Replace-Literal 'src\core\hle\service\vi\conductor.cpp' $old.Trim() $new.Trim()
 
+
+# Scarlet Launcher: external DLC files can be supplied repeatedly alongside the explicit base/update pair.
+$old = @'
+                  "--content-update      Read-only matching update NSP (both flags required)\n"
+                  "--content-probe       Verify that pair and exit without a window or game\n"
+'@
+$new = @'
+                  "--content-update      Read-only matching update NSP (both flags required)\n"
+                  "--content-dlc         Read-only matching DLC NSP/XCI (repeatable)\n"
+                  "--content-probe       Verify that pair and exit without a window or game\n"
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    std::optional<std::string> explicit_content_base;
+    std::optional<std::string> explicit_content_update;
+    bool explicit_content_probe = false;
+'@
+$new = @'
+    std::optional<std::string> explicit_content_base;
+    std::optional<std::string> explicit_content_update;
+    std::vector<std::string> explicit_content_dlc;
+    bool explicit_content_probe = false;
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+        {"content-base", required_argument, 0, 'B'},
+        {"content-update", required_argument, 0, 'U'},
+        {"content-probe", no_argument, 0, 'P'},
+'@
+$new = @'
+        {"content-base", required_argument, 0, 'B'},
+        {"content-update", required_argument, 0, 'U'},
+        {"content-dlc", required_argument, 0, 'A'},
+        {"content-probe", no_argument, 0, 'P'},
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' '"g:fhvp::c:u:l::tV:N:B:U:PD:"' '"g:fhvp::c:u:l::tV:N:B:U:A:PD:"'
+
+$old = @'
+            case 'U':
+                if (explicit_content_update) {
+                    LOG_ERROR(Frontend, "Duplicate --content-update argument");
+                    return 2;
+                }
+                explicit_content_update = optarg;
+                break;
+            case 'D':
+'@
+$new = @'
+            case 'U':
+                if (explicit_content_update) {
+                    LOG_ERROR(Frontend, "Duplicate --content-update argument");
+                    return 2;
+                }
+                explicit_content_update = optarg;
+                break;
+            case 'A':
+                if (!optarg || !*optarg) {
+                    LOG_ERROR(Frontend, "Invalid --content-dlc argument");
+                    return 2;
+                }
+                explicit_content_dlc.emplace_back(optarg);
+                break;
+            case 'D':
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    if (explicit_content_base && !filepath.empty()) {
+        LOG_ERROR(Frontend, "--content-base owns the launch path; do not also supply -g or a positional game");
+        return 2;
+    }
+'@
+$new = @'
+    if (!explicit_content_dlc.empty() && !explicit_content_base) {
+        LOG_ERROR(Frontend, "--content-dlc requires --content-base and --content-update");
+        return 2;
+    }
+    if (explicit_content_base && !filepath.empty()) {
+        LOG_ERROR(Frontend, "--content-base owns the launch path; do not also supply -g or a positional game");
+        return 2;
+    }
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+#include <string>
+
+#include "common/hex_util.h"
+'@
+$new = @'
+#include <string>
+#include <vector>
+
+#include "common/hex_util.h"
+'@
+Replace-Literal 'src\__PRODUCT___cmd\explicit_update.h' $old.Trim() $new.Trim()
+
+$old = @'
+    return true;
+}
+
+} // namespace SuyuCli
+'@
+$new = @'
+    return true;
+}
+
+inline bool AddExplicitDlc(Core::System& system, ExplicitUpdateProvider& provider,
+                           const std::string& base_path, const std::string& dlc_path) {
+    using FileSys::TitleType;
+
+    auto& vfs = *system.GetFilesystem();
+    const auto base_file = vfs.OpenFile(base_path, FileSys::OpenMode::Read);
+    const auto dlc_file = vfs.OpenFile(dlc_path, FileSys::OpenMode::Read);
+    if (!base_file || !dlc_file) {
+        LOG_ERROR(Frontend, "CLI explicit DLC rejected: base or DLC could not be opened: {}",
+                  dlc_path);
+        return false;
+    }
+
+    const auto base_loader = Loader::GetLoader(system, base_file);
+    u64 base_title_id{};
+    if (!base_loader ||
+        base_loader->ReadProgramId(base_title_id) != Loader::ResultStatus::Success ||
+        base_title_id == 0) {
+        LOG_ERROR(Frontend, "CLI explicit DLC rejected: base title ID could not be read");
+        return false;
+    }
+    base_title_id = FileSys::GetBaseTitleID(base_title_id);
+
+    FileSys::ManualContentProvider dlc_entries;
+    if (!dlc_entries.AddEntriesFromContainer(dlc_file, false)) {
+        LOG_ERROR(Frontend, "CLI explicit DLC rejected: container could not be read: {}",
+                  dlc_path);
+        return false;
+    }
+
+    const auto entries = dlc_entries.ListEntriesFilter(TitleType::AOC, {}, {});
+    if (entries.empty()) {
+        LOG_ERROR(Frontend, "CLI explicit DLC rejected: no Add-On Content records: {}",
+                  dlc_path);
+        return false;
+    }
+
+    std::size_t added = 0;
+    for (const auto& entry : entries) {
+        if (FileSys::GetBaseTitleID(entry.title_id) != base_title_id) {
+            LOG_ERROR(Frontend,
+                      "CLI explicit DLC rejected: title {:016X} belongs to another game",
+                      entry.title_id);
+            return false;
+        }
+        const auto file = dlc_entries.GetEntryRaw(entry.title_id, entry.type);
+        if (!file) {
+            LOG_ERROR(Frontend, "CLI explicit DLC rejected: content record could not be opened");
+            return false;
+        }
+        provider.AddEntry(TitleType::AOC, entry.type, entry.title_id, file);
+        ++added;
+    }
+
+    LOG_INFO(Frontend, "[Scarlet.Game] Registered {} external DLC content entries from {}",
+             added, dlc_path);
+    return true;
+}
+
+} // namespace SuyuCli
+'@
+Replace-Literal 'src\__PRODUCT___cmd\explicit_update.h' $old.Trim() $new.Trim()
+
+$old = @'
+        if (!SuyuCli::ConfigureExplicitUpdate(system, explicit_provider,
+                                              *explicit_content_base, *explicit_content_update,
+                                              explicit_content_dump)) {
+            return 2;
+        }
+        if (explicit_content_probe) {
+'@
+$new = @'
+        if (!SuyuCli::ConfigureExplicitUpdate(system, explicit_provider,
+                                              *explicit_content_base, *explicit_content_update,
+                                              explicit_content_dump)) {
+            return 2;
+        }
+        for (const auto& dlc_path : explicit_content_dlc) {
+            if (!SuyuCli::AddExplicitDlc(system, explicit_provider, *explicit_content_base,
+                                         dlc_path)) {
+                return 2;
+            }
+        }
+        if (explicit_content_probe) {
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+# Scarlet Launcher graphics/window contract. Unsupported future algorithms remain selectable,
+# but the runtime logs and uses an explicit fallback rather than pretending they are active.
+$old = @'
+    InputCommon::InputSubsystem input_subsystem{};
+
+    // Apply the command line arguments
+    system.ApplySettings();
+'@
+$new = @'
+    InputCommon::InputSubsystem input_subsystem{};
+
+    const char* scarlet_window_mode = std::getenv("SCARLET_WINDOW_MODE");
+    if (scarlet_window_mode && *scarlet_window_mode) {
+        const std::string_view mode{scarlet_window_mode};
+        if (mode == "borderless") {
+            fullscreen = true;
+            Settings::values.fullscreen_mode.SetValue(Settings::FullscreenMode::Borderless);
+        } else if (mode == "fullscreen") {
+            fullscreen = true;
+            Settings::values.fullscreen_mode.SetValue(Settings::FullscreenMode::Exclusive);
+        } else {
+            fullscreen = false;
+        }
+    }
+
+    int scarlet_width = 0;
+    int scarlet_height = 0;
+    if (const char* width = std::getenv("SCARLET_WINDOW_WIDTH"); width && *width) {
+        scarlet_width = std::max(0, std::atoi(width));
+    }
+    if (const char* height = std::getenv("SCARLET_WINDOW_HEIGHT"); height && *height) {
+        scarlet_height = std::max(0, std::atoi(height));
+    }
+    if (scarlet_width > 0 && scarlet_height > 0) {
+        const bool ratio_16_10 =
+            std::abs(scarlet_width * 10 - scarlet_height * 16) <= 16;
+        Settings::values.aspect_ratio.SetValue(
+            ratio_16_10 ? Settings::AspectRatio::R16_10 : Settings::AspectRatio::R16_9);
+
+        Settings::ResolutionSetup setup = Settings::ResolutionSetup::Res1X;
+        if (scarlet_width >= 3800) {
+            setup = Settings::ResolutionSetup::Res3X;
+        } else if (scarlet_width >= 2500) {
+            setup = Settings::ResolutionSetup::Res2X;
+        } else if (scarlet_width >= 1900) {
+            setup = Settings::ResolutionSetup::Res3_2X;
+        } else if (scarlet_width >= 1550) {
+            setup = Settings::ResolutionSetup::Res5_4X;
+        }
+        Settings::values.resolution_setup.SetValue(setup);
+        Settings::UpdateRescalingInfo();
+    }
+
+    const char* scarlet_upscaler = std::getenv("SCARLET_UPSCALER");
+    if (scarlet_upscaler && *scarlet_upscaler) {
+        const std::string_view upscaler{scarlet_upscaler};
+        if (upscaler == "fsr1") {
+            Settings::values.scaling_filter.SetValue(Settings::ScalingFilter::Fsr);
+            LOG_INFO(Frontend, "[Scarlet.Graphics] Upscaler: FSR 1");
+        } else if (upscaler == "fsr3" || upscaler == "fsr31" || upscaler == "fsr4") {
+            Settings::values.scaling_filter.SetValue(Settings::ScalingFilter::Fsr);
+            LOG_WARNING(Frontend,
+                        "[Scarlet.Graphics] {} requested; current renderer uses FSR 1 fallback",
+                        upscaler);
+        } else if (upscaler == "dlss") {
+            Settings::values.scaling_filter.SetValue(Settings::ScalingFilter::Bilinear);
+            LOG_WARNING(Frontend,
+                        "[Scarlet.Graphics] DLSS requested; current renderer has no DLSS backend, "
+                        "using native/bilinear fallback");
+        } else {
+            Settings::values.scaling_filter.SetValue(Settings::ScalingFilter::Bilinear);
+            LOG_INFO(Frontend, "[Scarlet.Graphics] Upscaler: native");
+        }
+    }
+
+    if (const char* quality = std::getenv("SCARLET_UPSCALER_QUALITY"); quality && *quality) {
+        LOG_INFO(Frontend, "[Scarlet.Graphics] Upscaler quality request: {}", quality);
+    }
+    if (const char* fg = std::getenv("SCARLET_FRAME_GENERATION"); fg && *fg && *fg != '0') {
+        LOG_WARNING(Frontend,
+                    "[Scarlet.Graphics] Frame Generation requested; current renderer has no "
+                    "native frame-generation backend yet");
+    }
+
+    LOG_INFO(Frontend, "[Scarlet.Graphics] Launch size={}x{} mode={}",
+             scarlet_width, scarlet_height,
+             scarlet_window_mode && *scarlet_window_mode ? scarlet_window_mode : "windowed");
+
+    // Apply the command line arguments
+    system.ApplySettings();
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    render_window =
+        SDL_CreateWindow(window_title.c_str(),
+                         Layout::ScreenUndocked::Width, Layout::ScreenUndocked::Height,
+                         window_flags);
+'@
+$new = @'
+    int scarlet_window_width = Layout::ScreenUndocked::Width;
+    int scarlet_window_height = Layout::ScreenUndocked::Height;
+    if (const char* value = std::getenv("SCARLET_WINDOW_WIDTH"); value && *value) {
+        scarlet_window_width = std::max(320, std::atoi(value));
+    }
+    if (const char* value = std::getenv("SCARLET_WINDOW_HEIGHT"); value && *value) {
+        scarlet_window_height = std::max(180, std::atoi(value));
+    }
+
+    render_window =
+        SDL_CreateWindow(window_title.c_str(), scarlet_window_width, scarlet_window_height,
+                         window_flags);
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2_vk.cpp' $old.Trim() $new.Trim()
+
 # Scarlet graphics identity in the Vulkan bring-up log.
 $old = @'
 CollectPhysicalMemoryInfo();
