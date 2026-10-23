@@ -203,7 +203,6 @@ $new = @'
                                     "Copying prod.keys and "
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
-Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' '"refer to the __PRODUCT__ wiki for more information or the __PRODUCT__ discord for "' '"check the Scarlet PC log for more information. "'
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' '"host does not implement; update __PRODUCT__ or re-export with this build",' '"host does not implement; rebuild the Scarlet PC runtime",'
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' '"implement; update __PRODUCT__ or re-export with this build",' '"implement; rebuild the Scarlet PC runtime",'
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' '"Open __PRODUCT__"' '"Open runtime"'
