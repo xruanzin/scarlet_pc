@@ -1299,7 +1299,7 @@ $new = @'
     }
     if (scarlet_width > 0 && scarlet_height > 0) {
         const bool ratio_16_10 =
-            std::abs(scarlet_width * 10 - scarlet_height * 16) <= 16;
+            scarlet_width * 10 == scarlet_height * 16;
         Settings::values.aspect_ratio.SetValue(
             ratio_16_10 ? Settings::AspectRatio::R16_10 : Settings::AspectRatio::R16_9);
 
@@ -1356,6 +1356,18 @@ $new = @'
     system.ApplySettings();
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+
+$old = @'
+#include <cstdlib>
+#include <memory>
+'@
+$new = @'
+#include <algorithm>
+#include <cstdlib>
+#include <memory>
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2_vk.cpp' $old.Trim() $new.Trim()
 
 $old = @'
     render_window =
