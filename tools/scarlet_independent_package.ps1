@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$RuntimeStage = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build\scarlet-runtime\scarlet-stage'),
     [string]$AotDir       = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build\aot\modules'),
     [string]$OutputDir    = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\ScarletPC-Independent')
