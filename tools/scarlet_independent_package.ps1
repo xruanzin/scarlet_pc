@@ -1,7 +1,8 @@
 ﻿param(
-    [string]$RuntimeStage = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build\scarlet-runtime\scarlet-stage'),
-    [string]$AotDir       = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build\aot\modules'),
-    [string]$OutputDir    = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\ScarletPC-Independent')
+    [string]$RuntimeStage  = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build\scarlet-runtime\scarlet-stage'),
+    [string]$LauncherStage = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build\scarlet-launcher\stage'),
+    [string]$AotDir        = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build\aot\modules'),
+    [string]$OutputDir     = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\ScarletPC-Independent')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -58,12 +59,15 @@ $userTas = Join-Path $userRoot 'tas'
 $userIcons = Join-Path $userRoot 'icons'
 $userThemes = Join-Path $userRoot 'themes'
 $modsOut = Join-Path $OutputDir 'mods'
+$assetsOut = Join-Path $OutputDir 'assets'
+$launcherRuntimeOut = Join-Path $OutputDir 'runtime\launcher'
 $licensesOut = Join-Path $OutputDir 'licenses\third-party'
 
 foreach ($dir in @(
     $OutputDir, $aotOut, $runtimeOut, $userRoot, $userConfig, $userCache, $userKeys,
     $userNand, $userSdmc, $userLoad, $userLog, $userDump, $userScreenshots, $userPlayTime,
-    $userCrashDumps, $userAmiibo, $userTas, $userIcons, $userThemes, $modsOut, $licensesOut
+    $userCrashDumps, $userAmiibo, $userTas, $userIcons, $userThemes, $modsOut, $assetsOut,
+    $launcherRuntimeOut, $licensesOut
 )) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
 }
@@ -74,6 +78,24 @@ if (Test-Path $preservedUser -PathType Container) {
 }
 
 Copy-Item $runtimeHostPath (Join-Path $OutputDir 'ScarletPC.exe') -Force
+
+$launcherExe = Join-Path $LauncherStage 'ScarletLauncher.exe'
+if (Test-Path $launcherExe -PathType Leaf) {
+    Copy-Item $launcherExe (Join-Path $OutputDir 'ScarletLauncher.exe') -Force
+
+    $launcherAssets = Join-Path $LauncherStage 'assets'
+    if (Test-Path $launcherAssets -PathType Container) {
+        Copy-Item (Join-Path $launcherAssets '*') $assetsOut -Recurse -Force
+    }
+
+    $launcherManifest = Join-Path $LauncherStage 'scarlet_launcher_manifest.json'
+    if (Test-Path $launcherManifest -PathType Leaf) {
+        Copy-Item $launcherManifest (Join-Path $launcherRuntimeOut 'scarlet_launcher_manifest.json') -Force
+    }
+}
+else {
+    Write-Warning '[Scarlet PC] Launcher stage not found; packaging runtime without ScarletLauncher.exe.'
+}
 
 # Keep host dependency DLLs beside ScarletPC.exe until the planned nswitch
 # component split gives them a real stable DLL ABI.
@@ -109,7 +131,9 @@ Scarlet PC
 Pokémon Scarlet-specific Windows recompilation project.
 
 Player-facing layout:
-  ScarletPC.exe
+  ScarletLauncher.exe        (recommended entry point)
+  ScarletPC.exe              (game runtime)
+  assets\scarlet_launcher_background.jpg
   aot\scarlet-main.dll
   aot\scarlet-rtld.dll
   aot\scarlet-multimedia.dll
@@ -132,4 +156,7 @@ DLLs are intentionally not shipped.
 '@ | Set-Content (Join-Path $runtimeOut 'README.txt') -Encoding UTF8
 
 Write-Host "[Scarlet PC] Independent package ready: $OutputDir" -ForegroundColor Green
+if (Test-Path (Join-Path $OutputDir 'ScarletLauncher.exe') -PathType Leaf) {
+    Write-Host "[Scarlet PC] Player launcher: $OutputDir\ScarletLauncher.exe" -ForegroundColor Green
+}
 Write-Host '[Scarlet PC] AOT package names: scarlet-main / scarlet-rtld / scarlet-multimedia / scarlet-sdk' -ForegroundColor DarkGray
