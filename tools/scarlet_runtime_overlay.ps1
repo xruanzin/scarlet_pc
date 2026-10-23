@@ -26,6 +26,7 @@ function Expand-Legacy([string]$Text) {
 }
 
 function Replace-Literal([string]$RelativePath, [string]$Old, [string]$New) {
+    $RelativePath = Expand-Legacy $RelativePath
     $path = Join-Path $SourceDir $RelativePath
     if (-not (Test-Path $path -PathType Leaf)) {
         throw "Scarlet runtime overlay: missing file $RelativePath"
@@ -44,6 +45,7 @@ function Replace-Literal([string]$RelativePath, [string]$Old, [string]$New) {
 }
 
 function Replace-RegexOnce([string]$RelativePath, [string]$Pattern, [string]$Replacement) {
+    $RelativePath = Expand-Legacy $RelativePath
     $path = Join-Path $SourceDir $RelativePath
     if (-not (Test-Path $path -PathType Leaf)) {
         throw "Scarlet runtime overlay: missing file $RelativePath"
