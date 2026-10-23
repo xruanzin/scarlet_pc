@@ -877,6 +877,69 @@ Replace-Literal 'src\__PRODUCT___cmd\native_status.h' 'return "suyu Hybrid JIT +
 Replace-Literal 'src\__PRODUCT___cmd\native_status.h' 'return "suyu Dynarmic JIT";' 'return "Dynamic fallback";'
 Replace-Literal 'src\__PRODUCT___cmd\native_status.h' 'out += " | F12 Controls";' 'out += " | F12 Controls";'
 
+# Scarlet v1.0.0's known 60 FPS code changes the game's requested presentation
+# interval from 2 to 1. Do the equivalent at the HLE compositor boundary instead
+# of modifying guest text: AOT instruction guards stay valid and no hot block is
+# forced into JIT. SCARLET_TARGET_FPS=30 restores the original interval for A/B tests.
+Replace-Literal 'src\core\hle\service\nvnflinger\hardware_composer.cpp' '#include <optional>' "#include <optional>`n#include <cstdlib>"
+
+$old = @'
+s32 NormalizeSwapInterval(f32* out_speed_scale, s32 swap_interval) {
+    if (swap_interval <= 0) {
+        // As an extension, treat nonpositive swap interval as speed multiplier.
+        if (out_speed_scale) {
+            *out_speed_scale = 2.f * static_cast<f32>(1 - swap_interval);
+        }
+
+        swap_interval = 1;
+    }
+
+    if (swap_interval >= 5) {
+        // As an extension, treat high swap interval as precise speed control.
+        if (out_speed_scale) {
+            *out_speed_scale = static_cast<f32>(swap_interval) / 100.f;
+        }
+
+        swap_interval = 1;
+    }
+
+    return swap_interval;
+}
+'@
+$new = @'
+s32 NormalizeSwapInterval(f32* out_speed_scale, s32 swap_interval) {
+    if (swap_interval <= 0) {
+        // As an extension, treat nonpositive swap interval as speed multiplier.
+        if (out_speed_scale) {
+            *out_speed_scale = 2.f * static_cast<f32>(1 - swap_interval);
+        }
+
+        swap_interval = 1;
+    }
+
+    if (swap_interval >= 5) {
+        // As an extension, treat high swap interval as precise speed control.
+        if (out_speed_scale) {
+            *out_speed_scale = static_cast<f32>(swap_interval) / 100.f;
+        }
+
+        swap_interval = 1;
+    }
+
+    // Scarlet PC is a single-title runtime. Its v1.0.0 60-FPS patch is equivalent
+    // to requesting one VI period instead of two. Apply that at the compositor so
+    // generated AOT code remains byte-for-byte identical to the original main NSO.
+    const char* target_env = std::getenv("SCARLET_TARGET_FPS");
+    const int target_fps = target_env && *target_env ? std::atoi(target_env) : 60;
+    if (target_fps >= 60 && swap_interval == 2) {
+        swap_interval = 1;
+    }
+
+    return swap_interval;
+}
+'@
+Replace-Literal 'src\core\hle\service\nvnflinger\hardware_composer.cpp' $old.Trim() $new.Trim()
+
 # Scarlet graphics identity in the Vulkan bring-up log.
 $old = @'
 CollectPhysicalMemoryInfo();
