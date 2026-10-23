@@ -1,0 +1,19 @@
+{
+  "component": "runtime-recompiler-foundation",
+  "upstream_project": "suyu",
+  "source_url": "https://github.com/suyu-emu/suyu-main.git",
+  "validated_revision": "347fcf91d95cd39cb5c3db50f1b6d827ad699311",
+  "license": "GNU GPL v3",
+  "legacy": {
+    "product": "suyu",
+    "pascal": "Suyu",
+    "upper": "SUYU",
+    "command_dir": "suyu_cmd",
+    "command_main": "suyu.cpp",
+    "command_target": "suyu-cmd",
+    "command_executable": "suyu-cmd.exe",
+    "icon_file": "suyu.ico",
+    "strict_env": "SUYU_RECOMP_STRICT",
+    "no_jit_option": "SUYU_NO_JIT"
+  }
+}
