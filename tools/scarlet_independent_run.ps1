@@ -1,6 +1,10 @@
 param(
     [string]$GamePath,
     [string]$UpdatePath,
+
+    [ValidateRange(30, 240)]
+    [int]$TargetFps = 60,
+
     [switch]$ExperimentalAsyncShaders
 )
 
@@ -58,13 +62,16 @@ Push-Location $package
 try {
     $env:NSWITCH_AOT_FALLBACK = '1'
 
-    # The aggressive runtime profile also enables asynchronous shader compilation.
-    # Scarlet can temporarily skip character-material draws while a pipeline is still
-    # compiling, which is visible in the character setup screen. Keep the normal
-    # async-GPU default, but disable that bundled profile unless explicitly requested.
-    if (-not $ExperimentalAsyncShaders) {
-        $env:SCARLET_PERF_PROFILE = '0'
-        Write-Host '[Scarlet PC] Stable shader mode: async shader compilation disabled.' -ForegroundColor Green
+    $env:SCARLET_TARGET_FPS = [string]$TargetFps
+    Write-Host ("[Scarlet PC] Target presentation: {0} FPS" -f $TargetFps) -ForegroundColor Cyan
+
+    if ($ExperimentalAsyncShaders) {
+        $env:SCARLET_ASYNC_SHADERS = '1'
+        Write-Warning '[Scarlet PC] Experimental async shaders enabled; transient missing draws may occur.'
+    }
+    else {
+        $env:SCARLET_ASYNC_SHADERS = '0'
+        Write-Host '[Scarlet PC] Stable shader mode: synchronous shader compilation.' -ForegroundColor Green
     }
 
     if (-not [string]::IsNullOrWhiteSpace($legacyStrictEnv)) {
@@ -94,7 +101,8 @@ try {
 }
 finally {
     Remove-Item Env:NSWITCH_AOT_FALLBACK -ErrorAction SilentlyContinue
-    Remove-Item Env:SCARLET_PERF_PROFILE -ErrorAction SilentlyContinue
+    Remove-Item Env:SCARLET_TARGET_FPS -ErrorAction SilentlyContinue
+    Remove-Item Env:SCARLET_ASYNC_SHADERS -ErrorAction SilentlyContinue
     if (-not [string]::IsNullOrWhiteSpace($legacyStrictEnv)) {
         Remove-Item -Path ("Env:" + $legacyStrictEnv) -ErrorAction SilentlyContinue
     }
