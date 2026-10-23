@@ -48,8 +48,18 @@ constexpr UINT kUpdateTextMessage = WM_APP + 0x252;
 constexpr int kIdBackspace = 600;
 constexpr int kIdShift = 601;
 constexpr int kIdSpace = 602;
-constexpr int kIdSymbols = 603;
+constexpr int kIdReturn = 603;
+constexpr int kIdHeader = 610;
+constexpr int kIdSub = 611;
+constexpr int kIdGuide = 612;
+constexpr int kIdCounter = 613;
+constexpr int kIdError = 614;
+constexpr int kIdLegend = 615;
 constexpr int kKeyBase = 1000;
+
+constexpr COLORREF kTransparentKey = RGB(1, 2, 3);
+constexpr int kBaseWidth = 1280;
+constexpr int kBaseHeight = 720;
 
 std::atomic<HWND> g_keyboard_window{nullptr};
 
@@ -104,7 +114,7 @@ HWND FindGameWindow() {
     if (foreground != nullptr) {
         DWORD owner_pid{};
         GetWindowThreadProcessId(foreground, &owner_pid);
-        if (owner_pid == pid && IsWindowVisible(foreground)) {
+        if (owner_pid == pid && IsWindowVisible(foreground) && GetParent(foreground) == nullptr) {
             return foreground;
         }
     }
@@ -119,7 +129,7 @@ HWND FindGameWindow() {
             auto& search = *reinterpret_cast<Search*>(data);
             DWORD owner_pid{};
             GetWindowThreadProcessId(hwnd, &owner_pid);
-            if (owner_pid != search.pid || !IsWindowVisible(hwnd)) {
+            if (owner_pid != search.pid || !IsWindowVisible(hwnd) || GetParent(hwnd) != nullptr) {
                 return TRUE;
             }
             wchar_t title[256]{};
@@ -137,24 +147,12 @@ HWND FindGameWindow() {
 
 bool CharacterDisabled(const KeyboardInitializeParameters& params, wchar_t ch) {
     const u32 flags = params.key_disable_flags.raw;
-    if (ch == L' ' && (flags & (1u << 1))) {
-        return true;
-    }
-    if (ch == L'@' && (flags & (1u << 2))) {
-        return true;
-    }
-    if (ch == L'%' && (flags & (1u << 3))) {
-        return true;
-    }
-    if (ch == L'/' && (flags & (1u << 4))) {
-        return true;
-    }
-    if (ch == L'\\' && (flags & (1u << 5))) {
-        return true;
-    }
-    if (std::iswdigit(ch) && (flags & (1u << 6))) {
-        return true;
-    }
+    if (ch == L' ' && (flags & (1u << 1))) return true;
+    if (ch == L'@' && (flags & (1u << 2))) return true;
+    if (ch == L'%' && (flags & (1u << 3))) return true;
+    if (ch == L'/' && (flags & (1u << 4))) return true;
+    if (ch == L'\\' && (flags & (1u << 5))) return true;
+    if (std::iswdigit(ch) && (flags & (1u << 6))) return true;
     return false;
 }
 
@@ -163,53 +161,81 @@ struct TextUpdate {
     s32 cursor{};
 };
 
+struct CharacterKey {
+    HWND hwnd{};
+    wchar_t lower{};
+    wchar_t upper{};
+};
+
 struct DialogState {
     KeyboardInitializeParameters params;
     std::u16string error_text;
+    HWND owner{};
+    HWND scrim{};
     HWND hwnd{};
     HWND edit{};
     HWND error_label{};
     HWND counter_label{};
     HWND shift_button{};
-    HBRUSH background_brush{};
+    HWND return_button{};
+    HWND ok_button{};
+    HBRUSH transparent_brush{};
     HBRUSH panel_brush{};
     HBRUSH edit_brush{};
-    HFONT font_title{};
-    HFONT font_text{};
+    HFONT font_header{};
+    HFONT font_sub{};
+    HFONT font_editor{};
     HFONT font_key{};
-    HFONT font_input{};
+    HFONT font_label{};
     bool shift{};
     bool accepted{};
     bool silent{};
     bool done{};
+    bool attached_input{};
+    DWORD owner_thread{};
     std::u16string final_text;
-    std::vector<HWND> character_buttons;
-    std::vector<wchar_t> character_values;
+    std::vector<CharacterKey> character_keys;
     std::vector<std::vector<HWND>> nav_rows;
     WORD previous_gamepad_buttons{};
 };
 
+int ScaleX(HWND hwnd, int value) {
+    RECT rect{};
+    GetClientRect(hwnd, &rect);
+    return MulDiv(value, rect.right - rect.left, kBaseWidth);
+}
+
+int ScaleY(HWND hwnd, int value) {
+    RECT rect{};
+    GetClientRect(hwnd, &rect);
+    return MulDiv(value, rect.bottom - rect.top, kBaseHeight);
+}
+
+HFONT CreateUiFont(HWND hwnd, int base_points, int weight = FW_NORMAL) {
+    RECT rect{};
+    GetClientRect(hwnd, &rect);
+    const int scaled_points =
+        std::max(8, MulDiv(base_points, std::max(1L, rect.bottom - rect.top), kBaseHeight));
+    const UINT dpi = GetDpiForWindow(hwnd);
+    const int height = -MulDiv(scaled_points, static_cast<int>(dpi), 72);
+    return CreateFontW(height, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                       DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+}
+
 void ApplyFont(HWND control, HFONT font) {
-    SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    if (control != nullptr && font != nullptr) {
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    }
 }
 
 HWND CreateControl(HWND parent, const wchar_t* cls, const std::wstring& text, DWORD style, int x,
                    int y, int w, int h, int id, HFONT font) {
-    HWND control = CreateWindowExW(0, cls, text.c_str(), WS_CHILD | WS_VISIBLE | style, x, y, w, h,
-                                   parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
-                                   GetModuleHandleW(nullptr), nullptr);
-    if (control != nullptr) {
-        ApplyFont(control, font);
-    }
+    HWND control = CreateWindowExW(
+        0, cls, text.c_str(), WS_CHILD | WS_VISIBLE | style, x, y, w, h, parent,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
+    ApplyFont(control, font);
     return control;
-}
-
-HFONT CreateUiFont(HWND hwnd, int points, int weight = FW_NORMAL) {
-    const UINT dpi = GetDpiForWindow(hwnd);
-    const int height = -MulDiv(points, static_cast<int>(dpi), 72);
-    return CreateFontW(height, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                       DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 }
 
 HWND CreateKeyButton(DialogState& state, const std::wstring& text, int x, int y, int w, int h,
@@ -223,6 +249,17 @@ void AddNavRow(DialogState& state, std::vector<HWND> row) {
     if (!row.empty()) {
         state.nav_rows.push_back(std::move(row));
     }
+}
+
+HWND AddCharacter(DialogState& state, wchar_t lower, wchar_t upper, int x, int y, int w, int h) {
+    const int id = kKeyBase + static_cast<int>(state.character_keys.size());
+    wchar_t label[2]{lower, L'\0'};
+    HWND button = CreateKeyButton(state, label, x, y, w, h, id);
+    state.character_keys.push_back({button, lower, upper});
+    if (CharacterDisabled(state.params, lower) && CharacterDisabled(state.params, upper)) {
+        EnableWindow(button, FALSE);
+    }
+    return button;
 }
 
 void ReplaceSelection(HWND edit, std::wstring_view value) {
@@ -241,21 +278,22 @@ void Backspace(HWND edit) {
 }
 
 void UpdateCounter(DialogState& state) {
-    if (state.counter_label == nullptr || state.edit == nullptr) {
-        return;
-    }
+    if (state.counter_label == nullptr || state.edit == nullptr) return;
     const auto text = GetEditText(state.edit);
     const auto count = CharacterCount(text);
     const u32 max_length = state.params.max_text_length > 0 ? state.params.max_text_length : 500;
     wchar_t label[64]{};
-    swprintf_s(label, L"%zu / %u", count, max_length);
+    swprintf_s(label, L"%zu/%u", count, max_length);
     SetWindowTextW(state.counter_label, label);
 }
 
-RECT ScreenRect(HWND hwnd) {
-    RECT r{};
-    GetWindowRect(hwnd, &r);
-    return r;
+void SetError(DialogState& state, std::u16string_view message) {
+    state.error_text.assign(message.begin(), message.end());
+    if (state.error_label != nullptr) {
+        const auto wide = ToWide(message);
+        SetWindowTextW(state.error_label, wide.c_str());
+        InvalidateRect(state.error_label, nullptr, TRUE);
+    }
 }
 
 void FocusControl(HWND control) {
@@ -265,10 +303,14 @@ void FocusControl(HWND control) {
     }
 }
 
+RECT ScreenRect(HWND hwnd) {
+    RECT r{};
+    GetWindowRect(hwnd, &r);
+    return r;
+}
+
 void Navigate(DialogState& state, int dx, int dy) {
-    if (state.nav_rows.empty()) {
-        return;
-    }
+    if (state.nav_rows.empty()) return;
 
     HWND focused = GetFocus();
     int row_index = -1;
@@ -281,9 +323,7 @@ void Navigate(DialogState& state, int dx, int dy) {
                 break;
             }
         }
-        if (row_index >= 0) {
-            break;
-        }
+        if (row_index >= 0) break;
     }
 
     if (row_index < 0) {
@@ -304,31 +344,26 @@ void Navigate(DialogState& state, int dx, int dy) {
         return;
     }
 
-    if (dy != 0) {
-        RECT current = ScreenRect(focused);
-        const int current_x = (current.left + current.right) / 2;
-        int r = row_index;
-        for (int attempts = 0; attempts < static_cast<int>(state.nav_rows.size()); ++attempts) {
-            r = (r + dy + static_cast<int>(state.nav_rows.size())) %
-                static_cast<int>(state.nav_rows.size());
-            HWND best = nullptr;
-            int best_distance = INT_MAX;
-            for (HWND candidate : state.nav_rows[r]) {
-                if (!IsWindowEnabled(candidate)) {
-                    continue;
-                }
-                RECT rect = ScreenRect(candidate);
-                const int center_x = (rect.left + rect.right) / 2;
-                const int distance = std::abs(center_x - current_x);
-                if (distance < best_distance) {
-                    best_distance = distance;
-                    best = candidate;
-                }
+    RECT current = ScreenRect(focused);
+    const int current_x = (current.left + current.right) / 2;
+    int r = row_index;
+    for (int attempts = 0; attempts < static_cast<int>(state.nav_rows.size()); ++attempts) {
+        r = (r + dy + static_cast<int>(state.nav_rows.size())) %
+            static_cast<int>(state.nav_rows.size());
+        HWND best = nullptr;
+        int best_distance = INT_MAX;
+        for (HWND candidate : state.nav_rows[r]) {
+            if (!IsWindowEnabled(candidate)) continue;
+            RECT rect = ScreenRect(candidate);
+            const int distance = std::abs(((rect.left + rect.right) / 2) - current_x);
+            if (distance < best_distance) {
+                best_distance = distance;
+                best = candidate;
             }
-            if (best != nullptr) {
-                FocusControl(best);
-                return;
-            }
+        }
+        if (best != nullptr) {
+            FocusControl(best);
+            return;
         }
     }
 }
@@ -336,9 +371,7 @@ void Navigate(DialogState& state, int dx, int dy) {
 void ActivateFocused(DialogState& state) {
     HWND focused = GetFocus();
     if (focused == nullptr || focused == state.edit) {
-        if (!state.nav_rows.empty()) {
-            FocusControl(state.nav_rows.front().front());
-        }
+        FocusControl(state.nav_rows.front().front());
         return;
     }
     const int id = GetDlgCtrlID(focused);
@@ -346,6 +379,46 @@ void ActivateFocused(DialogState& state) {
         SendMessageW(state.hwnd, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED),
                      reinterpret_cast<LPARAM>(focused));
     }
+}
+
+void UpdateCharacterLabels(DialogState& state) {
+    for (const auto& key : state.character_keys) {
+        const wchar_t value = state.shift ? key.upper : key.lower;
+        wchar_t label[2]{value, L'\0'};
+        SetWindowTextW(key.hwnd, label);
+        EnableWindow(key.hwnd, !CharacterDisabled(state.params, value));
+        InvalidateRect(key.hwnd, nullptr, TRUE);
+    }
+    if (state.shift_button != nullptr) {
+        InvalidateRect(state.shift_button, nullptr, TRUE);
+    }
+}
+
+bool ValidateAndAccept(DialogState& state) {
+    const auto text = GetEditText(state.edit);
+    const std::size_t count = CharacterCount(text);
+    const u32 min_length = state.params.min_text_length;
+    const u32 max_length = state.params.max_text_length > 0 ? state.params.max_text_length : 500;
+
+    if (count < min_length || count > max_length) {
+        wchar_t message[160]{};
+        if (min_length == max_length) {
+            swprintf_s(message, L"Digite exatamente %u caracteres.", min_length);
+        } else if (min_length > 0) {
+            swprintf_s(message, L"Digite entre %u e %u caracteres.", min_length, max_length);
+        } else {
+            swprintf_s(message, L"Digite no máximo %u caracteres.", max_length);
+        }
+        SetError(state, ToU16(message));
+        MessageBeep(MB_ICONWARNING);
+        return false;
+    }
+
+    state.final_text = text;
+    state.accepted = true;
+    state.done = true;
+    DestroyWindow(state.hwnd);
+    return true;
 }
 
 void PollGamepad(DialogState& state) {
@@ -359,9 +432,7 @@ void PollGamepad(DialogState& state) {
     static XInputGetStateFn get_state =
         xinput != nullptr ? reinterpret_cast<XInputGetStateFn>(GetProcAddress(xinput, "XInputGetState"))
                           : nullptr;
-    if (get_state == nullptr) {
-        return;
-    }
+    if (get_state == nullptr) return;
 
     XINPUT_STATE pad{};
     bool connected = false;
@@ -391,68 +462,13 @@ void PollGamepad(DialogState& state) {
         }
     }
     if (pressed & XINPUT_GAMEPAD_X) Backspace(state.edit);
-    if (pressed & XINPUT_GAMEPAD_Y && state.shift_button != nullptr) {
+    if (pressed & XINPUT_GAMEPAD_Y) {
         SendMessageW(state.hwnd, WM_COMMAND, MAKEWPARAM(kIdShift, BN_CLICKED),
                      reinterpret_cast<LPARAM>(state.shift_button));
     }
     if (pressed & XINPUT_GAMEPAD_START) {
         SendMessageW(state.hwnd, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), 0);
     }
-}
-
-void UpdateCharacterLabels(DialogState& state) {
-    for (std::size_t index = 0; index < state.character_buttons.size(); ++index) {
-        wchar_t value = state.character_values[index];
-        if (std::iswalpha(value)) {
-            value = state.shift ? static_cast<wchar_t>(std::towupper(value))
-                                : static_cast<wchar_t>(std::towlower(value));
-        }
-        wchar_t label[2]{value, L'\0'};
-        SetWindowTextW(state.character_buttons[index], label);
-        InvalidateRect(state.character_buttons[index], nullptr, TRUE);
-    }
-    if (state.shift_button != nullptr) {
-        InvalidateRect(state.shift_button, nullptr, TRUE);
-    }
-}
-
-void SetError(DialogState& state, std::u16string_view message) {
-    state.error_text.assign(message.begin(), message.end());
-    if (state.error_label == nullptr) {
-        return;
-    }
-    const auto wide = ToWide(message);
-    SetWindowTextW(state.error_label, wide.c_str());
-    InvalidateRect(state.error_label, nullptr, TRUE);
-}
-
-bool ValidateAndAccept(DialogState& state) {
-    const auto text = GetEditText(state.edit);
-    const std::size_t count = CharacterCount(text);
-    const u32 min_length = state.params.min_text_length;
-    const u32 max_length = state.params.max_text_length > 0 ? state.params.max_text_length : 500;
-
-    if (count < min_length || count > max_length) {
-        wchar_t message[160]{};
-        if (min_length == max_length) {
-            swprintf_s(message, L"Digite exatamente %u caracteres.", min_length);
-        } else if (min_length > 0) {
-            swprintf_s(message, L"Digite entre %u e %u caracteres.", min_length, max_length);
-        } else {
-            swprintf_s(message, L"Digite no máximo %u caracteres.", max_length);
-        }
-        SetError(state, ToU16(message));
-        MessageBeep(MB_ICONWARNING);
-        SetFocus(state.edit);
-        return false;
-    }
-
-    state.final_text = text;
-    state.accepted = true;
-    state.done = true;
-    state.error_text.clear();
-    DestroyWindow(state.hwnd);
-    return true;
 }
 
 LRESULT CALLBACK KeyboardWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -475,22 +491,19 @@ LRESULT CALLBACK KeyboardWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     case WM_COMMAND: {
         const int id = LOWORD(wparam);
         const int notification = HIWORD(wparam);
+
         if (reinterpret_cast<HWND>(lparam) == state->edit && notification == EN_CHANGE) {
             UpdateCounter(*state);
             SetError(*state, std::u16string_view{});
             return 0;
         }
-        if (notification != BN_CLICKED) {
-            break;
-        }
+
+        if (notification != BN_CLICKED) break;
 
         if (id >= kKeyBase &&
-            id < kKeyBase + static_cast<int>(state->character_values.size())) {
-            wchar_t value = state->character_values[static_cast<std::size_t>(id - kKeyBase)];
-            if (std::iswalpha(value)) {
-                value = state->shift ? static_cast<wchar_t>(std::towupper(value))
-                                     : static_cast<wchar_t>(std::towlower(value));
-            }
+            id < kKeyBase + static_cast<int>(state->character_keys.size())) {
+            const auto& key = state->character_keys[static_cast<std::size_t>(id - kKeyBase)];
+            const wchar_t value = state->shift ? key.upper : key.lower;
             if (!CharacterDisabled(state->params, value)) {
                 wchar_t text[2]{value, L'\0'};
                 ReplaceSelection(state->edit, text);
@@ -511,18 +524,9 @@ LRESULT CALLBACK KeyboardWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPAR
                 ReplaceSelection(state->edit, L" ");
             }
             return 0;
-        case kIdSymbols:
-            for (const auto& row : state->nav_rows) {
-                for (HWND button : row) {
-                    if (GetDlgCtrlID(button) >= kKeyBase) {
-                        wchar_t label[8]{};
-                        GetWindowTextW(button, label, 8);
-                        if (label[0] == L'-') {
-                            FocusControl(button);
-                            return 0;
-                        }
-                    }
-                }
+        case kIdReturn:
+            if (state->params.enable_return_button) {
+                ReplaceSelection(state->edit, L"\n");
             }
             return 0;
         case IDOK:
@@ -570,9 +574,7 @@ LRESULT CALLBACK KeyboardWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         return 0;
     case WM_DRAWITEM: {
         const auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
-        if (draw == nullptr || draw->CtlType != ODT_BUTTON) {
-            break;
-        }
+        if (draw == nullptr || draw->CtlType != ODT_BUTTON) break;
 
         RECT rect = draw->rcItem;
         HDC dc = draw->hDC;
@@ -581,26 +583,33 @@ LRESULT CALLBACK KeyboardWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         const bool disabled = (draw->itemState & ODS_DISABLED) != 0;
         const int id = static_cast<int>(draw->CtlID);
 
-        COLORREF fill = RGB(244, 245, 247);
-        COLORREF text_color = disabled ? RGB(170, 173, 178) : RGB(38, 40, 45);
-        COLORREF border = focused ? RGB(0, 187, 196) : RGB(205, 208, 213);
+        COLORREF fill = RGB(247, 247, 247);
+        COLORREF text_color = disabled ? RGB(175, 175, 175) : RGB(25, 25, 25);
+        COLORREF border = focused ? RGB(82, 238, 184) : RGB(225, 225, 225);
 
         if (id == IDOK) {
-            fill = pressed ? RGB(32, 87, 198) : RGB(49, 105, 221);
+            fill = pressed ? RGB(39, 65, 205) : RGB(51, 78, 238);
             text_color = RGB(255, 255, 255);
-            border = focused ? RGB(0, 207, 218) : fill;
+            border = focused ? RGB(82, 238, 184) : fill;
+        } else if (id == kIdBackspace) {
+            fill = pressed ? RGB(28, 28, 28) : RGB(45, 45, 45);
+            text_color = RGB(255, 255, 255);
+            border = focused ? RGB(82, 238, 184) : fill;
+        } else if (id == kIdReturn && !state->params.enable_return_button) {
+            fill = RGB(224, 224, 224);
+            text_color = RGB(175, 175, 175);
         } else if (id == kIdShift && state->shift) {
-            fill = RGB(75, 79, 87);
+            fill = RGB(55, 55, 55);
             text_color = RGB(255, 255, 255);
         } else if (pressed) {
-            fill = RGB(220, 223, 228);
+            fill = RGB(224, 224, 224);
         }
 
         HBRUSH brush = CreateSolidBrush(fill);
         HPEN pen = CreatePen(PS_SOLID, focused ? 3 : 1, border);
         HGDIOBJ old_brush = SelectObject(dc, brush);
         HGDIOBJ old_pen = SelectObject(dc, pen);
-        RoundRect(dc, rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1, 10, 10);
+        Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
         SelectObject(dc, old_pen);
         SelectObject(dc, old_brush);
         DeleteObject(pen);
@@ -613,41 +622,61 @@ LRESULT CALLBACK KeyboardWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         HFONT font = reinterpret_cast<HFONT>(SendMessageW(draw->hwndItem, WM_GETFONT, 0, 0));
         HGDIOBJ old_font = font != nullptr ? SelectObject(dc, font) : nullptr;
         DrawTextW(dc, label, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        if (old_font != nullptr) {
-            SelectObject(dc, old_font);
+
+        if ((id == IDOK || id == kIdBackspace) && !disabled) {
+            const wchar_t* badge_text = id == IDOK ? L"A" : L"B";
+            const int radius = std::max(9, (rect.bottom - rect.top) / 8);
+            const int cx = rect.right - radius - 8;
+            const int cy = rect.top + radius + 8;
+            HBRUSH badge = CreateSolidBrush(RGB(255, 255, 255));
+            HPEN badge_pen = CreatePen(PS_SOLID, 1, RGB(210, 210, 210));
+            old_brush = SelectObject(dc, badge);
+            old_pen = SelectObject(dc, badge_pen);
+            Ellipse(dc, cx - radius, cy - radius, cx + radius, cy + radius);
+            SelectObject(dc, old_pen);
+            SelectObject(dc, old_brush);
+            DeleteObject(badge_pen);
+            DeleteObject(badge);
+            SetTextColor(dc, RGB(55, 55, 55));
+            RECT badge_rect{cx - radius, cy - radius, cx + radius, cy + radius};
+            DrawTextW(dc, badge_text, -1, &badge_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
+
+        if (old_font != nullptr) SelectObject(dc, old_font);
         return TRUE;
     }
     case WM_CTLCOLORSTATIC: {
         HDC dc = reinterpret_cast<HDC>(wparam);
+        HWND control = reinterpret_cast<HWND>(lparam);
+        const int id = GetDlgCtrlID(control);
         SetBkMode(dc, TRANSPARENT);
-        if (reinterpret_cast<HWND>(lparam) == state->error_label && !state->error_text.empty()) {
-            SetTextColor(dc, RGB(200, 52, 60));
-        } else {
-            SetTextColor(dc, RGB(43, 45, 50));
+
+        if (id == kIdLegend) {
+            SetTextColor(dc, RGB(45, 45, 45));
+            return reinterpret_cast<LRESULT>(state->panel_brush);
         }
-        return reinterpret_cast<LRESULT>(state->background_brush);
+
+        if (id == kIdError && !state->error_text.empty()) {
+            SetTextColor(dc, RGB(255, 120, 120));
+        } else {
+            SetTextColor(dc, RGB(255, 255, 255));
+        }
+        return reinterpret_cast<LRESULT>(state->transparent_brush);
     }
     case WM_CTLCOLOREDIT: {
         HDC dc = reinterpret_cast<HDC>(wparam);
         SetBkColor(dc, RGB(255, 255, 255));
-        SetTextColor(dc, RGB(25, 27, 31));
+        SetTextColor(dc, RGB(25, 25, 25));
         return reinterpret_cast<LRESULT>(state->edit_brush);
     }
     case WM_ERASEBKGND: {
         HDC dc = reinterpret_cast<HDC>(wparam);
         RECT rect{};
         GetClientRect(hwnd, &rect);
-        FillRect(dc, &rect, state->background_brush);
-        RECT panel = rect;
-        panel.bottom = std::min<LONG>(rect.bottom, 170L);
-        FillRect(dc, &panel, state->panel_brush);
-        HPEN line = CreatePen(PS_SOLID, 1, RGB(215, 218, 223));
-        HGDIOBJ old = SelectObject(dc, line);
-        MoveToEx(dc, 0, panel.bottom - 1, nullptr);
-        LineTo(dc, rect.right, panel.bottom - 1);
-        SelectObject(dc, old);
-        DeleteObject(line);
+        FillRect(dc, &rect, state->transparent_brush);
+        RECT keyboard = rect;
+        keyboard.top = ScaleY(hwnd, 320);
+        FillRect(dc, &keyboard, state->panel_brush);
         return 1;
     }
     case WM_DESTROY:
@@ -668,58 +697,184 @@ void RegisterKeyboardClass() {
         wc.lpfnWndProc = KeyboardWindowProc;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
         wc.lpszClassName = kKeyboardClass;
         return RegisterClassExW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
     }();
     (void)registered;
 }
 
-void AddCharacterRow(DialogState& state, HFONT, std::wstring_view characters, int y,
-                     int button_width, int button_height, int gap, int client_width) {
-    const int total_width =
-        static_cast<int>(characters.size()) * button_width +
-        std::max(0, static_cast<int>(characters.size()) - 1) * gap;
-    int x = std::max(12, (client_width - total_width) / 2);
-    std::vector<HWND> nav_row;
+void BuildNormalKeyboard(DialogState& state) {
+    const int row_y[] = {335, 398, 461, 524, 587};
+    const int key_h = 63;
+    const int margin_x = 54;
+    const int key_w = 96;
+    const int special_w = 116;
 
-    for (const wchar_t ch : characters) {
-        const int id = kKeyBase + static_cast<int>(state.character_values.size());
-        wchar_t label[2]{ch, L'\0'};
-        HWND button = CreateKeyButton(state, label, x, y, button_width, button_height, id);
-        state.character_buttons.push_back(button);
-        state.character_values.push_back(ch);
-        nav_row.push_back(button);
-        if (CharacterDisabled(state.params, ch)) {
-            EnableWindow(button, FALSE);
+    auto X = [&](int v) { return ScaleX(state.hwnd, v); };
+    auto Y = [&](int v) { return ScaleY(state.hwnd, v); };
+    auto W = [&](int v) { return ScaleX(state.hwnd, v); };
+    auto H = [&](int v) { return ScaleY(state.hwnd, v); };
+    auto col_x = [&](int col) { return margin_x + (col - 1) * key_w; };
+
+    struct Pair {
+        wchar_t lower;
+        wchar_t upper;
+    };
+
+    static constexpr std::array<Pair, 11> row1{{
+        {L'1', L'#'}, {L'2', L'['}, {L'3', L']'}, {L'4', L'$'}, {L'5', L'%'},
+        {L'6', L'^'}, {L'7', L'&'}, {L'8', L'*'}, {L'9', L'('}, {L'0', L')'},
+        {L'-', L'_'},
+    }};
+    static constexpr std::array<Pair, 11> row2{{
+        {L'q', L'Q'}, {L'w', L'W'}, {L'e', L'E'}, {L'r', L'R'}, {L't', L'T'},
+        {L'y', L'Y'}, {L'u', L'U'}, {L'i', L'I'}, {L'o', L'O'}, {L'p', L'P'},
+        {L'/', L'@'},
+    }};
+    static constexpr std::array<Pair, 11> row3{{
+        {L'a', L'A'}, {L's', L'S'}, {L'd', L'D'}, {L'f', L'F'}, {L'g', L'G'},
+        {L'h', L'H'}, {L'j', L'J'}, {L'k', L'K'}, {L'l', L'L'}, {L':', L';'},
+        {L'\'', L'"'},
+    }};
+    static constexpr std::array<Pair, 11> row4{{
+        {L'z', L'Z'}, {L'x', L'X'}, {L'c', L'C'}, {L'v', L'V'}, {L'b', L'B'},
+        {L'n', L'N'}, {L'm', L'M'}, {L',', L'<'}, {L'.', L'>'}, {L'?', L'+'},
+        {L'!', L'='},
+    }};
+
+    const std::array<const Pair*, 4> data{row1.data(), row2.data(), row3.data(), row4.data()};
+    for (int r = 0; r < 4; ++r) {
+        std::vector<HWND> nav;
+        for (int c = 0; c < 11; ++c) {
+            nav.push_back(AddCharacter(state, data[r][c].lower, data[r][c].upper,
+                                       X(col_x(c + 1)), Y(row_y[r]), W(key_w), H(key_h)));
         }
-        x += button_width + gap;
+
+        if (r == 0) {
+            HWND backspace =
+                CreateKeyButton(state, L"⌫", X(col_x(12)), Y(row_y[r]), W(special_w), H(key_h),
+                                kIdBackspace);
+            nav.push_back(backspace);
+        } else if (r == 1) {
+            state.return_button =
+                CreateKeyButton(state, L"Return", X(col_x(12)), Y(row_y[r]), W(special_w),
+                                H(key_h * 2), kIdReturn);
+            EnableWindow(state.return_button, state.params.enable_return_button);
+            nav.push_back(state.return_button);
+        } else if (r == 2) {
+            nav.push_back(state.return_button);
+        } else {
+            const std::wstring ok_text =
+                state.params.ok_text.empty() ? std::wstring{L"OK"} : ToWide(state.params.ok_text);
+            state.ok_button =
+                CreateKeyButton(state, ok_text, X(col_x(12)), Y(row_y[r]), W(special_w),
+                                H(key_h * 2), IDOK);
+            nav.push_back(state.ok_button);
+        }
+        AddNavRow(state, std::move(nav));
     }
-    AddNavRow(state, std::move(nav_row));
+
+    std::vector<HWND> bottom;
+    state.shift_button =
+        CreateKeyButton(state, L"⇧", X(col_x(1)), Y(row_y[4]), W(key_w * 2), H(key_h), kIdShift);
+    bottom.push_back(state.shift_button);
+
+    HWND space = CreateKeyButton(state, L"Space", X(col_x(3)), Y(row_y[4]), W(key_w * 9), H(key_h),
+                                 kIdSpace);
+    if (CharacterDisabled(state.params, L' ')) EnableWindow(space, FALSE);
+    bottom.push_back(space);
+    bottom.push_back(state.ok_button);
+    AddNavRow(state, std::move(bottom));
+
+    CreateControl(state.hwnd, L"STATIC",
+                  L"L  ←      R  →          ●  Shift          X  Cancel          A  Enter",
+                  SS_CENTER, X(54), Y(654), W(1172), H(52), kIdLegend, state.font_label);
+}
+
+void BuildNumberPad(DialogState& state) {
+    auto X = [&](int v) { return ScaleX(state.hwnd, v); };
+    auto Y = [&](int v) { return ScaleY(state.hwnd, v); };
+    auto W = [&](int v) { return ScaleX(state.hwnd, v); };
+    auto H = [&](int v) { return ScaleY(state.hwnd, v); };
+
+    const int key_w = 180;
+    const int key_h = 76;
+    const int gap = 4;
+    const int start_x = (kBaseWidth - (key_w * 4 + gap * 3)) / 2;
+    const int start_y = 348;
+    static constexpr wchar_t digits[4][3] = {
+        {L'1', L'2', L'3'},
+        {L'4', L'5', L'6'},
+        {L'7', L'8', L'9'},
+        {L'\0', L'0', L'\0'},
+    };
+
+    for (int r = 0; r < 4; ++r) {
+        std::vector<HWND> nav;
+        for (int c = 0; c < 3; ++c) {
+            wchar_t ch = digits[r][c];
+            if (r == 3 && c == 0 && state.params.left_optional_symbol_key != 0) {
+                ch = static_cast<wchar_t>(state.params.left_optional_symbol_key);
+            }
+            if (r == 3 && c == 2 && state.params.right_optional_symbol_key != 0) {
+                ch = static_cast<wchar_t>(state.params.right_optional_symbol_key);
+            }
+            if (ch != L'\0') {
+                nav.push_back(AddCharacter(state, ch, ch, X(start_x + c * (key_w + gap)),
+                                           Y(start_y + r * (key_h + gap)), W(key_w), H(key_h)));
+            }
+        }
+
+        if (r == 0) {
+            nav.push_back(CreateKeyButton(state, L"⌫",
+                                          X(start_x + 3 * (key_w + gap)), Y(start_y),
+                                          W(key_w), H(key_h), kIdBackspace));
+        } else if (r == 1) {
+            const std::wstring ok_text =
+                state.params.ok_text.empty() ? std::wstring{L"OK"} : ToWide(state.params.ok_text);
+            state.ok_button = CreateKeyButton(
+                state, ok_text, X(start_x + 3 * (key_w + gap)), Y(start_y + key_h + gap),
+                W(key_w), H(key_h * 3 + gap * 2), IDOK);
+            nav.push_back(state.ok_button);
+        } else {
+            nav.push_back(state.ok_button);
+        }
+        AddNavRow(state, std::move(nav));
+    }
+
+    CreateControl(state.hwnd, L"STATIC", L"X  Cancel          A  Enter", SS_CENTER, X(54), Y(654),
+                  W(1172), H(52), kIdLegend, state.font_label);
 }
 
 void BuildKeyboardUi(DialogState& state) {
     RECT client{};
     GetClientRect(state.hwnd, &client);
-    const int width = client.right - client.left;
-    const int height = client.bottom - client.top;
 
-    state.font_title = CreateUiFont(state.hwnd, 18, FW_SEMIBOLD);
-    state.font_text = CreateUiFont(state.hwnd, 12, FW_NORMAL);
-    state.font_key = CreateUiFont(state.hwnd, 16, FW_SEMIBOLD);
-    state.font_input = CreateUiFont(state.hwnd, 21, FW_NORMAL);
+    state.font_header = CreateUiFont(state.hwnd, 23, FW_NORMAL);
+    state.font_sub = CreateUiFont(state.hwnd, 17, FW_NORMAL);
+    state.font_editor = CreateUiFont(state.hwnd, 26, FW_NORMAL);
+    state.font_key = CreateUiFont(state.hwnd, 28, FW_NORMAL);
+    state.font_label = CreateUiFont(state.hwnd, 18, FW_NORMAL);
 
-    std::u16string title = state.params.header_text;
-    if (title.empty()) {
-        title = u"Digite o texto";
-    }
-    const auto title_w = ToWide(title);
-    CreateControl(state.hwnd, L"STATIC", title_w, SS_CENTER, 32, 18, width - 64, 30, 10,
-                  state.font_title);
+    auto X = [&](int v) { return ScaleX(state.hwnd, v); };
+    auto Y = [&](int v) { return ScaleY(state.hwnd, v); };
+    auto W = [&](int v) { return ScaleX(state.hwnd, v); };
+    auto H = [&](int v) { return ScaleY(state.hwnd, v); };
+
+    const std::u16string title =
+        state.params.header_text.empty() ? std::u16string{u"Enter Text"} : state.params.header_text;
+    CreateControl(state.hwnd, L"STATIC", ToWide(title), SS_CENTER, X(130), Y(42), W(1020), H(48),
+                  kIdHeader, state.font_header);
 
     if (!state.params.sub_text.empty()) {
-        const auto sub = ToWide(state.params.sub_text);
-        CreateControl(state.hwnd, L"STATIC", sub, SS_CENTER, 32, 48, width - 64, 22, 11,
-                      state.font_text);
+        CreateControl(state.hwnd, L"STATIC", ToWide(state.params.sub_text), SS_CENTER, X(130), Y(92),
+                      W(1020), H(28), kIdSub, state.font_sub);
+    }
+
+    if (!state.params.guide_text.empty()) {
+        CreateControl(state.hwnd, L"STATIC", ToWide(state.params.guide_text), SS_CENTER, X(130),
+                      Y(122), W(1020), H(28), kIdGuide, state.font_sub);
     }
 
     DWORD edit_style = WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL;
@@ -727,16 +882,14 @@ void BuildKeyboardUi(DialogState& state) {
         edit_style |= ES_PASSWORD;
     }
 
-    const int edit_w = std::min(width - 180, 900);
-    const int edit_x = (width - edit_w) / 2;
     state.edit = CreateControl(state.hwnd, L"EDIT", ToWide(state.params.initial_text), edit_style,
-                               edit_x, 78, edit_w, 48, 14, state.font_input);
+                               X(140), Y(170), W(1000), H(48), 14, state.font_editor);
 
-    state.counter_label = CreateControl(state.hwnd, L"STATIC", L"", SS_RIGHT, edit_x, 130, edit_w,
-                                        22, 15, state.font_text);
+    state.counter_label = CreateControl(state.hwnd, L"STATIC", L"", SS_RIGHT, X(130), Y(230),
+                                        W(1020), H(28), kIdCounter, state.font_sub);
 
     state.error_label = CreateControl(state.hwnd, L"STATIC", ToWide(state.error_text), SS_CENTER,
-                                      32, 146, width - 64, 22, 13, state.font_text);
+                                      X(130), Y(270), W(1020), H(34), kIdError, state.font_sub);
 
     const u32 max_length = state.params.max_text_length > 0 ? state.params.max_text_length : 500;
     SendMessageW(state.edit, EM_SETLIMITTEXT, static_cast<WPARAM>(max_length), 0);
@@ -747,161 +900,89 @@ void BuildKeyboardUi(DialogState& state) {
     }
     UpdateCounter(state);
 
-    const bool number_pad = state.params.type == SwkbdType::NumberPad;
-    const int gap = std::clamp(width / 150, 6, 10);
-    const int rows_needed = number_pad ? 6 : 7;
-    const int key_h = std::clamp(
-        (height - 188 - 20 - gap * (rows_needed - 1)) / rows_needed, 44, 64);
-    int y = 188;
-
-    if (number_pad) {
-        const int key_w = std::clamp(width / 9, 72, 110);
-        AddCharacterRow(state, state.font_key, L"123", y, key_w, key_h, gap, width);
-        y += key_h + gap;
-        AddCharacterRow(state, state.font_key, L"456", y, key_w, key_h, gap, width);
-        y += key_h + gap;
-        AddCharacterRow(state, state.font_key, L"789", y, key_w, key_h, gap, width);
-        y += key_h + gap;
-
-        std::wstring last;
-        if (state.params.left_optional_symbol_key != 0) {
-            last.push_back(static_cast<wchar_t>(state.params.left_optional_symbol_key));
-        }
-        last.push_back(L'0');
-        if (state.params.right_optional_symbol_key != 0) {
-            last.push_back(static_cast<wchar_t>(state.params.right_optional_symbol_key));
-        }
-        AddCharacterRow(state, state.font_key, last, y, key_w, key_h, gap, width);
-        y += key_h + gap;
-
-        std::vector<HWND> row;
-        if (state.params.enable_backspace_button) {
-            row.push_back(CreateKeyButton(state, L"⌫", width / 2 - 180, y, 170, key_h,
-                                          kIdBackspace));
-        }
-        row.push_back(CreateKeyButton(state,
-                                     state.params.ok_text.empty() ? L"OK" : ToWide(state.params.ok_text),
-                                     width / 2 + 10, y, 170, key_h, IDOK));
-        AddNavRow(state, std::move(row));
-        y += key_h + gap;
+    if (state.params.type == SwkbdType::NumberPad) {
+        BuildNumberPad(state);
     } else {
-        const int key_w = std::clamp((width - 170) / 12, 48, 82);
-        AddCharacterRow(state, state.font_key, L"1234567890", y, key_w, key_h, gap, width);
-        y += key_h + gap;
-        AddCharacterRow(state, state.font_key, L"qwertyuiop", y, key_w, key_h, gap, width);
-        y += key_h + gap;
-        AddCharacterRow(state, state.font_key, L"asdfghjkl", y, key_w, key_h, gap, width);
-        y += key_h + gap;
-        AddCharacterRow(state, state.font_key, L"zxcvbnm", y, key_w, key_h, gap, width);
-        y += key_h + gap;
-
-        const int special_w = std::clamp(width / 9, 90, 150);
-        const int space_w = std::clamp(width / 3, 240, 440);
-        const int total = special_w * 3 + space_w + gap * 3;
-        int x = (width - total) / 2;
-        std::vector<HWND> bottom;
-
-        state.shift_button =
-            CreateKeyButton(state, L"⇧ Shift", x, y, special_w, key_h, kIdShift);
-        bottom.push_back(state.shift_button);
-        x += special_w + gap;
-
-        HWND symbols =
-            CreateKeyButton(state, L"Símbolos", x, y, special_w, key_h, kIdSymbols);
-        bottom.push_back(symbols);
-        x += special_w + gap;
-
-        HWND space = CreateKeyButton(state, L"Espaço", x, y, space_w, key_h, kIdSpace);
-        if (CharacterDisabled(state.params, L' ')) {
-            EnableWindow(space, FALSE);
-        }
-        bottom.push_back(space);
-        x += space_w + gap;
-
-        if (state.params.enable_backspace_button) {
-            bottom.push_back(CreateKeyButton(state, L"⌫", x, y, special_w, key_h, kIdBackspace));
-        }
-        AddNavRow(state, std::move(bottom));
-        y += key_h + gap;
-
-        const int sym_w = std::clamp((width - 260) / 8, 52, 84);
-        AddCharacterRow(state, state.font_key, L"-/,:?!@%", y, sym_w, key_h, gap, width);
-        y += key_h + gap;
+        BuildNormalKeyboard(state);
     }
 
-    const bool show_cancel = !state.params.disable_cancel_button;
-    const int action_w = std::clamp(width / 6, 150, 220);
-    const int action_y = std::min(height - key_h - 18, y + 4);
-    std::vector<HWND> action_row;
-    if (show_cancel) {
-        action_row.push_back(CreateKeyButton(state, L"B   Cancelar", width / 2 - action_w - gap,
-                                             action_y, action_w, key_h, IDCANCEL));
-    }
-    const std::wstring ok_text =
-        state.params.ok_text.empty() ? std::wstring{L"A   OK"} : ToWide(state.params.ok_text);
-    action_row.push_back(CreateKeyButton(state, ok_text, width / 2 + (show_cancel ? gap : -action_w / 2),
-                                         action_y, action_w, key_h, IDOK));
-    AddNavRow(state, std::move(action_row));
-
+    UpdateCharacterLabels(state);
     if (!state.nav_rows.empty()) {
         FocusControl(state.nav_rows.front().front());
-    } else {
-        SetFocus(state.edit);
     }
 }
 
 KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string initial,
                              std::u16string error) {
     RegisterKeyboardClass();
-
     params.initial_text = std::move(initial);
+
+    HWND owner = FindGameWindow();
+    if (owner == nullptr) {
+        LOG_ERROR(Service_AM, "[Scarlet.Keyboard] Game window unavailable; keyboard overlay not opened");
+        return {};
+    }
+
+    RECT client{};
+    GetClientRect(owner, &client);
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+    if (width <= 0 || height <= 0) {
+        LOG_ERROR(Service_AM, "[Scarlet.Keyboard] Invalid game client size");
+        return {};
+    }
 
     DialogState state{
         .params = std::move(params),
         .error_text = std::move(error),
-        .background_brush = CreateSolidBrush(RGB(252, 252, 253)),
-        .panel_brush = CreateSolidBrush(RGB(239, 241, 244)),
+        .owner = owner,
+        .transparent_brush = CreateSolidBrush(kTransparentKey),
+        .panel_brush = CreateSolidBrush(RGB(239, 239, 239)),
         .edit_brush = CreateSolidBrush(RGB(255, 255, 255)),
     };
 
-    HWND owner = FindGameWindow();
-
-    RECT owner_rect{};
-    if (owner != nullptr) {
-        GetClientRect(owner, &owner_rect);
-        POINT origin{0, 0};
-        ClientToScreen(owner, &origin);
-        OffsetRect(&owner_rect, origin.x, origin.y);
-    } else {
-        SystemParametersInfoW(SPI_GETWORKAREA, 0, &owner_rect, 0);
+    // Eden/Yuzu places its software keyboard over the framebuffer, not in a separate
+    // desktop window. The scrim and keyboard below are child windows of the game HWND,
+    // so Alt-Tab/taskbar never sees another Scarlet PC window.
+    state.scrim = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TRANSPARENT, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_BLACKRECT,
+        0, 0, width, height, owner, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (state.scrim != nullptr) {
+        SetLayeredWindowAttributes(state.scrim, 0, 82, LWA_ALPHA);
     }
 
-    const int owner_w = owner_rect.right - owner_rect.left;
-    const int owner_h = owner_rect.bottom - owner_rect.top;
-    const int width = std::max(owner_w, 760);
-    const int height = std::max(owner_h, 560);
-    const int x = owner_rect.left;
-    const int y = owner_rect.top;
-
     state.hwnd = CreateWindowExW(
-        WS_EX_TOOLWINDOW, kKeyboardClass, L"Pokémon Scarlet - Teclado",
-        WS_POPUP, x, y, width, height, owner, nullptr, GetModuleHandleW(nullptr), &state);
+        WS_EX_LAYERED | WS_EX_CONTROLPARENT, kKeyboardClass, L"",
+        WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, width, height, owner,
+        nullptr, GetModuleHandleW(nullptr), &state);
 
     if (state.hwnd == nullptr) {
-        DeleteObject(state.background_brush);
+        if (state.scrim != nullptr) DestroyWindow(state.scrim);
+        DeleteObject(state.transparent_brush);
         DeleteObject(state.panel_brush);
         DeleteObject(state.edit_brush);
-        LOG_ERROR(Service_AM, "[Scarlet.Keyboard] Failed to create Windows keyboard window");
+        LOG_ERROR(Service_AM, "[Scarlet.Keyboard] Failed to create in-game keyboard overlay");
         return {};
     }
 
+    SetLayeredWindowAttributes(state.hwnd, kTransparentKey, 255, LWA_COLORKEY);
     BuildKeyboardUi(state);
     SetTimer(state.hwnd, 1, 16, nullptr);
     g_keyboard_window.store(state.hwnd, std::memory_order_release);
 
+    state.owner_thread = GetWindowThreadProcessId(owner, nullptr);
+    const DWORD this_thread = GetCurrentThreadId();
+    if (state.owner_thread != 0 && state.owner_thread != this_thread) {
+        state.attached_input = AttachThreadInput(this_thread, state.owner_thread, TRUE) != FALSE;
+    }
+
+    SetForegroundWindow(owner);
+    BringWindowToTop(state.scrim);
+    BringWindowToTop(state.hwnd);
+    ShowWindow(state.scrim, SW_SHOW);
     ShowWindow(state.hwnd, SW_SHOW);
     UpdateWindow(state.hwnd);
-    SetForegroundWindow(state.hwnd);
+    if (!state.nav_rows.empty()) FocusControl(state.nav_rows.front().front());
 
     MSG message{};
     while (!state.done && GetMessageW(&message, nullptr, 0, 0) > 0) {
@@ -909,26 +990,38 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
         if (message.message == WM_KEYDOWN) {
             switch (message.wParam) {
             case VK_LEFT:
-                if (GetFocus() != state.edit) { Navigate(state, -1, 0); handled = true; }
+                if (GetFocus() != state.edit) {
+                    Navigate(state, -1, 0);
+                    handled = true;
+                }
                 break;
             case VK_RIGHT:
-                if (GetFocus() != state.edit) { Navigate(state, 1, 0); handled = true; }
+                if (GetFocus() != state.edit) {
+                    Navigate(state, 1, 0);
+                    handled = true;
+                }
                 break;
             case VK_UP:
-                if (GetFocus() != state.edit) { Navigate(state, 0, -1); handled = true; }
+                if (GetFocus() != state.edit) {
+                    Navigate(state, 0, -1);
+                    handled = true;
+                }
                 break;
             case VK_DOWN:
-                if (GetFocus() != state.edit) { Navigate(state, 0, 1); handled = true; }
-                break;
-            case VK_SPACE:
-                if (GetFocus() != state.edit && !CharacterDisabled(state.params, L' ')) {
-                    ReplaceSelection(state.edit, L" ");
+                if (GetFocus() != state.edit) {
+                    Navigate(state, 0, 1);
                     handled = true;
                 }
                 break;
             case VK_RETURN:
                 if (GetFocus() != state.edit) {
                     ActivateFocused(state);
+                    handled = true;
+                } else if (state.params.enable_return_button) {
+                    ReplaceSelection(state.edit, L"\n");
+                    handled = true;
+                } else {
+                    ValidateAndAccept(state);
                     handled = true;
                 }
                 break;
@@ -971,19 +1064,21 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
         response.text = std::move(state.final_text);
     }
 
-    KillTimer(state.hwnd, 1);
-    DeleteObject(state.background_brush);
+    if (state.attached_input) {
+        AttachThreadInput(GetCurrentThreadId(), state.owner_thread, FALSE);
+    }
+    if (state.scrim != nullptr && IsWindow(state.scrim)) DestroyWindow(state.scrim);
+
+    DeleteObject(state.transparent_brush);
     DeleteObject(state.panel_brush);
     DeleteObject(state.edit_brush);
-    if (state.font_title) DeleteObject(state.font_title);
-    if (state.font_text) DeleteObject(state.font_text);
+    if (state.font_header) DeleteObject(state.font_header);
+    if (state.font_sub) DeleteObject(state.font_sub);
+    if (state.font_editor) DeleteObject(state.font_editor);
     if (state.font_key) DeleteObject(state.font_key);
-    if (state.font_input) DeleteObject(state.font_input);
+    if (state.font_label) DeleteObject(state.font_label);
 
-    if (owner != nullptr) {
-        SetForegroundWindow(owner);
-    }
-
+    SetForegroundWindow(owner);
     return response;
 }
 
@@ -1101,17 +1196,11 @@ void SoftwareKeyboardApplet::ShowTextCheckDialog(SwkbdTextCheckResult result,
         const auto initial = current_text;
 
         std::thread([this, params, initial, message = std::move(message)]() mutable {
-#ifdef _WIN32
-            const auto wide_message = ToWide(message.empty() ? u"Usar este texto?" : message);
-            const int choice =
-                MessageBoxW(FindGameWindow(), wide_message.c_str(), L"Pokémon Scarlet",
-                            MB_OKCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND);
-            if (choice == IDOK) {
-                submit_normal_callback(SwkbdResult::Ok, current_text, true);
-                return;
-            }
-#endif
-            auto response = RunKeyboard(params, initial, {});
+            // Keep confirmation inside the same in-game keyboard overlay. If the user
+            // leaves the candidate unchanged, report it as confirmed; if they edit it,
+            // send it back through the game's text-check path again.
+            auto response =
+                RunKeyboard(params, initial, message.empty() ? u"Usar este texto?" : message);
             if (response.silent) {
                 return;
             }
@@ -1120,8 +1209,9 @@ void SoftwareKeyboardApplet::ShowTextCheckDialog(SwkbdTextCheckResult result,
                 return;
             }
 
+            const bool unchanged = response.text == initial;
             current_text = response.text;
-            submit_normal_callback(SwkbdResult::Ok, response.text, false);
+            submit_normal_callback(SwkbdResult::Ok, response.text, unchanged);
         }).detach();
     }
 }
