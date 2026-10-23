@@ -3,6 +3,7 @@
     [string]$BuildDir  = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build\scarlet-runtime'),
     [ValidateRange(1, 4)]
     [int]$Jobs = 1,
+    [string]$IconPath,
     [switch]$RefreshSource
 )
 
@@ -182,9 +183,18 @@ try {
     Pop-Location
 }
 
-& (Join-Path $PSScriptRoot 'scarlet_runtime_overlay.ps1') -SourceDir $SourceDir
+$overlayArgs = @{ SourceDir = $SourceDir }
+if (-not [string]::IsNullOrWhiteSpace($IconPath)) {
+    $overlayArgs.IconPath = $IconPath
+}
+& (Join-Path $PSScriptRoot 'scarlet_runtime_overlay.ps1') @overlayArgs
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+
+# Windows resource compilers do not always track the referenced .ico as a Ninja dependency.
+# Drop only compiled .rc resources so a changed Scarlet icon is guaranteed to be embedded.
+Get-ChildItem $BuildDir -Recurse -File -Filter '*.rc.res' -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 
 $cmakeHelp = (& cmake --help | Out-String)
 $generatorArgs = @()
