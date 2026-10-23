@@ -1026,6 +1026,7 @@ $old = @'
 #include "common/settings.h"
 '@
 $new = @'
+#include <algorithm>
 #include <cstdlib>
 
 #include "common/settings.h"
