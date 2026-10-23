@@ -22,6 +22,29 @@ $expected = [ordered]@{
     'recompiled_sdk.dll'     = 'sdk'
 }
 
+$expectedMainBuildId = '421c5411b487eb4d'
+$probeFiles = @(
+    (Join-Path $export 'aot_cache\exefs\recomp_registration.c'),
+    (Join-Path $export 'aot_cache\exefs\main\recomp_export.c'),
+    (Join-Path $export 'aot_cache\exefs\main\recomp_runtime.h')
+)
+$buildIdConfirmed = $false
+foreach ($probe in $probeFiles) {
+    if (Test-Path $probe -PathType Leaf) {
+        $raw = Get-Content $probe -Raw -ErrorAction SilentlyContinue
+        if ($raw -and $raw.ToLowerInvariant().Contains($expectedMainBuildId)) {
+            $buildIdConfirmed = $true
+            break
+        }
+    }
+}
+if ($buildIdConfirmed) {
+    Write-Host "[Scarlet PC] Export identifies Scarlet 4.0.0 main build $expectedMainBuildId." -ForegroundColor Green
+}
+else {
+    Write-Warning "[Scarlet PC] Could not confirm the 4.0.0 build ID from export text; the next runtime log must bind main build 421c5411..."
+}
+
 $found = @{}
 foreach ($name in $expected.Keys) {
     $dll = Get-ChildItem $export -Recurse -File -Filter $name -ErrorAction SilentlyContinue |
