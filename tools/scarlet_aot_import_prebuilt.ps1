@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ExportRoot,
 
-    [string]$AotDir = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build\aot\modules'),
+    [string]$AotDir,
 
     [switch]$Repackage
 )
@@ -11,6 +11,10 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
+if ([string]::IsNullOrWhiteSpace($AotDir)) {
+    $AotDir = Join-Path $repoRoot 'build\aot\modules'
+}
+
 $export = (Resolve-Path $ExportRoot).Path
 New-Item -ItemType Directory -Force -Path $AotDir | Out-Null
 $aot = (Resolve-Path $AotDir).Path
