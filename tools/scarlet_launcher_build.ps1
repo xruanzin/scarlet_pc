@@ -81,6 +81,7 @@ $args = @(
     '/utf-8',
     '/DUNICODE',
     '/D_UNICODE',
+    ("/Fo:{0}" -f (Join-Path $BuildDir 'ScarletLauncher.obj')),
     $source
 )
 if ($resource) { $args += $resource }
