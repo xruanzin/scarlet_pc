@@ -1,5 +1,6 @@
 param(
-    [string]$GamePath
+    [string]$GamePath,
+    [string]$UpdatePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,6 +19,9 @@ if ([string]::IsNullOrWhiteSpace($GamePath)) {
     if (Test-Path $cfgPath) {
         $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
         $GamePath = $cfg.game_path
+        if ([string]::IsNullOrWhiteSpace($UpdatePath) -and $cfg.PSObject.Properties.Name -contains 'update_path') {
+            $UpdatePath = [string]$cfg.update_path
+        }
     }
 }
 
@@ -26,6 +30,16 @@ if ([string]::IsNullOrWhiteSpace($GamePath)) {
 }
 
 $game = (Resolve-Path $GamePath).Path
+$update = $null
+if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
+    $update = (Resolve-Path $UpdatePath).Path
+}
+else {
+    $autoUpdate = Join-Path (Split-Path $game -Parent) 'Pokemon Scarlet v4.0.0.nsp'
+    if (Test-Path $autoUpdate -PathType Leaf) {
+        $update = (Resolve-Path $autoUpdate).Path
+    }
+}
 
 $prodKeys = Join-Path $package 'user\keys\prod.keys'
 if (-not (Test-Path $prodKeys -PathType Leaf)) {
@@ -48,7 +62,19 @@ try {
     # ScarletPC.exe is a Windows GUI executable. Invoking it with '&' can return
     # before PowerShell initializes $LASTEXITCODE, which is an error under StrictMode.
     # Start and wait on the actual Process object instead so its exit status is reliable.
-    $process = Start-Process -FilePath $exe -ArgumentList @('-g', ('"{0}"' -f $game)) `
+    $launchArgs = @()
+    if ($update) {
+        Write-Host "[Scarlet PC] Base:   $game" -ForegroundColor DarkGray
+        Write-Host "[Scarlet PC] Update: $update" -ForegroundColor Green
+        $launchArgs = @('--content-base', ('"{0}"' -f $game),
+                        '--content-update', ('"{0}"' -f $update))
+    }
+    else {
+        Write-Warning '[Scarlet PC] No update NSP found; launching base game only.'
+        $launchArgs = @('-g', ('"{0}"' -f $game))
+    }
+
+    $process = Start-Process -FilePath $exe -ArgumentList $launchArgs `
         -PassThru -Wait -NoNewWindow
     $code = $process.ExitCode
     if ($code -ne 0) {
