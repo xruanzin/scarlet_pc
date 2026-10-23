@@ -12,7 +12,7 @@ This is runtime/package independence. Third-party code provenance and licensing 
 
 The self-built host is AOT-first.
 
-Scarlet's four recompiled modules are loaded natively and remain the primary execution path. Dynarmic/JIT is compiled into the Scarlet PC runtime only as a guarded fallback for code that is generated, modified or otherwise unavailable to the static AOT image at runtime.
+Scarlet's four recompiled modules are loaded natively and remain the primary execution path. A guarded dynamic fallback engine is compiled into the Scarlet PC runtime only for code that is generated, modified or otherwise unavailable to the static AOT image at runtime.
 
 The runner uses the non-strict fallback policy so a guarded AOT mismatch can hand execution to the internal fallback instead of terminating the process. When execution returns to covered code, the runtime can resume the static AOT path.
 
