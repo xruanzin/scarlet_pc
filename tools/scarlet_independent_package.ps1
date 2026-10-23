@@ -66,6 +66,10 @@ $thirdParty = Join-Path $repoRoot 'THIRD_PARTY.md'
 if (Test-Path $thirdParty) {
     Copy-Item $thirdParty (Join-Path $licensesOut 'THIRD_PARTY.md') -Force
 }
+$runtimeProvenance = Join-Path $repoRoot 'licenses\third-party\runtime-provenance.json'
+if (Test-Path $runtimeProvenance) {
+    Copy-Item $runtimeProvenance (Join-Path $licensesOut 'runtime-provenance.json') -Force
+}
 
 @'
 Scarlet PC
