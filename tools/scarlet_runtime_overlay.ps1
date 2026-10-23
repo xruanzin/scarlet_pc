@@ -420,30 +420,26 @@ $old = @'
 $new = @'
         g_native_export_mode = true;
 
-        const char* scarlet_perf = std::getenv("SCARLET_PERF_PROFILE");
-        const bool scarlet_perf_enabled =
-            scarlet_perf == nullptr || *scarlet_perf == '\0' || *scarlet_perf != '0';
-        if (scarlet_perf_enabled) {
-            // Do not unlock emulation speed: Scarlet's simulation still expects real time.
-            Settings::values.use_speed_limit.SetValue(true);
-            Settings::values.speed_limit.SetValue(100);
+        // Scarlet PC performance defaults: keep GPU work and presentation asynchronous,
+        // but compile shaders synchronously by default. Async shader compilation can skip
+        // character-material draws until a pipeline is ready (visible in character setup).
+        Settings::values.use_speed_limit.SetValue(true);
+        Settings::values.speed_limit.SetValue(100);
+        Settings::values.use_asynchronous_gpu_emulation.SetValue(true);
+        Settings::values.async_presentation.SetValue(true);
+        Settings::values.use_disk_shader_cache.SetValue(true);
+        Settings::values.use_vulkan_driver_pipeline_cache.SetValue(true);
+        Settings::values.sync_memory_operations.SetValue(false);
+        Settings::values.frame_pacing_mode.SetValue(Settings::FramePacingMode::Target_Auto);
 
-            // Keep the GPU fed while the CPU continues guest/AOT work, and prevent
-            // vkQueuePresent / shader creation from serialising the main emulation path.
-            Settings::values.use_asynchronous_gpu_emulation.SetValue(true);
-            Settings::values.async_presentation.SetValue(true);
-            Settings::values.use_asynchronous_shaders.SetValue(true);
-            Settings::values.use_disk_shader_cache.SetValue(true);
-            Settings::values.use_vulkan_driver_pipeline_cache.SetValue(true);
-            Settings::values.sync_memory_operations.SetValue(false);
+        const char* async_shader_env = std::getenv("SCARLET_ASYNC_SHADERS");
+        const bool async_shaders =
+            async_shader_env != nullptr && *async_shader_env != '\0' && *async_shader_env != '0';
+        Settings::values.use_asynchronous_shaders.SetValue(async_shaders);
 
-            // Auto pacing follows the swapchain/monitor rather than imposing a 30/60 host cap.
-            // The guest-side Scarlet timing is handled separately; this only removes a host cap.
-            Settings::values.frame_pacing_mode.SetValue(Settings::FramePacingMode::Target_Auto);
-
-            LOG_INFO(Frontend,
-                     "[Scarlet.Perf] Async GPU/presentation/shaders enabled; game speed locked at 100%");
-        }
+        LOG_INFO(Frontend,
+                 "[Scarlet.Perf] Async GPU/presentation enabled; async shaders={}; game speed=100%",
+                 async_shaders ? "on" : "off");
 
         // Decode video on the CPU unless the user has chosen otherwise.
 '@
@@ -968,6 +964,106 @@ Replace-Literal 'src\__PRODUCT___cmd\native_status.h' 'return "suyu static AOT";
 Replace-Literal 'src\__PRODUCT___cmd\native_status.h' 'return "suyu Hybrid JIT + AOT";' 'return "AOT + dynamic fallback";'
 Replace-Literal 'src\__PRODUCT___cmd\native_status.h' 'return "suyu Dynarmic JIT";' 'return "Dynamic fallback";'
 Replace-Literal 'src\__PRODUCT___cmd\native_status.h' 'out += " | F12 Controls";' 'out += " | F12 Controls";'
+
+# Scarlet PC presentation target. The guest commonly requests swap interval 2
+# (30 Hz) on Switch 1. For a 60+ target, normalize that request to one VI period
+# at the HLE compositor boundary, preserving the AOT guest text byte-for-byte.
+Replace-Literal 'src\core\hle\service\nvnflinger\hardware_composer.cpp' '#include <optional>' "#include <optional>`n#include <cstdlib>"
+
+$old = @'
+s32 NormalizeSwapInterval(f32* out_speed_scale, s32 swap_interval) {
+    if (swap_interval <= 0) {
+        // As an extension, treat nonpositive swap interval as speed multiplier.
+        if (out_speed_scale) {
+            *out_speed_scale = 2.f * static_cast<f32>(1 - swap_interval);
+        }
+
+        swap_interval = 1;
+    }
+
+    if (swap_interval >= 5) {
+        // As an extension, treat high swap interval as precise speed control.
+        if (out_speed_scale) {
+            *out_speed_scale = static_cast<f32>(swap_interval) / 100.f;
+        }
+
+        swap_interval = 1;
+    }
+
+    return swap_interval;
+}
+'@
+$new = @'
+s32 NormalizeSwapInterval(f32* out_speed_scale, s32 swap_interval) {
+    if (swap_interval <= 0) {
+        if (out_speed_scale) {
+            *out_speed_scale = 2.f * static_cast<f32>(1 - swap_interval);
+        }
+        swap_interval = 1;
+    }
+
+    if (swap_interval >= 5) {
+        if (out_speed_scale) {
+            *out_speed_scale = static_cast<f32>(swap_interval) / 100.f;
+        }
+        swap_interval = 1;
+    }
+
+    const char* target_env = std::getenv("SCARLET_TARGET_FPS");
+    const int target_fps = target_env && *target_env ? std::atoi(target_env) : 60;
+    if (target_fps >= 60 && swap_interval == 2) {
+        swap_interval = 1;
+    }
+
+    return swap_interval;
+}
+'@
+Replace-Literal 'src\core\hle\service\nvnflinger\hardware_composer.cpp' $old.Trim() $new.Trim()
+
+# Make VI pacing follow the requested Scarlet target. 60 is the supported default;
+# higher rates are experimental and may expose frame-dependent animations.
+$old = @'
+#include "common/settings.h"
+'@
+$new = @'
+#include <cstdlib>
+
+#include "common/settings.h"
+'@
+Replace-Literal 'src\core\hle\service\vi\conductor.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+constexpr auto FrameNs = std::chrono::nanoseconds{1000000000 / 60};
+'@
+$new = @'
+namespace {
+
+int ScarletTargetFps() {
+    static const int target = [] {
+        const char* value = std::getenv("SCARLET_TARGET_FPS");
+        int fps = value && *value ? std::atoi(value) : 60;
+        return std::clamp(fps, 30, 240);
+    }();
+    return target;
+}
+
+std::chrono::nanoseconds ScarletFrameNs() {
+    return std::chrono::nanoseconds{1000000000 / ScarletTargetFps()};
+}
+
+} // namespace
+'@
+Replace-Literal 'src\core\hle\service\vi\conductor.cpp' $old.Trim() $new.Trim()
+Replace-Literal 'src\core\hle\service\vi\conductor.cpp' 'system.CoreTiming().ScheduleLoopingEvent(FrameNs, FrameNs, m_event);' 'system.CoreTiming().ScheduleLoopingEvent(ScarletFrameNs(), ScarletFrameNs(), m_event);'
+
+$old = @'
+    const f32 effective_fps = 60.f / static_cast<f32>(m_swap_interval);
+'@
+$new = @'
+    const f32 effective_fps =
+        static_cast<f32>(ScarletTargetFps()) / static_cast<f32>(m_swap_interval);
+'@
+Replace-Literal 'src\core\hle\service\vi\conductor.cpp' $old.Trim() $new.Trim()
 
 # Scarlet graphics identity in the Vulkan bring-up log.
 $old = @'
