@@ -434,7 +434,7 @@ $new = @'
 
         const char* async_shader_env = std::getenv("SCARLET_ASYNC_SHADERS");
         const bool async_shaders =
-            async_shader_env != nullptr && *async_shader_env != '\0' && *async_shader_env != '0';
+            async_shader_env == nullptr || *async_shader_env == '\0' || *async_shader_env != '0';
         Settings::values.use_asynchronous_shaders.SetValue(async_shaders);
 
         LOG_INFO(Frontend,
