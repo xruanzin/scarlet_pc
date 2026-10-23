@@ -45,8 +45,12 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($legacyStrictEnv)) {
         Set-Item -Path ("Env:" + $legacyStrictEnv) -Value '0'
     }
-    & $exe -g $game
-    $code = $LASTEXITCODE
+    # ScarletPC.exe is a Windows GUI executable. Invoking it with '&' can return
+    # before PowerShell initializes $LASTEXITCODE, which is an error under StrictMode.
+    # Start and wait on the actual Process object instead so its exit status is reliable.
+    $process = Start-Process -FilePath $exe -ArgumentList @('-g', ('"{0}"' -f $game)) `
+        -PassThru -Wait -NoNewWindow
+    $code = $process.ExitCode
     if ($code -ne 0) {
         throw "ScarletPC.exe exited with code $code"
     }
