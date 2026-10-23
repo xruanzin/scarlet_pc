@@ -4,9 +4,9 @@
   "target": "Windows x86-64",
   "cpu_backend": "AOT-first with dynamic fallback",
   "runtime_base": {
-    "project": "suyu",
-    "version": "v14.1.0",
-    "validated_revision": "347fcf91d95cd39cb5c3db50f1b6d827ad699311"
+    "project": "third-party-gpl-runtime",
+    "validated_revision": "347fcf91d95cd39cb5c3db50f1b6d827ad699311",
+    "provenance": "licenses/third-party/runtime-provenance.json"
   },
   "modules": [
     {
