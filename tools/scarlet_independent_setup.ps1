@@ -4,6 +4,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$GamePath,
 
+    [string]$KeysPath,
+
     [ValidateRange(1, 4)]
     [int]$Jobs = 1,
 
@@ -47,11 +49,38 @@ else {
 & (Join-Path $PSScriptRoot 'scarlet_runtime_build.ps1') -Jobs $Jobs -RefreshSource:$RefreshRuntimeSource
 & (Join-Path $PSScriptRoot 'scarlet_independent_package.ps1')
 
+$packageDir = Join-Path $repoRoot 'dist\ScarletPC-Independent'
+$packageKeys = Join-Path $packageDir 'user\keys'
+New-Item -ItemType Directory -Force -Path $packageKeys | Out-Null
+
+if (-not [string]::IsNullOrWhiteSpace($KeysPath)) {
+    $resolvedKeys = (Resolve-Path $KeysPath).Path
+    if (Test-Path $resolvedKeys -PathType Container) {
+        foreach ($name in @('prod.keys', 'title.keys')) {
+            $candidate = Join-Path $resolvedKeys $name
+            if (Test-Path $candidate -PathType Leaf) {
+                Copy-Item $candidate (Join-Path $packageKeys $name) -Force
+            }
+        }
+    }
+    elseif (Test-Path $resolvedKeys -PathType Leaf) {
+        $leaf = Split-Path $resolvedKeys -Leaf
+        if ($leaf -notin @('prod.keys', 'title.keys')) {
+            throw 'KeysPath file must be prod.keys or title.keys.'
+        }
+        Copy-Item $resolvedKeys (Join-Path $packageKeys $leaf) -Force
+    }
+}
+
+if (-not (Test-Path (Join-Path $packageKeys 'prod.keys') -PathType Leaf)) {
+    Write-Warning '[Scarlet PC] prod.keys is missing. Re-run setup with -KeysPath pointing to your legally obtained prod.keys or keys folder before launching.'
+}
+
 $localConfig = Join-Path $repoRoot 'build\scarlet-independent-local.json'
 [ordered]@{
     game_path   = $game
     title_id    = '0100A3D008C5C000'
-    package_dir = (Join-Path $repoRoot 'dist\ScarletPC-Independent')
+    package_dir = $packageDir
 } | ConvertTo-Json | Set-Content $localConfig -Encoding UTF8
 
 Write-Host ''
