@@ -214,13 +214,14 @@ if ($usingNinja -and (Test-Path $cache)) {
 
 Write-Host '[Scarlet PC] Configuring self-built runtime.' -ForegroundColor Cyan
 Write-Host "[Scarlet PC] Runtime revision: $revision" -ForegroundColor Cyan
-Write-Host '[Scarlet PC] AOT primary; Dynarmic/JIT fallback: enabled' -ForegroundColor Cyan
+Write-Host '[Scarlet PC] AOT primary; dynamic fallback: enabled' -ForegroundColor Cyan
 
 $configure = @('-S', $SourceDir, '-B', $BuildDir) + $generatorArgs
 if ($usingNinja) { $configure += '-DCMAKE_BUILD_TYPE=Release' }
 $configure += @(
     '-DENABLE_QT=OFF',
     '-DYUZU_CMD=ON',
+    ("-DCMAKE_INSTALL_PREFIX={0}" -f ((Join-Path $BuildDir 'install') -replace '\\','/')),
     ("-D{0}=OFF" -f $legacyNoJitOption),
     '-DENABLE_OPENGL=OFF',
     '-DENABLE_WEB_SERVICE=OFF',
@@ -236,8 +237,17 @@ $configure += @(
 & cmake @configure
 if ($LASTEXITCODE -ne 0) { throw 'Scarlet runtime CMake configure failed.' }
 
-& cmake --build $BuildDir --config Release --target $legacyTarget --parallel $Jobs
-if ($LASTEXITCODE -ne 0) { throw 'Scarlet runtime build failed.' }
+$buildLog = Join-Path $BuildDir 'scarlet_runtime_build.log'
+Write-Host '[Scarlet PC] Building runtime...' -ForegroundColor Cyan
+& cmake --build $BuildDir --config Release --target $legacyTarget --parallel $Jobs 2>&1 |
+    Tee-Object -FilePath $buildLog | Out-Null
+$buildExit = $LASTEXITCODE
+if ($buildExit -ne 0) {
+    Write-Host '[Scarlet PC] Runtime build failed. Last compiler messages:' -ForegroundColor Red
+    Get-Content $buildLog -Tail 80
+    throw 'Scarlet runtime build failed.'
+}
+Write-Host '[Scarlet PC] Runtime build complete.' -ForegroundColor Green
 
 $runtimeExe = Get-ChildItem $BuildDir -Recurse -File -Filter 'ScarletPC.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $runtimeExe) { throw 'Runtime build succeeded but its host executable was not found.' }
