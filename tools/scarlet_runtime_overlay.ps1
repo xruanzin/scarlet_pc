@@ -817,6 +817,15 @@ Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 # internals intact, but never emit the inherited product log filename.
 Replace-Literal 'src\common\logging\backend.cpp' 'new Impl(log_dir / LOG_FILE, filter)' 'new Impl(log_dir / "scarlet_log.txt", filter)'
 Replace-Literal 'src\common\logging.cpp' 'logging_instance->file_backend.emplace(log_dir / LOG_FILE);' 'logging_instance->file_backend.emplace(log_dir / "scarlet_log.txt");'
+$old = @'
+        auto old_filename = filename;
+        old_filename += ".old.txt";
+'@
+$new = @'
+        const auto old_filename = filename.parent_path() / "scarlet_log.old.txt";
+'@
+Replace-Literal 'src\common\logging\backend.cpp' $old.Trim() $new.Trim()
+Replace-Literal 'src\common\logging.cpp' $old.Trim() $new.Trim()
 
 # Sanitize legacy command-host source paths at the common logging choke point.
 # Both logger frontends eventually call FmtLogMessage(), so this works even if a
