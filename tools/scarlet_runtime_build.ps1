@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$SourceDir = (Join-Path (Split-Path $PSScriptRoot -Parent) 'third_party\scarlet-runtime-src'),
     [string]$BuildDir  = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build\scarlet-runtime'),
     [ValidateRange(1, 4)]
