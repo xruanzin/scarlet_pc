@@ -1,6 +1,8 @@
 ﻿param(
     [Parameter(Mandatory = $true)]
-    [string]$SourceDir
+    [string]$SourceDir,
+
+    [string]$IconPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -322,12 +324,20 @@ Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' 'const std:
 Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' 'std::snprintf(title, sizeof(title), "Preparing shaders...");' 'std::snprintf(title, sizeof(title), "Pokémon Scarlet | Preparing shaders...");'
 Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' 'std::snprintf(title, sizeof(title), "Building shaders %zu/%zu", built, total);' 'std::snprintf(title, sizeof(title), "Pokémon Scarlet | Building shaders %zu/%zu", built, total);'
 
-# Use the project icon in the Windows PE resource instead of the upstream icon.
-$projectIcon = Join-Path $repoRoot 'docs\icon\icon.ico'
-$runtimeIcon = Join-Path $SourceDir ('dist\' + [string]$provenance.legacy.icon_file)
-if (Test-Path $projectIcon -PathType Leaf) {
-    Copy-Item $projectIcon $runtimeIcon -Force
+# Use the Scarlet icon in the Windows PE resource. Point the .rc file at a
+# Scarlet-owned filename so the resource source itself changes and Ninja rebuilds it.
+$projectIcon = if (-not [string]::IsNullOrWhiteSpace($IconPath)) {
+    (Resolve-Path $IconPath).Path
+} else {
+    Join-Path $repoRoot 'docs\icon\icon.ico'
 }
+$runtimeIcon = Join-Path $SourceDir 'dist\scarlet.ico'
+if (-not (Test-Path $projectIcon -PathType Leaf)) {
+    throw "Scarlet icon not found: $projectIcon"
+}
+Copy-Item $projectIcon $runtimeIcon -Force
+
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.rc' '"../../dist/__PRODUCT__.ico"' '"../../dist/scarlet.ico"'
 
 # Project-owned config and cache names.
 Replace-Literal 'src\frontend_common\config.cpp' 'FS::Get__PASCAL__Path(FS::__PASCAL__Path::ConfigDir) / "sdl2-config.ini";' 'FS::Get__PASCAL__Path(FS::__PASCAL__Path::ConfigDir) / "scarlet.ini";'
