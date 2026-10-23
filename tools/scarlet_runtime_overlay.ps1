@@ -467,6 +467,144 @@ bool StrictNoFallback() {
 '@
 Replace-Literal 'src\core\arm\recomp\arm_recomp.cpp' $old.Trim() $new.Trim()
 
+# Avoid entering Dynarmic/JIT for common AArch64 memory instructions that an older
+# AOT image can report as gaps. The first JIT creation forces every AOT module into
+# verify-always mode, so handling these tiny instructions here has disproportionate value.
+$old = @'
+    }
+
+    /// Base address of the module containing `pc`, so an address can be turned
+'@
+$new = @'
+    }
+
+    bool TryScarletFastGap(u32 opcode) {
+        static const bool enabled = [] {
+            const char* value = std::getenv("SCARLET_AOT_FAST_GAPS");
+            return value == nullptr || *value == '\0' || *value != '0';
+        }();
+        if (!enabled) {
+            return false;
+        }
+
+        // Integer LDR/STR (unsigned immediate), byte/half/word/dword.
+        // These are extremely common in SDK/runtime code and are safe to execute
+        // directly through the same memory callbacks used by generated AOT code.
+        const u32 top = opcode & 0xFFC00000U;
+        u32 width = 0;
+        bool load = false;
+        switch (top) {
+        case 0x39000000U: width = 1; load = false; break; // STRB
+        case 0x39400000U: width = 1; load = true;  break; // LDRB
+        case 0x79000000U: width = 2; load = false; break; // STRH
+        case 0x79400000U: width = 2; load = true;  break; // LDRH
+        case 0xB9000000U: width = 4; load = false; break; // STR Wt
+        case 0xB9400000U: width = 4; load = true;  break; // LDR Wt
+        case 0xF9000000U: width = 8; load = false; break; // STR Xt
+        case 0xF9400000U: width = 8; load = true;  break; // LDR Xt
+        default: break;
+        }
+        if (width != 0) {
+            const u32 rt = opcode & 31U;
+            const u32 rn = (opcode >> 5) & 31U;
+            const u64 imm12 = (opcode >> 10) & 0xFFFU;
+            const u64 address = ctx.x[rn] + imm12 * width;
+            if (load) {
+                const u64 value = HostLoad(this, address, width);
+                if (rt != 31U) {
+                    ctx.x[rt] = width == 8 ? value : static_cast<u32>(value);
+                }
+            } else {
+                const u64 value = rt == 31U ? 0 : ctx.x[rt];
+                HostStore(this, address, width, value);
+            }
+            ctx.pc += 4;
+            return true;
+        }
+
+        // Integer STP/LDP, including offset, pre-index, post-index and non-temporal
+        // forms. Restrict opc to ordinary W/X pairs (not LDPSW or SIMD pairs).
+        if ((opcode & 0x7E000000U) == 0x28000000U) {
+            const u32 rt = opcode & 31U;
+            const u32 rn = (opcode >> 5) & 31U;
+            const u32 rt2 = (opcode >> 10) & 31U;
+            const u32 mode = (opcode >> 23) & 3U;
+            const bool pair_load = ((opcode >> 22) & 1U) != 0;
+            const u32 pair_width = (opcode & 0x80000000U) != 0 ? 8U : 4U;
+
+            // Load-pair writeback overlapping its base is constrained-unpredictable;
+            // leave rare cases to the full fallback rather than guessing.
+            const bool writeback = mode == 1U || mode == 3U;
+            if (pair_load && writeback && rn != 31U && (rn == rt || rn == rt2)) {
+                return false;
+            }
+
+            const s64 raw_imm7 = static_cast<s64>((opcode >> 15) & 0x7FU);
+            const s64 signed_imm7 = raw_imm7 >= 64 ? raw_imm7 - 128 : raw_imm7;
+            const s64 byte_offset = signed_imm7 * static_cast<s64>(pair_width);
+            const u64 base = ctx.x[rn];
+            const u64 adjusted = base + static_cast<u64>(byte_offset);
+            const u64 address = mode == 1U ? base : adjusted;
+
+            if (pair_load) {
+                const u64 first = HostLoad(this, address, pair_width);
+                const u64 second = HostLoad(this, address + pair_width, pair_width);
+                if (rt != 31U) {
+                    ctx.x[rt] = pair_width == 8 ? first : static_cast<u32>(first);
+                }
+                if (rt2 != 31U) {
+                    ctx.x[rt2] = pair_width == 8 ? second : static_cast<u32>(second);
+                }
+            } else {
+                const u64 first = rt == 31U ? 0 : ctx.x[rt];
+                const u64 second = rt2 == 31U ? 0 : ctx.x[rt2];
+                HostStore(this, address, pair_width, first);
+                HostStore(this, address + pair_width, pair_width, second);
+            }
+
+            if (writeback) {
+                ctx.x[rn] = adjusted;
+            }
+            ctx.pc += 4;
+            return true;
+        }
+
+        return false;
+    }
+
+    /// Base address of the module containing `pc`, so an address can be turned
+'@
+Replace-Literal 'src\core\arm\recomp\arm_recomp.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+            g_counters.fallback_from_unhandled.fetch_add(1, std::memory_order_relaxed);
+            const u32 unsupported_opcode =
+                static_cast<u32>(Impl::HostLoad(impl.get(), impl->ctx.pc, 4));
+            g_counters.RecordUnhandled(unsupported_opcode);
+            RecompGaps::RecordUnimplemented(unsupported_opcode);
+'@
+$new = @'
+            const u32 unsupported_opcode =
+                static_cast<u32>(Impl::HostLoad(impl.get(), impl->ctx.pc, 4));
+
+            // Keep common load/store gaps inside the AOT backend. Besides avoiding
+            // a JIT transition, this prevents the first simple gap from pinning all
+            // four native modules to per-entry verification.
+            if (impl->TryScarletFastGap(unsupported_opcode)) {
+                static std::atomic<int> fast_gap_logs{0};
+                if (fast_gap_logs.fetch_add(1, std::memory_order_relaxed) < 8) {
+                    LOG_INFO(Core_ARM, "[Scarlet.AOT] Fast-gap opcode {:#010x} executed at {:#x}",
+                             unsupported_opcode, impl->ctx.pc - 4);
+                }
+                continue;
+            }
+
+            g_counters.fallback_from_unhandled.fetch_add(1, std::memory_order_relaxed);
+            g_counters.RecordUnhandled(unsupported_opcode);
+            RecompGaps::RecordUnimplemented(unsupported_opcode);
+'@
+Replace-Literal 'src\core\arm\recomp\arm_recomp.cpp' $old.Trim() $new.Trim()
+
 # Scarlet-owned default local profile identity.
 Replace-Literal 'src\core\hle\service\acc\profile_manager.cpp' 'CreateNewUser(UUID::MakeRandom(), "__PRODUCT__");' 'CreateNewUser(UUID::MakeRandom(), "Scarlet");'
 Replace-Literal 'src\core\hle\service\acc\profile_manager.cpp' '"user ''__PRODUCT__'' with random UUID.");' '"user ''Scarlet'' with random UUID.");'
