@@ -165,6 +165,15 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Could not fetch pinned runtime revision.' }
     & git checkout --detach $revision
     if ($LASTEXITCODE -ne 0) { throw 'Could not checkout pinned runtime revision.' }
+
+    # The Scarlet overlay intentionally edits the pinned runtime checkout.
+    # Reset those generated/local edits before applying the current overlay again,
+    # otherwise an interrupted or older build can leave stale branding/loader code.
+    & git reset --hard $revision
+    if ($LASTEXITCODE -ne 0) { throw 'Could not reset pinned runtime source.' }
+    & git clean -fd
+    if ($LASTEXITCODE -ne 0) { throw 'Could not clean pinned runtime source.' }
+
     & git submodule update --init --recursive
     if ($LASTEXITCODE -ne 0) { throw 'Runtime submodule update failed.' }
     $actual = (& git rev-parse HEAD).Trim()
