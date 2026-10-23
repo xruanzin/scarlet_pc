@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <climits>
+#include <cstdlib>
 #include <cwctype>
 #include <memory>
 #include <string>
@@ -46,6 +48,7 @@ constexpr UINT kUpdateTextMessage = WM_APP + 0x252;
 constexpr int kIdBackspace = 600;
 constexpr int kIdShift = 601;
 constexpr int kIdSpace = 602;
+constexpr int kIdSymbols = 603;
 constexpr int kKeyBase = 1000;
 
 std::atomic<HWND> g_keyboard_window{nullptr};
@@ -414,11 +417,13 @@ void UpdateCharacterLabels(DialogState& state) {
 }
 
 void SetError(DialogState& state, std::u16string_view message) {
+    state.error_text.assign(message.begin(), message.end());
     if (state.error_label == nullptr) {
         return;
     }
     const auto wide = ToWide(message);
     SetWindowTextW(state.error_label, wide.c_str());
+    InvalidateRect(state.error_label, nullptr, TRUE);
 }
 
 bool ValidateAndAccept(DialogState& state) {
@@ -472,7 +477,7 @@ LRESULT CALLBACK KeyboardWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         const int notification = HIWORD(wparam);
         if (reinterpret_cast<HWND>(lparam) == state->edit && notification == EN_CHANGE) {
             UpdateCounter(*state);
-            SetError(*state, {});
+            SetError(*state, std::u16string_view{});
             return 0;
         }
         if (notification != BN_CLICKED) {
@@ -504,6 +509,20 @@ LRESULT CALLBACK KeyboardWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         case kIdSpace:
             if (!CharacterDisabled(state->params, L' ')) {
                 ReplaceSelection(state->edit, L" ");
+            }
+            return 0;
+        case kIdSymbols:
+            for (const auto& row : state->nav_rows) {
+                for (HWND button : row) {
+                    if (GetDlgCtrlID(button) >= kKeyBase) {
+                        wchar_t label[8]{};
+                        GetWindowTextW(button, label, 8);
+                        if (label[0] == L'-') {
+                            FocusControl(button);
+                            return 0;
+                        }
+                    }
+                }
             }
             return 0;
         case IDOK:
@@ -588,7 +607,7 @@ LRESULT CALLBACK KeyboardWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         DeleteObject(brush);
 
         wchar_t label[96]{};
-        GetWindowTextW(draw->hwndItem, label, static_cast<int>(std::size(label)));
+        GetWindowTextW(draw->hwndItem, label, 96);
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, text_color);
         HFONT font = reinterpret_cast<HFONT>(SendMessageW(draw->hwndItem, WM_GETFONT, 0, 0));
@@ -730,8 +749,9 @@ void BuildKeyboardUi(DialogState& state) {
 
     const bool number_pad = state.params.type == SwkbdType::NumberPad;
     const int gap = std::clamp(width / 150, 6, 10);
-    const int available_h = std::max(300, height - 235);
-    const int key_h = std::clamp(available_h / (number_pad ? 6 : 6), 44, 64);
+    const int rows_needed = number_pad ? 6 : 7;
+    const int key_h = std::clamp(
+        (height - 188 - 20 - gap * (rows_needed - 1)) / rows_needed, 44, 64);
     int y = 188;
 
     if (number_pad) {
@@ -786,10 +806,8 @@ void BuildKeyboardUi(DialogState& state) {
         bottom.push_back(state.shift_button);
         x += special_w + gap;
 
-        HWND symbols = CreateKeyButton(state, L". , ? !", x, y, special_w, key_h,
-                                       kKeyBase + static_cast<int>(state.character_values.size()));
-        state.character_buttons.push_back(symbols);
-        state.character_values.push_back(L'.');
+        HWND symbols =
+            CreateKeyButton(state, L"Símbolos", x, y, special_w, key_h, kIdSymbols);
         bottom.push_back(symbols);
         x += special_w + gap;
 
@@ -871,6 +889,7 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
 
     if (state.hwnd == nullptr) {
         DeleteObject(state.background_brush);
+        DeleteObject(state.panel_brush);
         DeleteObject(state.edit_brush);
         LOG_ERROR(Service_AM, "[Scarlet.Keyboard] Failed to create Windows keyboard window");
         return {};
