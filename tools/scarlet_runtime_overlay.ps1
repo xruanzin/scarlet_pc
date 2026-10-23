@@ -605,6 +605,117 @@ $new = @'
 '@
 Replace-Literal 'src\core\arm\recomp\arm_recomp.cpp' $old.Trim() $new.Trim()
 
+# Keep guarded AOT modules on generation checks even when a rare instruction still
+# needs Dynarmic. A fallback JIT normally uses fastmem/page-table direct accesses,
+# which bypass the recompiler watch hooks and therefore forces every AOT module to
+# verify every instruction on entry forever. For the AOT fallback only, force memory
+# through Core::Memory callbacks; those already call OnWatchedWrite/WriteExclusive.
+$old = @'
+    ArmDynarmic64(System& system, bool uses_wall_clock, Kernel::KProcess* process,
+                  DynarmicExclusiveMonitor& exclusive_monitor, std::size_t core_index);
+'@
+$new = @'
+    ArmDynarmic64(System& system, bool uses_wall_clock, Kernel::KProcess* process,
+                  DynarmicExclusiveMonitor& exclusive_monitor, std::size_t core_index,
+                  bool recomp_fallback = false);
+'@
+Replace-Literal 'src\core\arm\dynarmic\arm_dynarmic_64.h' $old.Trim() $new.Trim()
+
+$old = @'
+    std::optional<DynarmicCallbacks64> m_cb{};
+    std::size_t m_core_index{};
+
+    std::optional<Dynarmic::A64::Jit> m_jit{};
+'@
+$new = @'
+    std::optional<DynarmicCallbacks64> m_cb{};
+    std::size_t m_core_index{};
+    bool m_recomp_fallback{};
+
+    std::optional<Dynarmic::A64::Jit> m_jit{};
+'@
+Replace-Literal 'src\core\arm\dynarmic\arm_dynarmic_64.h' $old.Trim() $new.Trim()
+
+$old = @'
+    if (!Settings::IsFastmemEnabled()) {
+        config.fastmem_pointer = std::nullopt;
+        config.fastmem_exclusive_access = false;
+    }
+    m_jit.emplace(config);
+'@
+$new = @'
+    if (!Settings::IsFastmemEnabled()) {
+        config.fastmem_pointer = std::nullopt;
+        config.fastmem_exclusive_access = false;
+    }
+
+    if (m_recomp_fallback) {
+        // Guarded AOT code must observe every fallback write. Direct page-table and
+        // fastmem paths bypass Core::Memory::NoteRecompWrite, while callbacks do not.
+        config.page_table = nullptr;
+        config.fastmem_pointer = std::nullopt;
+        config.fastmem_exclusive_access = false;
+        config.recompile_on_exclusive_fastmem_failure = false;
+    }
+
+    m_jit.emplace(config);
+'@
+Replace-Literal 'src\core\arm\dynarmic\arm_dynarmic_64.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+ArmDynarmic64::ArmDynarmic64(System& system, bool uses_wall_clock, Kernel::KProcess* process, DynarmicExclusiveMonitor& exclusive_monitor, std::size_t core_index)
+    : ArmInterface{uses_wall_clock}, m_system{system}, m_exclusive_monitor{exclusive_monitor}
+    , m_cb(std::make_optional<DynarmicCallbacks64>(*this, process))
+    , m_core_index{core_index}
+'@
+$new = @'
+ArmDynarmic64::ArmDynarmic64(System& system, bool uses_wall_clock, Kernel::KProcess* process, DynarmicExclusiveMonitor& exclusive_monitor, std::size_t core_index, bool recomp_fallback)
+    : ArmInterface{uses_wall_clock}, m_system{system}, m_exclusive_monitor{exclusive_monitor}
+    , m_cb(std::make_optional<DynarmicCallbacks64>(*this, process))
+    , m_core_index{core_index}, m_recomp_fallback{recomp_fallback}
+'@
+Replace-Literal 'src\core\arm\dynarmic\arm_dynarmic_64.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+        impl->fallback = std::make_unique<ArmDynarmic64>(
+            impl->system, impl->uses_wall_clock, impl->owner_process,
+            static_cast<DynarmicExclusiveMonitor&>(*impl->exclusive_monitor), impl->core_index);
+'@
+$new = @'
+        impl->fallback = std::make_unique<ArmDynarmic64>(
+            impl->system, impl->uses_wall_clock, impl->owner_process,
+            static_cast<DynarmicExclusiveMonitor&>(*impl->exclusive_monitor), impl->core_index,
+            true);
+'@
+Replace-Literal 'src\core\arm\recomp\arm_recomp.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+void OnJitFallback() {
+    if (!Watching()) {
+        return;
+    }
+    auto& s = S();
+    std::scoped_lock lk{s.lock};
+    StickyWhere(s, Reason::JitFallback, PinCause::JitFallback,
+                [](const ModuleState&, std::uint64_t&) { return true; });
+}
+'@
+$new = @'
+void OnJitFallback() {
+    if (!Watching()) {
+        return;
+    }
+    auto& s = S();
+    std::scoped_lock lk{s.lock};
+    // Scarlet's AOT fallback is constructed without fastmem/page-table direct
+    // memory, so every JIT write goes through Core::Memory and its watch hooks.
+    // Advance the generation once for the engine transition, but do not pin all
+    // modules to verify-always for the rest of the process.
+    Bump(s, Reason::JitFallback);
+}
+'@
+Replace-Literal 'src\core\arm\recomp\recomp_guard_gen.cpp' $old.Trim() $new.Trim()
+
 # Scarlet-owned default local profile identity.
 Replace-Literal 'src\core\hle\service\acc\profile_manager.cpp' 'CreateNewUser(UUID::MakeRandom(), "__PRODUCT__");' 'CreateNewUser(UUID::MakeRandom(), "Scarlet");'
 Replace-Literal 'src\core\hle\service\acc\profile_manager.cpp' '"user ''__PRODUCT__'' with random UUID.");' '"user ''Scarlet'' with random UUID.");'
