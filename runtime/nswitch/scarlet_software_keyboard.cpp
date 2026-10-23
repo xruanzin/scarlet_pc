@@ -171,6 +171,7 @@ struct DialogState {
     bool accepted{};
     bool silent{};
     bool done{};
+    std::u16string final_text;
     std::vector<HWND> character_buttons;
     std::vector<wchar_t> character_values;
 };
@@ -248,6 +249,7 @@ bool ValidateAndAccept(DialogState& state) {
         return false;
     }
 
+    state.final_text = text;
     state.accepted = true;
     state.done = true;
     state.error_text.clear();
@@ -585,7 +587,7 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
     response.accepted = state.accepted;
     response.silent = state.silent;
     if (state.accepted) {
-        response.text = GetEditText(state.edit);
+        response.text = std::move(state.final_text);
     }
 
     DeleteObject(state.background_brush);
