@@ -27,6 +27,11 @@ if ([string]::IsNullOrWhiteSpace($GamePath)) {
 
 $game = (Resolve-Path $GamePath).Path
 
+$prodKeys = Join-Path $package 'user\keys\prod.keys'
+if (-not (Test-Path $prodKeys -PathType Leaf)) {
+    throw 'Scarlet PC cannot decrypt the game because user\keys\prod.keys is missing. Re-run scarlet_independent_setup.ps1 with -KeysPath pointing to your legally obtained prod.keys or keys folder.'
+}
+
 Push-Location $package
 try {
     $env:NSWITCH_AOT_FALLBACK = '1'
