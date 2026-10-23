@@ -908,10 +908,24 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
         bool handled = false;
         if (message.message == WM_KEYDOWN) {
             switch (message.wParam) {
-            case VK_LEFT: Navigate(state, -1, 0); handled = true; break;
-            case VK_RIGHT: Navigate(state, 1, 0); handled = true; break;
-            case VK_UP: Navigate(state, 0, -1); handled = true; break;
-            case VK_DOWN: Navigate(state, 0, 1); handled = true; break;
+            case VK_LEFT:
+                if (GetFocus() != state.edit) { Navigate(state, -1, 0); handled = true; }
+                break;
+            case VK_RIGHT:
+                if (GetFocus() != state.edit) { Navigate(state, 1, 0); handled = true; }
+                break;
+            case VK_UP:
+                if (GetFocus() != state.edit) { Navigate(state, 0, -1); handled = true; }
+                break;
+            case VK_DOWN:
+                if (GetFocus() != state.edit) { Navigate(state, 0, 1); handled = true; }
+                break;
+            case VK_SPACE:
+                if (GetFocus() != state.edit && !CharacterDisabled(state.params, L' ')) {
+                    ReplaceSelection(state.edit, L" ");
+                    handled = true;
+                }
+                break;
             case VK_RETURN:
                 if (GetFocus() != state.edit) {
                     ActivateFocused(state);
