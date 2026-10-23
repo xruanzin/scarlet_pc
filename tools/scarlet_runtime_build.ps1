@@ -155,26 +155,26 @@ if ($RefreshSource -and (Test-Path $SourceDir)) { Remove-Item $SourceDir -Recurs
 if (-not (Test-Path (Join-Path $SourceDir '.git'))) {
     New-Item -ItemType Directory -Force -Path (Split-Path $SourceDir -Parent) | Out-Null
     Write-Host '[Scarlet PC] Fetching pinned runtime source...' -ForegroundColor Cyan
-    & git clone --filter=blob:none --recurse-submodules $upstream $SourceDir
+    & git clone --quiet --filter=blob:none --recurse-submodules $upstream $SourceDir
     if ($LASTEXITCODE -ne 0) { throw 'Runtime source clone failed.' }
 }
 
 Push-Location $SourceDir
 try {
-    & git fetch origin $revision --depth 1
+    & git fetch --quiet origin $revision --depth 1
     if ($LASTEXITCODE -ne 0) { throw 'Could not fetch pinned runtime revision.' }
-    & git checkout --detach $revision
+    & git checkout --quiet --detach $revision
     if ($LASTEXITCODE -ne 0) { throw 'Could not checkout pinned runtime revision.' }
 
     # The Scarlet overlay intentionally edits the pinned runtime checkout.
     # Reset those generated/local edits before applying the current overlay again,
     # otherwise an interrupted or older build can leave stale branding/loader code.
-    & git reset --hard $revision
+    & git reset --hard --quiet $revision
     if ($LASTEXITCODE -ne 0) { throw 'Could not reset pinned runtime source.' }
-    & git clean -fd
+    & git clean -fdq
     if ($LASTEXITCODE -ne 0) { throw 'Could not clean pinned runtime source.' }
 
-    & git submodule update --init --recursive
+    & git submodule update --quiet --init --recursive
     if ($LASTEXITCODE -ne 0) { throw 'Runtime submodule update failed.' }
     $actual = (& git rev-parse HEAD).Trim()
     if ($actual -ne $revision) { throw "Runtime source revision mismatch: $actual" }
