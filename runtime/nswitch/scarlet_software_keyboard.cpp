@@ -640,7 +640,7 @@ LRESULT CALLBACK KeyboardWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         GetClientRect(hwnd, &rect);
         FillRect(dc, &rect, state->background_brush);
         RECT panel = rect;
-        panel.bottom = std::min(rect.bottom, 170);
+        panel.bottom = std::min<LONG>(rect.bottom, 170L);
         FillRect(dc, &panel, state->panel_brush);
         HPEN line = CreatePen(PS_SOLID, 1, RGB(215, 218, 223));
         HGDIOBJ old = SelectObject(dc, line);
@@ -739,11 +739,11 @@ void BuildKeyboardUi(DialogState& state) {
                                       32, 146, width - 64, 22, 13, state.font_text);
 
     const u32 max_length = state.params.max_text_length > 0 ? state.params.max_text_length : 500;
-    SendMessageW(state.edit, EM_SETLIMITTEXT, max_length, 0);
+    SendMessageW(state.edit, EM_SETLIMITTEXT, static_cast<WPARAM>(max_length), 0);
     if (state.params.initial_cursor_position <= 0) {
         SendMessageW(state.edit, EM_SETSEL, 0, 0);
     } else {
-        SendMessageW(state.edit, EM_SETSEL, -1, -1);
+        SendMessageW(state.edit, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
     }
     UpdateCounter(state);
 
