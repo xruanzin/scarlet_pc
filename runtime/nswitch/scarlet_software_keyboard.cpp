@@ -625,7 +625,7 @@ LRESULT CALLBACK KeyboardWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPAR
 
         if ((id == IDOK || id == kIdBackspace) && !disabled) {
             const wchar_t* badge_text = id == IDOK ? L"A" : L"B";
-            const int radius = std::max(9, (rect.bottom - rect.top) / 8);
+            const int radius = std::max(9, static_cast<int>((rect.bottom - rect.top) / 8));
             const int cx = rect.right - radius - 8;
             const int cy = rect.top + radius + 8;
             HBRUSH badge = CreateSolidBrush(RGB(255, 255, 255));
