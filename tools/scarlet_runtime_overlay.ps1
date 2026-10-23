@@ -813,6 +813,11 @@ LOG_CRITICAL(Frontend,
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
+# Scarlet PC owns its player-facing log filename. Keep upstream path/layout
+# internals intact, but never emit the inherited product log filename.
+Replace-Literal 'src\common\logging\backend.cpp' 'new Impl(log_dir / LOG_FILE, filter)' 'new Impl(log_dir / "scarlet_log.txt", filter)'
+Replace-Literal 'src\common\logging.cpp' 'logging_instance->file_backend.emplace(log_dir / LOG_FILE);' 'logging_instance->file_backend.emplace(log_dir / "scarlet_log.txt");'
+
 # Sanitize legacy command-host source paths at the common logging choke point.
 # Both logger frontends eventually call FmtLogMessage(), so this works even if a
 # legacy formatter object is reused by the build. Keep useful source names, but
