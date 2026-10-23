@@ -1,6 +1,7 @@
 param(
     [string]$GamePath,
     [string]$UpdatePath,
+    [string[]]$DlcPath = @(),
 
     [ValidateRange(30, 240)]
     [int]$TargetFps = 60,
@@ -86,6 +87,12 @@ try {
         Write-Host "[Scarlet PC] Update: $update" -ForegroundColor Green
         $launchArgs = @('--content-base', ('"{0}"' -f $game),
                         '--content-update', ('"{0}"' -f $update))
+        foreach ($dlcItem in $DlcPath) {
+            if ([string]::IsNullOrWhiteSpace($dlcItem)) { continue }
+            $resolvedDlc = (Resolve-Path $dlcItem).Path
+            Write-Host "[Scarlet PC] DLC:    $resolvedDlc" -ForegroundColor DarkGray
+            $launchArgs += @('--content-dlc', ('"{0}"' -f $resolvedDlc))
+        }
     }
     else {
         Write-Warning '[Scarlet PC] No update NSP found; launching base game only.'
