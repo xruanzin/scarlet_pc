@@ -448,12 +448,16 @@ Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
 # Scarlet runtime logs keep only time/category/level/message. This intentionally
 # removes source file, function and line metadata so legacy internal source paths never leak.
-$pattern = 'return fmt::format\("\[\{:\\4d\}\.\{:\\06d\}\] \{\} <\{\}> \{\}:\{\}:\{\}: \{\}",\s*time_seconds, time_fractional,\s*class_name, level_name, entry\.filename, entry\.function, entry\.line_num,\s*entry\.message\);'
-$replacement = @'
+$old = @'
+return fmt::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: {}", time_seconds, time_fractional,
+                       class_name, level_name, entry.filename, entry.function, entry.line_num,
+                       entry.message);
+'@
+$new = @'
 return fmt::format("[{:4d}.{:06d}] {} <{}> {}", time_seconds, time_fractional,
                        class_name, level_name, entry.message);
 '@
-Replace-RegexOnce 'src\common\logging\text_formatter.cpp' $pattern $replacement.Trim()
+Replace-Literal 'src\common\logging\text_formatter.cpp' $old.Trim() $new.Trim()
 
 # Scarlet-facing live title: FPS, frametime, shader activity and fallback transitions.
 # Keep an accumulated compiled-shader counter for the Scarlet title bar.
