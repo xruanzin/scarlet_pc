@@ -1,6 +1,7 @@
 param(
     [string]$GamePath,
-    [string]$UpdatePath
+    [string]$UpdatePath,
+    [switch]$ExperimentalAsyncShaders
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,6 +57,16 @@ if (Test-Path $provenancePath -PathType Leaf) {
 Push-Location $package
 try {
     $env:NSWITCH_AOT_FALLBACK = '1'
+
+    # The aggressive runtime profile also enables asynchronous shader compilation.
+    # Scarlet can temporarily skip character-material draws while a pipeline is still
+    # compiling, which is visible in the character setup screen. Keep the normal
+    # async-GPU default, but disable that bundled profile unless explicitly requested.
+    if (-not $ExperimentalAsyncShaders) {
+        $env:SCARLET_PERF_PROFILE = '0'
+        Write-Host '[Scarlet PC] Stable shader mode: async shader compilation disabled.' -ForegroundColor Green
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($legacyStrictEnv)) {
         Set-Item -Path ("Env:" + $legacyStrictEnv) -Value '0'
     }
@@ -83,6 +94,7 @@ try {
 }
 finally {
     Remove-Item Env:NSWITCH_AOT_FALLBACK -ErrorAction SilentlyContinue
+    Remove-Item Env:SCARLET_PERF_PROFILE -ErrorAction SilentlyContinue
     if (-not [string]::IsNullOrWhiteSpace($legacyStrictEnv)) {
         Remove-Item -Path ("Env:" + $legacyStrictEnv) -ErrorAction SilentlyContinue
     }
