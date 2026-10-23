@@ -46,7 +46,7 @@ function Replace-RegexOnce([string]$RelativePath, [string]$Pattern, [string]$Rep
 }
 
 # Player-facing Scarlet PC identity.
-Replace-Literal 'src\suyu_cmd\suyu.cpp' 'LOG_INFO(Frontend, "suyu-cmd starting up...");' 'LOG_INFO(Frontend, "[Scarlet.Runtime] Scarlet PC 0.1 starting");'
+Replace-Literal 'src\suyu_cmd\suyu.cpp' 'LOG_INFO(Frontend, "suyu-cmd starting up...");' 'LOG_INFO(Frontend, "[Scarlet.Runtime] Scarlet PC starting");'
 Replace-Literal 'src\suyu_cmd\suyu.cpp' 'LOG_INFO(Frontend, "suyu-cmd: Initializing system...");' 'LOG_INFO(Frontend, "[Scarlet.Runtime] Initializing runtime");'
 Replace-Literal 'src\suyu_cmd\suyu.cpp' 'LOG_INFO(Frontend, "suyu-cmd: System initialized.");' 'LOG_INFO(Frontend, "[Scarlet.Runtime] Runtime initialized");'
 Replace-Literal 'src\suyu_cmd\suyu.cpp' 'LOG_INFO(Frontend, "suyu-cmd: Window created, loading game...");' 'LOG_INFO(Frontend, "[Scarlet.Runtime] Window ready");'
