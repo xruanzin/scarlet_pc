@@ -328,6 +328,18 @@ LOG_CRITICAL(Frontend,
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
+# Scarlet runtime logs keep categories/levels/messages but hide upstream source paths.
+$old = @'
+return fmt::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: {}", time_seconds, time_fractional,
+                       class_name, level_name, entry.filename, entry.function, entry.line_num,
+                       entry.message);
+'@
+$new = @'
+return fmt::format("[{:4d}.{:06d}] {} <{}> {}", time_seconds, time_fractional,
+                       class_name, level_name, entry.message);
+'@
+Replace-Literal 'src\common\logging\text_formatter.cpp' $old.Trim() $new.Trim()
+
 # Scarlet graphics identity in the Vulkan bring-up log.
 $old = @'
 CollectPhysicalMemoryInfo();
