@@ -196,6 +196,11 @@ New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 Get-ChildItem $BuildDir -Recurse -File -Filter '*.rc.res' -ErrorAction SilentlyContinue |
     Remove-Item -Force -ErrorAction SilentlyContinue
 
+# The public log format is part of Scarlet PC branding. Force this one object to
+# rebuild even when Ninja's timestamps would otherwise reuse an older formatter.
+Get-ChildItem $BuildDir -Recurse -File -Filter 'text_formatter.cpp.obj' -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
 $cmakeHelp = (& cmake --help | Out-String)
 $generatorArgs = @()
 $usingNinja = $false
