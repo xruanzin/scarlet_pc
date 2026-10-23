@@ -446,6 +446,52 @@ LOG_CRITICAL(Frontend,
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
+# Sanitize legacy command-host source paths at the common logging choke point.
+# Both logger frontends eventually call FmtLogMessage(), so this works even if a
+# legacy formatter object is reused by the build. Keep useful source names, but
+# never expose the inherited command directory/product name in player-facing logs.
+$old = @'
+template <typename... Args>
+void FmtLogMessage(Class log_class, Level log_level, const char* filename, unsigned int line_num, const char* function, fmt::format_string<Args...> format, const Args&... args) {
+    FmtLogMessageImpl(log_class, log_level, filename, line_num, function, format.get(), fmt::make_format_args(args...));
+}
+'@
+$new = @'
+inline const char* ScarletLogSource(const char* filename) {
+    if (filename == nullptr) {
+        return "scarlet_runtime.cpp";
+    }
+
+    const std::string_view source{filename};
+    constexpr std::string_view legacy_backslash{"suyu_cmd\\"};
+    constexpr std::string_view legacy_slash{"suyu_cmd/"};
+
+    std::size_t pos = source.rfind(legacy_backslash);
+    std::size_t prefix_size = legacy_backslash.size();
+    if (pos == std::string_view::npos) {
+        pos = source.rfind(legacy_slash);
+        prefix_size = legacy_slash.size();
+    }
+
+    if (pos != std::string_view::npos) {
+        const char* trimmed = filename + pos + prefix_size;
+        if (std::string_view{trimmed} == "suyu.cpp") {
+            return "scarlet_runtime.cpp";
+        }
+        return trimmed;
+    }
+
+    return filename;
+}
+
+template <typename... Args>
+void FmtLogMessage(Class log_class, Level log_level, const char* filename, unsigned int line_num, const char* function, fmt::format_string<Args...> format, const Args&... args) {
+    FmtLogMessageImpl(log_class, log_level, ScarletLogSource(filename), line_num, function,
+                      format.get(), fmt::make_format_args(args...));
+}
+'@
+Replace-Literal 'src\common\logging.h' $old.Trim() $new.Trim()
+
 # Scarlet runtime logs keep only time/category/level/message. This intentionally
 # removes source file, function and line metadata so legacy internal source paths never leak.
 $old = @'
