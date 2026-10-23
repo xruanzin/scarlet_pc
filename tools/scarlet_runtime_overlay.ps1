@@ -450,6 +450,7 @@ Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 # Both logger frontends eventually call FmtLogMessage(), so this works even if a
 # legacy formatter object is reused by the build. Keep useful source names, but
 # never expose the inherited command directory/product name in player-facing logs.
+Replace-Literal 'src\common\logging.h' '#include <type_traits>' "#include <type_traits>`n#include <string_view>"
 $old = @'
 template <typename... Args>
 void FmtLogMessage(Class log_class, Level log_level, const char* filename, unsigned int line_num, const char* function, fmt::format_string<Args...> format, const Args&... args) {
