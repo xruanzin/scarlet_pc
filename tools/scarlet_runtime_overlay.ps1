@@ -307,8 +307,6 @@ Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2_vk.cpp' $old.Tri
 Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' 'const std::string title = __PASCAL__Cmd::FormatNativeTitle(display);' 'const std::string title = "Pokémon Scarlet";'
 Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' 'std::snprintf(title, sizeof(title), "Preparing shaders...");' 'std::snprintf(title, sizeof(title), "Pokémon Scarlet");'
 Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' 'std::snprintf(title, sizeof(title), "Building shaders %zu/%zu", built, total);' 'std::snprintf(title, sizeof(title), "Pokémon Scarlet");'
-Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' '"falling back to __PRODUCT__ icon.");' '"falling back to the built-in Scarlet PC icon.");'
-Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' 'LOG_WARNING(Frontend, "Failed to create __PRODUCT__ icon stream.");' 'LOG_WARNING(Frontend, "Failed to create built-in runtime icon stream.");'
 
 # Use the project icon in the Windows PE resource instead of the upstream icon.
 $projectIcon = Join-Path $repoRoot 'docs\icon\icon.ico'
