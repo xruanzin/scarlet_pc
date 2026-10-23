@@ -309,6 +309,25 @@ bool StrictNoFallback() {
 '@
 Replace-Literal 'src\core\arm\recomp\arm_recomp.cpp' $old.Trim() $new.Trim()
 
+# Scarlet-owned default local profile identity.
+Replace-Literal 'src\core\hle\service\acc\profile_manager.cpp' 'CreateNewUser(UUID::MakeRandom(), "__PRODUCT__");' 'CreateNewUser(UUID::MakeRandom(), "Scarlet");'
+Replace-Literal 'src\core\hle\service\acc\profile_manager.cpp' '"user ''__PRODUCT__'' with random UUID.");' '"user ''Scarlet'' with random UUID.");'
+Replace-Literal 'src\core\hle\service\acc\profile_manager.cpp' '"''__PRODUCT__'' with random UUID.");' '"''Scarlet'' with random UUID.");'
+
+# Keep the generic ROM-load failure entirely Scarlet-facing.
+$old = @'
+LOG_CRITICAL(Frontend,
+                         "While attempting to load the ROM requested, an error occurred. Please "
+                         "refer to the __PRODUCT__ wiki for more information or the __PRODUCT__ discord for "
+                         "additional help.\n\nError Code: {:04X}-{:04X}\nError Description: {}",
+'@
+$new = @'
+LOG_CRITICAL(Frontend,
+                         "[Scarlet.Game] The game could not be loaded. Check the Scarlet PC log for details. "
+                         "Error Code: {:04X}-{:04X}; Error Description: {}",
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
 # Scarlet graphics identity in the Vulkan bring-up log.
 $old = @'
 CollectPhysicalMemoryInfo();
