@@ -8,10 +8,10 @@ Validated Scarlet configuration:
 - Host: Windows x86-64
 - CPU path: AOT-first with internal dynamic fallback
 - Shared AOT modules:
-  - `recompiled_rtld.dll`
-  - `recompiled_image.dll`
-  - `recompiled_subsdk0.dll`
-  - `recompiled_sdk.dll`
+  - `aot/scarlet-rtld.dll`
+  - `aot/scarlet-main.dll`
+  - `aot/scarlet-multimedia.dll`
+  - `aot/scarlet-sdk.dll`
 - Runtime baseline revision: `347fcf91d95cd39cb5c3db50f1b6d827ad699311`
 
 The package builds its own host as `ScarletPC.exe`, loads the game-derived AOT modules locally, and keeps the fallback engine inside the same runtime instead of requiring a separately installed emulator package.
