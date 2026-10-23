@@ -459,6 +459,18 @@ return fmt::format("[{:4d}.{:06d}] {} <{}> {}", time_seconds, time_fractional,
 '@
 Replace-Literal 'src\common\logging\text_formatter.cpp' $old.Trim() $new.Trim()
 
+# The validated runtime revision contains a second/legacy logger in common/logging.cpp.
+# Patch it too; otherwise __FILE__ still exposes legacy command-directory/product names
+# such as "suyu_cmd\suyu.cpp" even though the newer formatter above is Scarlet-facing.
+$old = @'
+return fmt::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: {}", time_seconds, time_fractional, class_name, level_name, entry.filename, entry.line_num, entry.function, entry.message);
+'@
+$new = @'
+return fmt::format("[{:4d}.{:06d}] {} <{}> {}", time_seconds, time_fractional,
+                       class_name, level_name, entry.message);
+'@
+Replace-Literal 'src\common\logging.cpp' $old.Trim() $new.Trim()
+
 # Scarlet-facing live title: FPS, frametime, shader activity and fallback transitions.
 # Keep an accumulated compiled-shader counter for the Scarlet title bar.
 $old = @'
