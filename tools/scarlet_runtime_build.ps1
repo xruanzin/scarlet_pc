@@ -151,6 +151,11 @@ function Get-ScarletGlslangValidator {
 
 $glslangValidator = Get-ScarletGlslangValidator
 
+# FidelityFX SDK headers/runtime are pinned to the same revision used by Zelda-on-PC's
+# Vulkan FSR 3 frame-generation integration.
+& (Join-Path $PSScriptRoot 'scarlet_fetch_fidelityfx.ps1')
+
+
 if ($RefreshSource -and (Test-Path $SourceDir)) { Remove-Item $SourceDir -Recurse -Force }
 
 if (-not (Test-Path (Join-Path $SourceDir '.git'))) {
