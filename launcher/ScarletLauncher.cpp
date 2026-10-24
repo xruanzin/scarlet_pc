@@ -660,13 +660,13 @@ void CreateGraphicsPage() {
                           kUpscalerQualities, 0);
 
     g_frame_generation = MakeCheckbox(Graphics, ID_FRAME_GENERATION, 300, 444, 450, 30,
-                                      L"Frame Generation", false);
+                                      L"Frame Generation (FSR 3)", false);
     g_async_shaders = MakeCheckbox(Graphics, ID_ASYNC_SHADERS, 300, 488, 450, 30,
                                    L"Shader assíncrono", true);
 
     MakeStatic(Graphics, 300, 544, 810, 55,
-               L"DLSS, FSR 3/3.1/4 e Frame Generation permanecem selecionáveis mesmo em GPUs não compatíveis. "
-               L"O runtime usa o melhor caminho disponível e registra o fallback quando necessário.");
+               L"DLSS usa NVIDIA NGX; FSR 3/3.1 e Frame Generation usam FidelityFX Vulkan. "
+               L"FSR 4 usa o provider v07 experimental quando os assets compatíveis estiverem instalados.");
 }
 
 void CreateControlsPage() {
