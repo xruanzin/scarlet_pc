@@ -3,7 +3,7 @@
 
 #include <cstddef>
 #include <vector>
-#include <vulkan/vulkan.h>
+#include "video_core/vulkan_common/vulkan.h"
 
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
