@@ -1324,6 +1324,18 @@ Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
 
 
+
+$old = @'
+#include <optional>
+#include <variant>
+'@
+$new = @'
+#include <memory>
+#include <optional>
+#include <variant>
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\present\layer.h' $old.Trim() $new.Trim()
+
 # Route the original Scarlet display layer through NGX before the normal window-adaptation
 # pass. This is a real DLSS SR evaluation; neutral depth/motion are the compatibility baseline.
 $old = @'
