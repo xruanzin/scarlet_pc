@@ -36,22 +36,26 @@ foreach ($model in $models) {
 $downloaded = 0
 foreach ($file in $files) {
     $target = Join-Path $Destination $file
-    if (Test-Path $target -PathType Leaf -and (Get-Item $target).Length -gt 0) {
+    if ((Test-Path -LiteralPath $target -PathType Leaf) -and
+        ((Get-Item -LiteralPath $target).Length -gt 0)) {
         continue
     }
     $part = "$target.part"
     Remove-Item $part -Force -ErrorAction SilentlyContinue
     Write-Host "[Scarlet PC] FSR4 v07 asset: $file" -ForegroundColor DarkGray
     Invoke-WebRequest -UseBasicParsing -Uri "$base/$file" -OutFile $part
-    if (-not (Test-Path $part -PathType Leaf) -or (Get-Item $part).Length -eq 0) {
+    if (-not (Test-Path -LiteralPath $part -PathType Leaf)) {
         throw "FSR4 v07 asset download failed: $file"
+    }
+    if ((Get-Item -LiteralPath $part).Length -eq 0) {
+        throw "FSR4 v07 asset download produced an empty file: $file"
     }
     Move-Item $part $target -Force
     $downloaded++
 }
 
 $license = Join-Path $Destination 'LICENSE-FSR4-v07.txt'
-if (-not (Test-Path $license -PathType Leaf)) {
+if (-not (Test-Path -LiteralPath $license -PathType Leaf)) {
     throw 'FSR4 v07 asset license is missing; refusing to stage the model bundle.'
 }
 
