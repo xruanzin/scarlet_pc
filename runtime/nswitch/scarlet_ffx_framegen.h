@@ -7,7 +7,7 @@
 #pragma once
 
 #include <cstdint>
-#include <vulkan/vulkan.h>
+#include "video_core/vulkan_common/vulkan.h"
 
 namespace ScarletPC::Graphics {
 
