@@ -484,6 +484,7 @@ bool FidelityFxFrameGeneration::CreateSwapchain(
     query.header.type = FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_FUNCTIONS_VK;
     if (impl->query(&context, &query.header) != FFX_API_RETURN_OK) {
         impl->destroy(&context, nullptr);
+        *swapchain = VK_NULL_HANDLE;
         impl->Fail("FidelityFX swapchain replacement function query failed");
         return false;
     }
@@ -498,6 +499,7 @@ bool FidelityFxFrameGeneration::CreateSwapchain(
 
     if (!impl->get_images || !impl->acquire || !impl->present) {
         DestroySwapchain();
+        *swapchain = VK_NULL_HANDLE;
         impl->Fail("FidelityFX swapchain replacement is incomplete");
         return false;
     }
