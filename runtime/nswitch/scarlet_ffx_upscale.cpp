@@ -279,12 +279,11 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
     }
 
     auto& set = images[image_index];
-    bool ok = true;
     const bool reset = reset_pending;
     reset_pending = false;
 
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([this, source_image, image_index, reset, &ok](vk::CommandBuffer cmdbuf) {
+    scheduler.Record([this, source_image, image_index, reset](vk::CommandBuffer cmdbuf) {
         auto& local = images[image_index];
 
         GeneralBarrier(cmdbuf, source_image,
@@ -325,9 +324,9 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
 
         ffxContext context = impl->context;
         if (impl->dispatch(&context, &dispatch.header) != FFX_API_RETURN_OK) {
-            ok = false;
+            dispatch_failed = true;
             LOG_WARNING(Render_Vulkan,
-                        "[Scarlet.FSR3] {} dispatch failed",
+                        "[Scarlet.FSR3] {} dispatch failed; temporal upscaler disabled",
                         SelectedFsrName());
             return;
         }
@@ -337,10 +336,6 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     });
 
-    if (!ok) {
-        dispatch_failed = true;
-        return source_view;
-    }
     return *set.output_view;
 }
 
