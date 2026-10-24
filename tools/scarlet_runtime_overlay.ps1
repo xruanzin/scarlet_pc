@@ -2006,9 +2006,8 @@ $new = @'
                      upscaler == "fsr31" ? "FSR 3.1" : "FSR 3");
         } else if (upscaler == "fsr4") {
             Settings::values.scaling_filter.SetValue(Settings::ScalingFilter::Bilinear);
-            LOG_WARNING(Frontend,
-                        "[Scarlet.Graphics] FSR 4 requested; experimental Vulkan v07 provider "
-                        "requires its model asset bundle");
+            LOG_INFO(Frontend,
+                     "[Scarlet.Graphics] Upscaler: FSR 4 v07 experimental Vulkan provider");
         } else if (upscaler == "dlss") {
             // NGX runs as a dedicated Vulkan presentation-layer pass. Keep the built-in
             // spatial scaler neutral so the DLSS output is not filtered twice.
