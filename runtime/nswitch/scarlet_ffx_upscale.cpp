@@ -30,6 +30,8 @@
 namespace Vulkan {
 namespace {
 
+constexpr VkFormat kFfxOutputFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+
 using CreateFn = PfnFfxCreateContext;
 using DestroyFn = PfnFfxDestroyContext;
 using DispatchFn = PfnFfxDispatch;
@@ -211,19 +213,30 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
         return true;
     }
 
+    LOG_INFO(Render_Vulkan,
+             "[Scarlet.FSR3] Preparing temporal resources input={}x{} output={}x{} source_format={}",
+             wanted_input.width, wanted_input.height, output_extent.width, output_extent.height,
+             static_cast<int>(format));
+
     ReleaseResources(scheduler);
     input_extent = wanted_input;
     source_format = format;
     images.resize(image_count);
 
     for (auto& set : images) {
-        set.output = CreateWrappedImage(allocator, output_extent, source_format);
-        set.output_view = CreateWrappedImageView(device, set.output, source_format);
+        // FidelityFX writes the reconstructed image as a UAV/storage image. Do not
+        // inherit the guest framebuffer format here: sRGB and several packed formats
+        // are not storage-capable on all Vulkan drivers. The native FSR path uses
+        // RGBA16F for the same reason, and FidelityFX accepts it as an upscale output.
+        set.output = CreateWrappedImage(allocator, output_extent, kFfxOutputFormat);
+        set.output_view = CreateWrappedImageView(device, set.output, kFfxOutputFormat);
         set.depth = CreateWrappedImage(allocator, input_extent, VK_FORMAT_R32_SFLOAT);
         set.depth_view = CreateWrappedImageView(device, set.depth, VK_FORMAT_R32_SFLOAT);
         set.motion = CreateWrappedImage(allocator, input_extent, VK_FORMAT_R16G16_SFLOAT);
         set.motion_view = CreateWrappedImageView(device, set.motion, VK_FORMAT_R16G16_SFLOAT);
     }
+
+    LOG_INFO(Render_Vulkan, "[Scarlet.FSR3] Temporal images allocated; initializing layouts");
 
     scheduler.Record([this](vk::CommandBuffer cmdbuf) {
         const auto range = ColorRange();
@@ -244,6 +257,7 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
         }
     });
     scheduler.Finish();
+    LOG_INFO(Render_Vulkan, "[Scarlet.FSR3] Temporal image initialization complete");
 
     impl->backend_desc = {};
     impl->backend_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
@@ -259,6 +273,7 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
     impl->upscale_desc.maxUpscaleSize = {output_extent.width, output_extent.height};
     impl->upscale_desc.fpMessage = nullptr;
 
+    LOG_INFO(Render_Vulkan, "[Scarlet.FSR3] Creating FidelityFX temporal context");
     ffxContext context{};
     const auto create_rc =
         impl->create(&context, &impl->upscale_desc.header, nullptr);
@@ -313,7 +328,7 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
             Resource(*local.motion, VK_FORMAT_R16G16_SFLOAT, input_extent.width,
                      input_extent.height, FFX_API_RESOURCE_STATE_COMPUTE_READ, false);
         dispatch.output =
-            Resource(*local.output, source_format, output_extent.width, output_extent.height,
+            Resource(*local.output, kFfxOutputFormat, output_extent.width, output_extent.height,
                      FFX_API_RESOURCE_STATE_UNORDERED_ACCESS, true);
         dispatch.jitterOffset = {0.0f, 0.0f};
         dispatch.motionVectorScale = {static_cast<float>(input_extent.width),
