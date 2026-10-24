@@ -1,7 +1,8 @@
 param(
     [string]$SourceDir = (Join-Path (Split-Path $PSScriptRoot -Parent) 'launcher'),
     [string]$BuildDir  = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build\scarlet-launcher'),
-    [string]$IconPath
+    [string]$IconPath,
+    [string]$BackgroundPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,12 +46,17 @@ Import-MsvcEnvironment
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $source = Join-Path $SourceDir 'ScarletLauncher.cpp'
-$background = Join-Path $repoRoot 'docs\viridian.jpg'
+$background = if (-not [string]::IsNullOrWhiteSpace($BackgroundPath)) {
+    (Resolve-Path $BackgroundPath).Path
+}
+else {
+    Join-Path $repoRoot 'docs\viridian.jpg'
+}
 if (-not (Test-Path $source -PathType Leaf)) {
     throw "Launcher source not found: $source"
 }
 if (-not (Test-Path $background -PathType Leaf)) {
-    throw "High-resolution launcher background not found: $background"
+    throw "Launcher background not found: $background"
 }
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
