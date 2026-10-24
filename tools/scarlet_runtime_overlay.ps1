@@ -32,6 +32,25 @@ foreach ($name in @('scarlet_software_keyboard.h', 'scarlet_software_keyboard.cp
     Copy-Item $src $dst -Force
 }
 
+# Project-owned FidelityFX adapter; the AMD SDK itself remains under third_party.
+$graphicsSourceDir = Join-Path $repoRoot 'runtime\nswitch'
+$graphicsTargetDir = Join-Path $SourceDir 'src\video_core\renderer_vulkan'
+foreach ($name in @('scarlet_ffx_framegen.h', 'scarlet_ffx_framegen.cpp')) {
+    $src = Join-Path $graphicsSourceDir $name
+    $dst = Join-Path $graphicsTargetDir $name
+    if (-not (Test-Path $src -PathType Leaf)) {
+        throw "Missing Scarlet graphics source: $src"
+    }
+    Copy-Item $src $dst -Force
+}
+
+$ffxIncludeDir = Join-Path $repoRoot 'third_party\FidelityFX-SDK\ffx-api\include'
+if (-not (Test-Path (Join-Path $ffxIncludeDir 'ffx_api\ffx_framegeneration.h') -PathType Leaf)) {
+    throw "FidelityFX headers are missing. Run tools\scarlet_fetch_fidelityfx.ps1 first."
+}
+$ffxIncludeCmake = $ffxIncludeDir.Replace('\', '/')
+
+
 function Expand-Legacy([string]$Text) {
     return $Text.Replace('__PRODUCT__', $legacyProduct).
         Replace('__PASCAL__', $legacyPascal).
@@ -117,6 +136,26 @@ $new = @'
         sdl_config.cpp
 '@
 Replace-Literal 'src\__PRODUCT___cmd\CMakeLists.txt' $old.Trim() $new.Trim()
+
+# Compile Scarlet's FidelityFX bridge into the Vulkan video core.
+$old = @'
+    renderer_vulkan/vk_swapchain.cpp
+    renderer_vulkan/vk_swapchain.h
+    renderer_vulkan/vk_texture_cache.cpp
+'@
+$new = @'
+    renderer_vulkan/vk_swapchain.cpp
+    renderer_vulkan/vk_swapchain.h
+    renderer_vulkan/scarlet_ffx_framegen.cpp
+    renderer_vulkan/scarlet_ffx_framegen.h
+    renderer_vulkan/vk_texture_cache.cpp
+'@
+Replace-Literal 'src\video_core\CMakeLists.txt' $old.Trim() $new.Trim()
+
+$old = 'target_include_directories(video_core PRIVATE ${HOST_SHADERS_INCLUDE})'
+$new = $old + [Environment]::NewLine + 'target_include_directories(video_core PRIVATE "' + $ffxIncludeCmake + '")'
+Replace-Literal 'src\video_core\CMakeLists.txt' $old $new
+
 
 # Register the Scarlet software keyboard before Core initializes default applets.
 $old = @'
