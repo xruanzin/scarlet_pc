@@ -1441,6 +1441,14 @@ $new = @'
 #endif
             ffx_swapchain = candidate;
             ffx_active = true;
+        } else if (candidate == VK_NULL_HANDLE) {
+            // FidelityFX had already consumed the original swapchain before a later
+            // initialization step failed. Drop the stale wrapper and create a fresh
+            // normal swapchain so Frame Generation can fail without killing the game.
+#ifndef __ANDROID__
+            (void)created_swapchain.release();
+#endif
+            created_swapchain = device.GetLogical().CreateSwapchainKHR(swapchain_ci);
         }
     }
 
