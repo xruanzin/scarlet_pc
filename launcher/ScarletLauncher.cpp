@@ -784,7 +784,7 @@ void DrawButton(const DRAWITEMSTRUCT& dis) {
 void DrawBackground(HWND hwnd, HDC hdc) {
     RECT rect{};
     GetClientRect(hwnd, &rect);
-    Graphics graphics(hdc);
+    Gdiplus::Graphics graphics(hdc);
     graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
 
     const int width = rect.right - rect.left;
