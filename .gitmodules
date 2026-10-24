@@ -1,3 +1,6 @@
 [submodule "third_party/FidelityFX-SDK"]
 	path = third_party/FidelityFX-SDK
 	url = https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
+[submodule "third_party/FSR-Vulkan"]
+	path = third_party/FSR-Vulkan
+	url = https://github.com/FireBurn/FSR-Vulkan.git
