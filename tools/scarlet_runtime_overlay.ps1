@@ -1694,11 +1694,12 @@ $old = @'
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
 '@
 $new = @'
-        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                      ((frame_generation_requested &&
-                        (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
-                           ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-                           : 0),
+        .imageUsage = static_cast<VkImageUsageFlags>(
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+            ((frame_generation_requested &&
+              (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
+                 ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                 : 0)),
 '@
 Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $new.Trim()
 
