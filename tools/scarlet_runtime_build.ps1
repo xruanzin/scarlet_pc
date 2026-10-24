@@ -155,6 +155,29 @@ $glslangValidator = Get-ScarletGlslangValidator
 # Vulkan FSR 3 frame-generation integration.
 & (Join-Path $PSScriptRoot 'scarlet_fetch_fidelityfx.ps1')
 
+# The FSR4 v07 provider is a pinned submodule. Initialize it automatically for users who
+# pulled the branch without --recurse-submodules.
+$fsrVulkanDir = Join-Path $repoRoot 'third_party\FSR-Vulkan'
+$fsrVulkanHeader = Join-Path $fsrVulkanDir 'include\ffx_vk_fsr4_v07.h'
+if (-not (Test-Path $fsrVulkanHeader -PathType Leaf)) {
+    Push-Location $repoRoot
+    try {
+        Write-Host '[Scarlet PC] Initializing pinned FSR-Vulkan provider...' -ForegroundColor Cyan
+        & git submodule update --init --recursive -- third_party/FSR-Vulkan
+        if ($LASTEXITCODE -ne 0) { throw 'Could not initialize third_party/FSR-Vulkan.' }
+    } finally {
+        Pop-Location
+    }
+}
+if (-not (Test-Path $fsrVulkanHeader -PathType Leaf)) {
+    throw "FSR-Vulkan provider header is still missing: $fsrVulkanHeader"
+}
+
+# FireBurn's provider intentionally calls the normal Vulkan loader entry points. Scarlet's
+# upstream runtime normally uses only Vulkan headers, so generate a tiny import library
+# locally from the system vulkan-1.dll export contract; no Vulkan SDK install is required.
+& (Join-Path $PSScriptRoot 'scarlet_vulkan_loader_import.ps1')
+
 
 if ($RefreshSource -and (Test-Path $SourceDir)) { Remove-Item $SourceDir -Recurse -Force }
 
