@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <span>
 #include <vector>
-#include <vulkan/vulkan.h>
+#include "video_core/vulkan_common/vulkan.h"
 
 #include "video_core/renderer_vulkan/scarlet_dlss_bridge.h"
 
