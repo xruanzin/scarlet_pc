@@ -932,6 +932,12 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
         return {};
     }
 
+    POINT client_origin{0, 0};
+    if (!ClientToScreen(owner, &client_origin)) {
+        LOG_ERROR(Service_AM, "[Scarlet.Keyboard] Could not locate game client area");
+        return {};
+    }
+
     DialogState state{
         .params = std::move(params),
         .error_text = std::move(error),
@@ -941,15 +947,15 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
         .edit_brush = CreateSolidBrush(RGB(255, 255, 255)),
     };
 
-    // Creating a WS_CHILD directly from the applet worker thread fails on some
-    // Windows/SDL Vulkan window configurations. Create the keyboard hidden as a
-    // tool popup first (the path known to work), reparent it before it is ever shown,
-    // then convert it to a real child of the game HWND. The player never gets a
-    // separate taskbar/Alt-Tab window.
+    // Do NOT make the keyboard a WS_CHILD of the Vulkan/SDL window. Child HWNDs can
+    // be occluded by a fullscreen/borderless swapchain even though Win32 considers
+    // them visible. Use an owned top-level popup instead: it stays out of Alt-Tab,
+    // follows the game in the Z order and can be placed above the Vulkan surface.
     state.hwnd = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT, kKeyboardClass, L"",
-        WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, width, height, nullptr,
-        nullptr, GetModuleHandleW(nullptr), &state);
+        WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT | WS_EX_TOPMOST, kKeyboardClass, L"",
+        WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+        client_origin.x, client_origin.y, width, height, owner, nullptr,
+        GetModuleHandleW(nullptr), &state);
 
     if (state.hwnd == nullptr) {
         const DWORD error_code = GetLastError();
@@ -957,30 +963,14 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
         DeleteObject(state.panel_brush);
         DeleteObject(state.edit_brush);
         LOG_ERROR(Service_AM,
-                  "[Scarlet.Keyboard] Failed to create keyboard host, Win32 error={}",
+                  "[Scarlet.Keyboard] Failed to create keyboard overlay, Win32 error={}",
                   error_code);
         return {};
     }
 
-    SetLastError(ERROR_SUCCESS);
-    if (SetParent(state.hwnd, owner) == nullptr && GetLastError() != ERROR_SUCCESS) {
-        const DWORD error_code = GetLastError();
-        DestroyWindow(state.hwnd);
-        DeleteObject(state.transparent_brush);
-        DeleteObject(state.panel_brush);
-        DeleteObject(state.edit_brush);
-        LOG_ERROR(Service_AM,
-                  "[Scarlet.Keyboard] Failed to attach keyboard to game window, Win32 error={}",
-                  error_code);
-        return {};
-    }
-
-    LONG_PTR style = GetWindowLongPtrW(state.hwnd, GWL_STYLE);
-    style &= ~static_cast<LONG_PTR>(WS_POPUP);
-    style |= static_cast<LONG_PTR>(WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
-    SetWindowLongPtrW(state.hwnd, GWL_STYLE, style);
-    SetWindowPos(state.hwnd, HWND_TOP, 0, 0, width, height,
-                 SWP_FRAMECHANGED | SWP_NOACTIVATE);
+    LOG_INFO(Service_AM,
+             "[Scarlet.Keyboard] Overlay HWND created as owned topmost popup at {},{} size={}x{}",
+             client_origin.x, client_origin.y, width, height);
 
     BuildKeyboardUi(state);
     SetTimer(state.hwnd, 1, 16, nullptr);
@@ -992,9 +982,15 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
         state.attached_input = AttachThreadInput(this_thread, state.owner_thread, TRUE) != FALSE;
     }
 
-    SetForegroundWindow(owner);
-    BringWindowToTop(state.hwnd);
+    // Activate the keyboard itself, not the Vulkan owner. This matters in fullscreen
+    // and borderless modes where presenting another frame can otherwise leave the
+    // overlay behind the game window before it receives focus.
+    SetWindowPos(state.hwnd, HWND_TOPMOST, client_origin.x, client_origin.y, width, height,
+                 SWP_SHOWWINDOW | SWP_FRAMECHANGED);
     ShowWindow(state.hwnd, SW_SHOW);
+    BringWindowToTop(state.hwnd);
+    SetForegroundWindow(state.hwnd);
+    SetActiveWindow(state.hwnd);
     UpdateWindow(state.hwnd);
     if (!state.nav_rows.empty()) FocusControl(state.nav_rows.front().front());
 
