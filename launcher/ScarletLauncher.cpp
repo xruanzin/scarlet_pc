@@ -35,6 +35,7 @@ constexpr wchar_t kWindowClass[] = L"ScarletPCLauncherWindow";
 constexpr wchar_t kTitle[] = L"Scarlet PC";
 constexpr int kWindowWidth = 1280;
 constexpr int kWindowHeight = 760;
+constexpr UINT kGameExitedMessage = WM_APP + 1;
 
 enum ControlId : int {
     ID_TAB_GAME = 100,
@@ -151,6 +152,21 @@ HWND g_close_on_launch{};
 std::vector<std::wstring> g_dlcs;
 fs::path g_exe_dir;
 fs::path g_ini_path;
+
+struct GameWaitContext {
+    HANDLE process{};
+    HWND launcher{};
+};
+
+DWORD WINAPI WaitForGameProcess(LPVOID opaque) {
+    std::unique_ptr<GameWaitContext> context(static_cast<GameWaitContext*>(opaque));
+    WaitForSingleObject(context->process, INFINITE);
+    DWORD exit_code = 0;
+    GetExitCodeProcess(context->process, &exit_code);
+    CloseHandle(context->process);
+    PostMessageW(context->launcher, kGameExitedMessage, static_cast<WPARAM>(exit_code), 0);
+    return 0;
+}
 
 std::wstring GetText(HWND hwnd) {
     const int len = GetWindowTextLengthW(hwnd);
@@ -598,12 +614,23 @@ void LaunchGame() {
     }
 
     CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+    AllowSetForegroundWindow(pi.dwProcessId);
 
     if (Checked(g_close_on_launch)) {
+        CloseHandle(pi.hProcess);
         PostMessageW(g_main, WM_CLOSE, 0, 0);
     } else {
-        SetWindowTextW(g_main, L"Scarlet PC — jogo iniciado");
+        SetWindowTextW(g_main, L"Scarlet PC — jogo em execução");
+        ShowWindow(g_main, SW_MINIMIZE);
+
+        auto* wait_context = new GameWaitContext{pi.hProcess, g_main};
+        HANDLE wait_thread = CreateThread(nullptr, 0, WaitForGameProcess, wait_context, 0, nullptr);
+        if (wait_thread) {
+            CloseHandle(wait_thread);
+        } else {
+            delete wait_context;
+            CloseHandle(pi.hProcess);
+        }
     }
 }
 
@@ -790,11 +817,24 @@ void DrawBackground(HWND hwnd, HDC hdc) {
     const int width = rect.right - rect.left;
     const int height = rect.bottom - rect.top;
 
+    SolidBrush fallback(Color(255, 94, 13, 16));
+    graphics.FillRectangle(&fallback, 0, 0, width, height);
+
     if (g_background && g_background->GetLastStatus() == Ok) {
-        graphics.DrawImage(g_background.get(), 0, 0, width, height);
-    } else {
-        SolidBrush fallback(Color(255, 94, 13, 16));
-        graphics.FillRectangle(&fallback, 0, 0, width, height);
+        const UINT image_width = g_background->GetWidth();
+        const UINT image_height = g_background->GetHeight();
+        if (image_width > 0 && image_height > 0) {
+            const double scale = std::min(
+                static_cast<double>(width) / static_cast<double>(image_width),
+                static_cast<double>(height) / static_cast<double>(image_height));
+            const int draw_width =
+                static_cast<int>(static_cast<double>(image_width) * scale + 0.5);
+            const int draw_height =
+                static_cast<int>(static_cast<double>(image_height) * scale + 0.5);
+            const int draw_x = (width - draw_width) / 2;
+            const int draw_y = (height - draw_height) / 2;
+            graphics.DrawImage(g_background.get(), draw_x, draw_y, draw_width, draw_height);
+        }
     }
 
     SolidBrush left_panel(Color(220, 16, 10, 16));
@@ -921,6 +961,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         HDC dc = BeginPaint(hwnd, &ps);
         DrawBackground(hwnd, dc);
         EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    case kGameExitedMessage: {
+        const DWORD code = static_cast<DWORD>(wparam);
+        SetWindowTextW(hwnd, kTitle);
+        ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
+
+        if (code != 0) {
+            std::wstring message = L"Pokémon Scarlet foi encerrado inesperadamente.\nCódigo do processo: " +
+                                   std::to_wstring(static_cast<LONG>(code));
+            if (code == 0xC0000005u) {
+                message += L"\n\n0xC0000005: access violation no runtime/driver.";
+            }
+            message += L"\n\nAbra a aba GERAL > ABRIR LOGS para o diagnóstico.";
+            MessageBoxW(hwnd, message.c_str(), L"Scarlet PC — jogo encerrado", MB_OK | MB_ICONERROR);
+        }
         return 0;
     }
 
