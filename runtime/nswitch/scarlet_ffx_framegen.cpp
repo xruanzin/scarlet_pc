@@ -20,17 +20,9 @@
 #include <filesystem>
 #include <string>
 
-#ifndef __declspec
-#define __declspec(x)
-#define SCARLET_UNDEF_DECLSPEC
-#endif
 #include <ffx_api/ffx_api.h>
 #include <ffx_api/ffx_framegeneration.h>
 #include <ffx_api/vk/ffx_api_vk.h>
-#ifdef SCARLET_UNDEF_DECLSPEC
-#undef __declspec
-#undef SCARLET_UNDEF_DECLSPEC
-#endif
 
 #include "common/logging/log.h"
 
