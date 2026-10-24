@@ -121,9 +121,6 @@ if (Test-Path $runtimeSourceOverlayDir -PathType Container) {
     }
 }
 
-if (-not [string]::IsNullOrWhiteSpace($resolvedIcon) -and (Test-Path $resolvedIcon -PathType Leaf)) {
-    $runtimeInputs.Add($resolvedIcon)
-}
 
 $runtimeNeedsBuild = $RebuildRuntime -or $RefreshRuntimeSource
 if (-not $runtimeNeedsBuild) {
