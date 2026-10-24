@@ -274,7 +274,7 @@ $old = @'
 LOG_INFO(Frontend, "__COMMAND__: Calling system.Load for '{}'...", filepath);
 '@
 $new = @'
-LOG_INFO(Frontend, "[Scarlet.Game] Loading Pokémon Scarlet from '{}'", filepath);
+LOG_INFO(Frontend, "[Scarlet.Game] Loading Pokemon Scarlet from '{}'", filepath);
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
@@ -284,7 +284,7 @@ case Core::SystemResultStatus::Success:
 '@
 $new = @'
 case Core::SystemResultStatus::Success:
-        LOG_INFO(Frontend, "[Scarlet.Game] Pokémon Scarlet loaded");
+        LOG_INFO(Frontend, "[Scarlet.Game] Pokemon Scarlet loaded");
         break;
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
@@ -446,14 +446,14 @@ $new = @'
 Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
 
 # Fixed game window title.
-Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2_vk.cpp' 'return exe.empty() ? std::string{"__PRODUCT__"} : exe.stem().string();' 'return std::string{"Pokémon Scarlet"};'
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2_vk.cpp' 'return exe.empty() ? std::string{"__PRODUCT__"} : exe.stem().string();' 'return std::string{"Pokemon Scarlet"};'
 
 $old = @'
 const std::string window_title = fmt::format("__PRODUCT__ {} | {}-{} (Vulkan)", Common::g_build_name,
                                                  Common::g_scm_branch, Common::g_scm_desc);
 '@
 $new = @'
-const std::string window_title = "Pokémon Scarlet";
+const std::string window_title = "Pokemon Scarlet";
 '@
 Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2_vk.cpp' $old.Trim() $new.Trim()
 
@@ -467,8 +467,8 @@ LOG_INFO(Frontend, "[Scarlet.Runtime] Vulkan backend ready");
 Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2_vk.cpp' $old.Trim() $new.Trim()
 
 Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' 'const std::string title = __PASCAL__Cmd::FormatNativeTitle(display);' 'const std::string title = __PASCAL__Cmd::FormatNativeTitle(display);'
-Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' 'std::snprintf(title, sizeof(title), "Preparing shaders...");' 'std::snprintf(title, sizeof(title), "Pokémon Scarlet | Preparing shaders...");'
-Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' 'std::snprintf(title, sizeof(title), "Building shaders %zu/%zu", built, total);' 'std::snprintf(title, sizeof(title), "Pokémon Scarlet | Building shaders %zu/%zu", built, total);'
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' 'std::snprintf(title, sizeof(title), "Preparing shaders...");' 'std::snprintf(title, sizeof(title), "Pokemon Scarlet | Preparing shaders...");'
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' 'std::snprintf(title, sizeof(title), "Building shaders %zu/%zu", built, total);' 'std::snprintf(title, sizeof(title), "Pokemon Scarlet | Building shaders %zu/%zu", built, total);'
 
 # Use the Scarlet icon in the Windows PE resource. Point the .rc file at a
 # Scarlet-owned filename so the resource source itself changes and Ninja rebuilds it.
@@ -1196,6 +1196,30 @@ Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' '"g:fhvp::c:u:l::tV:N:B:U:PD:"' '"g:fhvp::c:u:l::tV:N:B:U:A:PD:"'
 
 $old = @'
+            case 'B':
+                if (explicit_content_base) {
+                    LOG_ERROR(Frontend, "Duplicate --content-base argument");
+                    return 2;
+                }
+                explicit_content_base = optarg;
+                break;
+'@
+$new = @'
+            case 'B':
+                if (explicit_content_base) {
+                    LOG_ERROR(Frontend, "Duplicate --content-base argument");
+                    return 2;
+                }
+#ifdef _WIN32
+                explicit_content_base = Common::UTF16ToUTF8(argv_w[optind - 1]);
+#else
+                explicit_content_base = optarg;
+#endif
+                break;
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+$old = @'
             case 'U':
                 if (explicit_content_update) {
                     LOG_ERROR(Frontend, "Duplicate --content-update argument");
@@ -1211,16 +1235,43 @@ $new = @'
                     LOG_ERROR(Frontend, "Duplicate --content-update argument");
                     return 2;
                 }
+#ifdef _WIN32
+                explicit_content_update = Common::UTF16ToUTF8(argv_w[optind - 1]);
+#else
                 explicit_content_update = optarg;
+#endif
                 break;
             case 'A':
                 if (!optarg || !*optarg) {
                     LOG_ERROR(Frontend, "Invalid --content-dlc argument");
                     return 2;
                 }
+#ifdef _WIN32
+                explicit_content_dlc.emplace_back(Common::UTF16ToUTF8(argv_w[optind - 1]));
+#else
                 explicit_content_dlc.emplace_back(optarg);
+#endif
                 break;
             case 'D':
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+            case 'g': {
+                const std::string str_arg(optarg);
+                filepath = str_arg;
+                break;
+            }
+'@
+$new = @'
+            case 'g': {
+#ifdef _WIN32
+                filepath = Common::UTF16ToUTF8(argv_w[optind - 1]);
+#else
+                filepath = optarg;
+#endif
+                break;
+            }
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
