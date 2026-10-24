@@ -142,6 +142,17 @@ bool ScarletDlssPass::EnsureResources(const Device& device, Scheduler& scheduler
     });
     scheduler.Finish();
 
+    const ScarletDlssFeature feature{
+        .input_width = input_extent.width,
+        .input_height = input_extent.height,
+        .output_width = output_extent.width,
+        .output_height = output_extent.height,
+        .quality = DlssQuality(),
+        .depth_inverted = 0,
+        .preset = 0,
+        .hdr = 0,
+    };
+
     bool created = false;
     auto& dlss = ScarletPC::Graphics::DlssClient::Get();
     scheduler.Record([&](vk::CommandBuffer cmdbuf) {
@@ -172,17 +183,6 @@ VkImageView ScarletDlssPass::Draw(const Device& device, Scheduler& scheduler,
 
     Images& set = images[image_index];
     auto& dlss = ScarletPC::Graphics::DlssClient::Get();
-
-    const ScarletDlssFeature feature{
-        .input_width = input_extent.width,
-        .input_height = input_extent.height,
-        .output_width = output_extent.width,
-        .output_height = output_extent.height,
-        .quality = DlssQuality(),
-        .depth_inverted = 0,
-        .preset = 0,
-        .hdr = 0,
-    };
 
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([this, &dlss, source_image, source_view, image_index](
