@@ -1303,6 +1303,89 @@ $new = @'
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
+
+# FidelityFX frame-generation swapchain plumbing.
+$old = @'
+    VkResult Present(const VkPresentInfoKHR& present_info) const noexcept {
+        return dld->vkQueuePresentKHR(queue, &present_info);
+    }
+
+private:
+'@
+$new = @'
+    VkResult Present(const VkPresentInfoKHR& present_info) const noexcept {
+        return dld->vkQueuePresentKHR(queue, &present_info);
+    }
+
+    VkQueue Handle() const noexcept {
+        return queue;
+    }
+
+private:
+'@
+Replace-Literal 'src\video_core\vulkan_common\vulkan_wrapper.h' $old.Trim() $new.Trim()
+
+$old = @'
+#include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_swapchain.h"
+#include "video_core/renderer_vulkan/vk_stall_probe.h"
+'@
+$new = @'
+#include "video_core/renderer_vulkan/scarlet_ffx_framegen.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_swapchain.h"
+#include "video_core/renderer_vulkan/vk_stall_probe.h"
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    VkExtent2D GetExtent() const {
+        return extent;
+    }
+
+private:
+'@
+$new = @'
+    VkExtent2D GetExtent() const {
+        return extent;
+    }
+
+    bool FrameGenerationActive() const {
+        return ffx_active;
+    }
+
+    VkSwapchainKHR RawSwapchain() const {
+        return ffx_active ? ffx_swapchain : (swapchain ? *swapchain : VK_NULL_HANDLE);
+    }
+
+private:
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.h' $old.Trim() $new.Trim()
+
+$old = @'
+    vk::SwapchainKHR swapchain;
+
+    std::size_t image_count{};
+'@
+$new = @'
+    vk::SwapchainKHR swapchain;
+    VkSwapchainKHR ffx_swapchain{};
+    bool ffx_active{};
+
+    std::size_t image_count{};
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.h' $old.Trim() $new.Trim()
+
+$old = @'
+Swapchain::~Swapchain() = default;
+'@
+$new = @'
+Swapchain::~Swapchain() {
+    Destroy();
+}
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $new.Trim()
+
 # Scarlet Launcher graphics/window contract. Unsupported future algorithms remain selectable,
 # but the runtime logs and uses an explicit fallback rather than pretending they are active.
 $old = @'
