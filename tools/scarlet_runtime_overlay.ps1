@@ -1386,6 +1386,159 @@ Swapchain::~Swapchain() {
 '@
 Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $new.Trim()
 
+
+# Turn on transfer-source usage when FG is requested, then let the official FidelityFX
+# runtime replace the normal Vulkan swapchain. Failure leaves the normal swapchain intact.
+$old = @'
+    VkSwapchainCreateInfoKHR swapchain_ci{
+'@
+$new = @'
+    const bool frame_generation_requested =
+        ScarletPC::Graphics::FidelityFxFrameGeneration::Get().Requested();
+    VkSwapchainCreateInfoKHR swapchain_ci{
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+'@
+$new = @'
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                      ((frame_generation_requested &&
+                        (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
+                           ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                           : 0),
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    // Don't add code within this and the swapchain creation.
+    swapchain = device.GetLogical().CreateSwapchainKHR(swapchain_ci);
+
+    extent = swapchain_ci.imageExtent;
+
+    images = swapchain.GetImages();
+    image_count = static_cast<u32>(images.size());
+'@
+$new = @'
+    // Don't add code within this and the normal swapchain creation.
+    auto created_swapchain = device.GetLogical().CreateSwapchainKHR(swapchain_ci);
+
+    extent = swapchain_ci.imageExtent;
+    ffx_active = false;
+    ffx_swapchain = VK_NULL_HANDLE;
+
+    if (frame_generation_requested &&
+        (swapchain_ci.imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+        auto& ffx = ScarletPC::Graphics::FidelityFxFrameGeneration::Get();
+        ffx.SetQueues(device.GetGraphicsQueue().Handle(), device.GetGraphicsFamily(),
+                      device.GetPresentQueue().Handle(), device.GetPresentFamily());
+        VkSwapchainKHR candidate = *created_swapchain;
+        if (ffx.CreateSwapchain(device.GetPhysical(), *device.GetLogical(), &candidate,
+                                swapchain_ci)) {
+#ifndef __ANDROID__
+            (void)created_swapchain.release();
+#endif
+            ffx_swapchain = candidate;
+            ffx_active = true;
+        }
+    }
+
+    if (ffx_active) {
+        u32 count = 0;
+        vk::Check(ScarletPC::Graphics::FidelityFxFrameGeneration::Get().GetSwapchainImages(
+            *device.GetLogical(), ffx_swapchain, &count, nullptr));
+        images.resize(count);
+        vk::Check(ScarletPC::Graphics::FidelityFxFrameGeneration::Get().GetSwapchainImages(
+            *device.GetLogical(), ffx_swapchain, &count, images.data()));
+        images.resize(count);
+    } else {
+        swapchain = std::move(created_swapchain);
+        images = swapchain.GetImages();
+        if (frame_generation_requested) {
+            LOG_WARNING(Render_Vulkan,
+                        "[Scarlet.FSR3] FidelityFX swapchain unavailable; normal presentation active");
+        }
+    }
+    image_count = static_cast<u32>(images.size());
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+        return device.GetLogical().AcquireNextImageKHR(
+            *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
+            VK_NULL_HANDLE, &image_index);
+'@
+$new = @'
+        if (ffx_active) {
+            return ScarletPC::Graphics::FidelityFxFrameGeneration::Get().AcquireNextImage(
+                *device.GetLogical(), ffx_swapchain, (std::numeric_limits<u64>::max)(),
+                *present_semaphores[frame_index], VK_NULL_HANDLE, &image_index);
+        }
+        return device.GetLogical().AcquireNextImageKHR(
+            *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
+            VK_NULL_HANDLE, &image_index);
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    const VkPresentInfoKHR present_info{
+'@
+$new = @'
+    VkPresentInfoKHR present_info{
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+        .pSwapchains = swapchain.address(),
+'@
+$new = @'
+        .pSwapchains = nullptr,
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    std::scoped_lock lock{scheduler.submit_mutex};
+    const VkResult present_result = [&] {
+        StallProbe::Accum probe{StallProbe::present_ns};
+        return present_queue.Present(present_info);
+    }();
+'@
+$new = @'
+    VkSwapchainKHR present_swapchain = RawSwapchain();
+    present_info.pSwapchains = &present_swapchain;
+
+    std::scoped_lock lock{scheduler.submit_mutex};
+    const VkResult present_result = [&] {
+        StallProbe::Accum probe{StallProbe::present_ns};
+        if (ffx_active) {
+            return ScarletPC::Graphics::FidelityFxFrameGeneration::Get().QueuePresent(
+                device.GetPresentQueue().Handle(), &present_info);
+        }
+        return present_queue.Present(present_info);
+    }();
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    render_semaphores.clear();
+    swapchain.reset();
+}
+'@
+$new = @'
+    render_semaphores.clear();
+    images.clear();
+    if (ffx_active) {
+        ScarletPC::Graphics::FidelityFxFrameGeneration::Get().DestroySwapchain();
+        ffx_swapchain = VK_NULL_HANDLE;
+        ffx_active = false;
+    } else {
+        swapchain.reset();
+    }
+}
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $new.Trim()
+
 # Scarlet Launcher graphics/window contract. Unsupported future algorithms remain selectable,
 # but the runtime logs and uses an explicit fallback rather than pretending they are active.
 $old = @'
