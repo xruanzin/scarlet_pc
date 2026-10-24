@@ -136,6 +136,19 @@ if (Test-Path $ffxLicense -PathType Leaf) {
     Copy-Item $ffxLicense (Join-Path $licensesOut 'FidelityFX-SDK.txt') -Force
 }
 
+# Optional NVIDIA DLSS sidecar. The runtime loads this only when DLSS is selected.
+$dlssStage = Join-Path $repoRoot 'build\scarlet-dlss-bridge\stage'
+foreach ($name in @('ScarletDlssBridge.dll', 'nvngx_dlss.dll')) {
+    $candidate = Join-Path $dlssStage $name
+    if (Test-Path $candidate -PathType Leaf) {
+        Copy-Item $candidate (Join-Path $OutputDir $name) -Force
+    }
+}
+$dlssLicense = Join-Path $dlssStage 'NVIDIA-DLSS-LICENSE.txt'
+if (Test-Path $dlssLicense -PathType Leaf) {
+    Copy-Item $dlssLicense (Join-Path $licensesOut 'NVIDIA-DLSS.txt') -Force
+}
+
 @'
 Scarlet PC
 
@@ -145,7 +158,9 @@ Player-facing layout:
   ScarletLauncher.exe        (recommended entry point)
   ScarletPC.exe              (game runtime)
   assets\scarlet_launcher_background.jpg
-  amd_fidelityfx_vk.dll        (optional FSR 3 frame generation runtime)
+  amd_fidelityfx_vk.dll        (FSR 3 frame generation runtime)
+  ScarletDlssBridge.dll         (optional NVIDIA NGX bridge)
+  nvngx_dlss.dll                (NVIDIA DLSS runtime, when staged)
   aot\scarlet-main.dll
   aot\scarlet-rtld.dll
   aot\scarlet-multimedia.dll
