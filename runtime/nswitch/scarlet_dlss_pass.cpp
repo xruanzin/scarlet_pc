@@ -135,13 +135,27 @@ bool ScarletDlssPass::EnsureResources(const Device& device, Scheduler& scheduler
                                   VK_IMAGE_LAYOUT_UNDEFINED);
             TransitionImageLayout(cmdbuf, *set.motion, VK_IMAGE_LAYOUT_GENERAL,
                                   VK_IMAGE_LAYOUT_UNDEFINED);
-            cmdbuf.ClearColorImage(*set.depth, VK_IMAGE_LAYOUT_GENERAL, depth_clear, range);
-            cmdbuf.ClearColorImage(*set.motion, VK_IMAGE_LAYOUT_GENERAL, zero, range);
+            const std::array ranges{range};
+            cmdbuf.ClearColorImage(*set.depth, VK_IMAGE_LAYOUT_GENERAL, depth_clear, ranges);
+            cmdbuf.ClearColorImage(*set.motion, VK_IMAGE_LAYOUT_GENERAL, zero, ranges);
         }
     });
     scheduler.Finish();
 
-    LOG_INFO(Render_Vulkan, "[Scarlet.DLSS] Resources {}x{} -> {}x{} quality={}",
+    bool created = false;
+    auto& dlss = ScarletPC::Graphics::DlssClient::Get();
+    scheduler.Record([&](vk::CommandBuffer cmdbuf) {
+        created = dlss.CreateFeature(*cmdbuf, feature);
+    });
+    scheduler.Finish();
+    feature_ready = created;
+    if (!feature_ready) {
+        LOG_WARNING(Render_Vulkan,
+                    "[Scarlet.DLSS] Feature creation failed; keeping native presentation");
+        return false;
+    }
+
+    LOG_INFO(Render_Vulkan, "[Scarlet.DLSS] Feature ready {}x{} -> {}x{} quality={}",
              input_extent.width, input_extent.height, output_extent.width, output_extent.height,
              DlssQuality());
     return true;
@@ -171,7 +185,7 @@ VkImageView ScarletDlssPass::Draw(const Device& device, Scheduler& scheduler,
     };
 
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([this, &dlss, feature, source_image, source_view, image_index](
+    scheduler.Record([this, &dlss, source_image, source_view, image_index](
                          vk::CommandBuffer cmdbuf) {
         Images& local = images[image_index];
 
@@ -180,15 +194,6 @@ VkImageView ScarletDlssPass::Draw(const Device& device, Scheduler& scheduler,
                        VK_ACCESS_SHADER_READ_BIT,
                        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-
-        if (!feature_ready) {
-            if (!dlss.CreateFeature(*cmdbuf, feature)) {
-                LOG_WARNING(Render_Vulkan,
-                            "[Scarlet.DLSS] Feature creation failed; native presentation retained");
-                return;
-            }
-            feature_ready = true;
-        }
 
         const ScarletDlssEvaluate evaluate{
             .color =
