@@ -43,13 +43,14 @@ function Import-MsvcEnvironment {
 
 Import-MsvcEnvironment
 
+$repoRoot = Split-Path $PSScriptRoot -Parent
 $source = Join-Path $SourceDir 'ScarletLauncher.cpp'
-$background = Join-Path $SourceDir 'assets\scarlet_launcher_background.jpg'
+$background = Join-Path $repoRoot 'docs\viridian.jpg'
 if (-not (Test-Path $source -PathType Leaf)) {
     throw "Launcher source not found: $source"
 }
 if (-not (Test-Path $background -PathType Leaf)) {
-    throw "Launcher background not found: $background"
+    throw "High-resolution launcher background not found: $background"
 }
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
