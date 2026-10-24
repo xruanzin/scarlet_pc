@@ -120,6 +120,11 @@ struct ScarletFfxUpscalePass::Impl {
     DestroyFn destroy{};
     DispatchFn dispatch{};
     ffxContext context{};
+    // FidelityFX keeps pointers from the create descriptor chain for the lifetime
+    // of the context. Keep the descriptors in Impl rather than on EnsureResources'
+    // stack so the backend chain never dangles after creation returns.
+    ffxCreateBackendVKDesc backend_desc{};
+    ffxCreateContextDescUpscale upscale_desc{};
     bool loaded{};
 
     bool Load() {
@@ -157,6 +162,8 @@ struct ScarletFfxUpscalePass::Impl {
             destroy(&local, nullptr);
             context = nullptr;
         }
+        backend_desc = {};
+        upscale_desc = {};
     }
 
     ~Impl() {
@@ -238,25 +245,27 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
     });
     scheduler.Finish();
 
-    ffxCreateBackendVKDesc backend{};
-    backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
-    backend.vkDevice = *device.GetLogical();
-    backend.vkPhysicalDevice = device.GetPhysical();
-    backend.vkDeviceProcAddr = device.GetDispatchLoader().vkGetDeviceProcAddr;
+    impl->backend_desc = {};
+    impl->backend_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
+    impl->backend_desc.vkDevice = *device.GetLogical();
+    impl->backend_desc.vkPhysicalDevice = device.GetPhysical();
+    impl->backend_desc.vkDeviceProcAddr = device.GetDispatchLoader().vkGetDeviceProcAddr;
 
-    ffxCreateContextDescUpscale desc{};
-    desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
-    desc.header.pNext = &backend.header;
-    desc.flags = FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
-    desc.maxRenderSize = {input_extent.width, input_extent.height};
-    desc.maxUpscaleSize = {output_extent.width, output_extent.height};
-    desc.fpMessage = nullptr;
+    impl->upscale_desc = {};
+    impl->upscale_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+    impl->upscale_desc.header.pNext = &impl->backend_desc.header;
+    impl->upscale_desc.flags = FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
+    impl->upscale_desc.maxRenderSize = {input_extent.width, input_extent.height};
+    impl->upscale_desc.maxUpscaleSize = {output_extent.width, output_extent.height};
+    impl->upscale_desc.fpMessage = nullptr;
 
     ffxContext context{};
-    if (impl->create(&context, &desc.header, nullptr) != FFX_API_RETURN_OK) {
+    const auto create_rc =
+        impl->create(&context, &impl->upscale_desc.header, nullptr);
+    if (create_rc != FFX_API_RETURN_OK) {
         LOG_WARNING(Render_Vulkan,
-                    "[Scarlet.FSR3] {} context creation failed",
-                    SelectedFsrName());
+                    "[Scarlet.FSR3] {} context creation failed (rc={})",
+                    SelectedFsrName(), create_rc);
         dispatch_failed = true;
         return false;
     }
