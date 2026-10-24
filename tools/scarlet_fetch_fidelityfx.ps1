@@ -13,11 +13,21 @@ if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
     throw 'git.exe is required to fetch the FidelityFX SDK.'
 }
 
-if (-not (Test-Path (Join-Path $Destination '.git') -PathType Container)) {
+$gitMarker = Join-Path $Destination '.git'
+if (-not (Test-Path $gitMarker)) {
+    if (Test-Path $Destination) {
+        $items = @(Get-ChildItem $Destination -Force -ErrorAction SilentlyContinue)
+        if ($items.Count -gt 0) {
+            throw "FidelityFX destination exists but is not a Git checkout: $Destination"
+        }
+    }
     New-Item -ItemType Directory -Force -Path (Split-Path $Destination -Parent) | Out-Null
     Write-Host '[Scarlet PC] Fetching pinned AMD FidelityFX SDK...' -ForegroundColor Cyan
     & git clone --filter=blob:none --no-checkout $repo $Destination
     if ($LASTEXITCODE -ne 0) { throw 'Could not clone FidelityFX SDK.' }
+}
+else {
+    Write-Host '[Scarlet PC] Using existing FidelityFX Git checkout/submodule.' -ForegroundColor DarkGray
 }
 
 Push-Location $Destination
