@@ -59,11 +59,21 @@ Scarlet PC does not distribute Pokémon Scarlet, Nintendo Switch firmware, conso
 - `ScarletDlssBridge.dll` is project-owned integration code; `nvngx_dlss.dll` remains
   NVIDIA software and is packaged only with its corresponding notice.
 
-### GoW3 NVIDIA DLSS bridge design
-- Reference: DestroxIam/gow3_pc-nvidia, `gpu/dlss_bridge`
-- License for that bridge: MIT
-- Scarlet PC uses the same isolated-sidecar architecture and retains bridge attribution.
-  It does not reuse GoW3's registered NGX project identifier or copy its GPL renderer.
+### GoW3 NVIDIA DLSS / FSR4 integration references
+- Reference: DestroxIam/gow3_pc-nvidia
+- DLSS bridge reference: `gpu/dlss_bridge` (MIT)
+- FSR4 Vulkan reference: `vk_fsr4.cpp` plus FireBurn/FSR-Vulkan
+- Scarlet PC uses the isolated-sidecar NGX architecture and an independently adapted
+  Scarlet Vulkan presentation pass. It does not reuse GoW3's registered NGX project
+  identifier or copy its renderer wholesale.
+
+### Zelda-on-PC FidelityFX frame-generation reference
+- Reference: mircea32000/Zelda-on-PC
+- Relevant integration: `VulkanFFX`, `VulkanFSRInputs`, and the FidelityFX
+  frame-interpolation swapchain path.
+- Scarlet PC uses the same public FidelityFX API model as a reference, adapted to
+  Scarlet's suyu-derived Vulkan swapchain/presentation architecture.
+- The FidelityFX SDK itself remains AMD software under its own license.
 
 ### FireBurn FSR-Vulkan
 - Source: FireBurn/FSR-Vulkan
