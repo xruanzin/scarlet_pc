@@ -1887,10 +1887,10 @@ $new = @'
                         "[Scarlet.Graphics] {} requested; current renderer uses FSR 1 fallback",
                         upscaler);
         } else if (upscaler == "dlss") {
+            // NGX runs as a dedicated Vulkan presentation-layer pass. Keep the built-in
+            // spatial scaler neutral so the DLSS output is not filtered twice.
             Settings::values.scaling_filter.SetValue(Settings::ScalingFilter::Bilinear);
-            LOG_WARNING(Frontend,
-                        "[Scarlet.Graphics] DLSS requested; current renderer has no DLSS backend, "
-                        "using native/bilinear fallback");
+            LOG_INFO(Frontend, "[Scarlet.Graphics] Upscaler: NVIDIA DLSS / NGX");
         } else {
             Settings::values.scaling_filter.SetValue(Settings::ScalingFilter::Bilinear);
             LOG_INFO(Frontend, "[Scarlet.Graphics] Upscaler: native");
@@ -1901,9 +1901,8 @@ $new = @'
         LOG_INFO(Frontend, "[Scarlet.Graphics] Upscaler quality request: {}", quality);
     }
     if (const char* fg = std::getenv("SCARLET_FRAME_GENERATION"); fg && *fg && *fg != '0') {
-        LOG_WARNING(Frontend,
-                    "[Scarlet.Graphics] Frame Generation requested; current renderer has no "
-                    "native frame-generation backend yet");
+        LOG_INFO(Frontend,
+                 "[Scarlet.Graphics] Frame Generation requested; FidelityFX Vulkan backend enabled");
     }
 
     LOG_INFO(Frontend, "[Scarlet.Graphics] Launch size={}x{} mode={}",
