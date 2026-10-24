@@ -31,6 +31,27 @@ $preservedUser = Join-Path $repoRoot 'build\scarlet-package-user-preserve'
 if (Test-Path $preservedUser) {
     Remove-Item $preservedUser -Recurse -Force
 }
+
+# A running launcher keeps its executable mapped and older builds also kept the
+# background JPG open through GDI+. Stop only the launcher that belongs to this
+# package before replacing the package contents.
+$packageLauncher = Join-Path $OutputDir 'ScarletLauncher.exe'
+Get-Process -Name 'ScarletLauncher' -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+        if ($_.Path -and
+            [string]::Equals([IO.Path]::GetFullPath($_.Path),
+                             [IO.Path]::GetFullPath($packageLauncher),
+                             [StringComparison]::OrdinalIgnoreCase)) {
+            Write-Host '[Scarlet PC] Closing the running launcher so the package can be updated.' -ForegroundColor Yellow
+            Stop-Process -Id $_.Id -Force
+            $_.WaitForExit()
+        }
+    }
+    catch {
+        # If Windows denies querying a different process, leave it alone.
+    }
+}
+
 if (Test-Path $OutputDir) {
     $existingUser = Join-Path $OutputDir 'user'
     if (Test-Path $existingUser -PathType Container) {
