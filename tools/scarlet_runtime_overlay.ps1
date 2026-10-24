@@ -1163,7 +1163,7 @@ Replace-Literal 'src\core\hle\service\vi\conductor.cpp' $old.Trim() $new.Trim()
 
 # Scarlet Launcher: external DLC files can be supplied repeatedly alongside the explicit base/update pair.
 # Patch only the --content-probe help line so whitespace/alignment changes upstream do not break the build.
-$pattern = '(?m)^([ \t]*)"--content-probe[ \t]+Verify that pair and exit without a window or game\\n"$'
+$pattern = '([ \t]*)"--content-probe[ \t]+Verify that pair and exit without a window or game\\n"'
 $replacement = '$1"--content-dlc         Read-only matching DLC NSP/XCI (repeatable)\n"' + "`n" +
                '$1"--content-probe       Verify that pair and exit without a window or game\n"'
 Replace-RegexOnce 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $pattern $replacement
@@ -2078,12 +2078,6 @@ CollectPhysicalMemoryInfo();
 Replace-Literal 'src\video_core\vulkan_common\vulkan_device.cpp' $old.Trim() $new.Trim()
 
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
-
-$replacement = @'
-$1"--content-dlc         Read-only matching DLC NSP/XCI (repeatable)\n"
-$1"--content-probe       Verify that pair and exit without a window or game\n"
-'@
-Replace-RegexOnce 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $pattern $replacement.TrimEnd()
 
 $old = @'
     std::optional<std::string> explicit_content_base;
