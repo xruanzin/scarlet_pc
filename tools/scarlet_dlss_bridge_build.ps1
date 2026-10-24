@@ -38,13 +38,21 @@ if ($LASTEXITCODE -ne 0) { throw 'Scarlet DLSS bridge CMake configure failed.' }
 & cmake --build $BuildDir --config Release --parallel 1
 if ($LASTEXITCODE -ne 0) { throw 'Scarlet DLSS bridge build failed.' }
 
-$bridge = Get-ChildItem $BuildDir -Recurse -File -Filter 'ScarletDlssBridge.dll' |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $bridge) { throw 'DLSS bridge build succeeded but ScarletDlssBridge.dll was not found.' }
-
 $stage = Join-Path $BuildDir 'stage'
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
-Copy-Item $bridge.FullName (Join-Path $stage 'ScarletDlssBridge.dll') -Force
+
+$bridge = Get-ChildItem $BuildDir -Recurse -File -Filter 'ScarletDlssBridge.dll' |
+    Where-Object { $_.DirectoryName -ne $stage } |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $bridge) { throw 'DLSS bridge build succeeded but ScarletDlssBridge.dll was not found outside the stage directory.' }
+
+$stageBridge = Join-Path $stage 'ScarletDlssBridge.dll'
+if (-not [string]::Equals(
+        [IO.Path]::GetFullPath($bridge.FullName),
+        [IO.Path]::GetFullPath($stageBridge),
+        [StringComparison]::OrdinalIgnoreCase)) {
+    Copy-Item $bridge.FullName $stageBridge -Force
+}
 Copy-Item (Join-Path $SdkRoot 'lib\Windows_x86_64\rel\nvngx_dlss.dll') (Join-Path $stage 'nvngx_dlss.dll') -Force
 Copy-Item (Join-Path $SdkRoot 'LICENSE.txt') (Join-Path $stage 'NVIDIA-DLSS-LICENSE.txt') -Force
 
