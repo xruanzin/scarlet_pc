@@ -163,6 +163,20 @@ else {
 # Downloads are cached under third_party and only missing files are fetched.
 & (Join-Path $PSScriptRoot 'scarlet_fetch_fsr4_v07_assets.ps1') -Tiers both
 
+if ([string]::IsNullOrWhiteSpace($LauncherBackgroundPath)) {
+    $downloads = Join-Path $env:USERPROFILE 'Downloads'
+    if (Test-Path $downloads -PathType Container) {
+        $autoBackground = Get-ChildItem $downloads -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like 'Pokemon-Scarlet-Violet-Trailer_10-06-22*.jpg' } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if ($autoBackground) {
+            $LauncherBackgroundPath = $autoBackground.FullName
+            Write-Host "[Scarlet PC] Using launcher background: $LauncherBackgroundPath" -ForegroundColor Green
+        }
+    }
+}
+
 $launcherArgs = @{}
 if (-not [string]::IsNullOrWhiteSpace($resolvedIcon)) {
     $launcherArgs.IconPath = $resolvedIcon
