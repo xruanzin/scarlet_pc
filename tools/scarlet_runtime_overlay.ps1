@@ -1539,6 +1539,65 @@ $new = @'
 '@
 Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $new.Trim()
 
+
+# Feed each completed Scarlet frame into the FidelityFX frame-generation prepare pass.
+$old = @'
+#include "common/settings.h"
+#include "common/thread.h"
+'@
+$new = @'
+#include <algorithm>
+#include <cstdlib>
+
+#include "common/settings.h"
+#include "common/thread.h"
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_present_manager.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+#include "core/frontend/emu_window.h"
+#include "video_core/renderer_vulkan/vk_present_manager.h"
+'@
+$new = @'
+#include "core/frontend/emu_window.h"
+#include "video_core/renderer_vulkan/scarlet_ffx_framegen.h"
+#include "video_core/renderer_vulkan/vk_present_manager.h"
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_present_manager.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    const VkImage image{swapchain.CurrentImage()};
+    const VkExtent2D extent = swapchain.GetExtent();
+    const std::array pre_barriers{
+'@
+$new = @'
+    const VkImage image{swapchain.CurrentImage()};
+    const VkExtent2D extent = swapchain.GetExtent();
+
+    if (swapchain.FrameGenerationActive()) {
+        float frame_ms = 1000.0f / 60.0f;
+        if (const char* value = std::getenv("SCARLET_TARGET_FPS"); value && *value) {
+            const int fps = std::clamp(std::atoi(value), 30, 240);
+            frame_ms = 1000.0f / static_cast<float>(fps);
+        }
+        if (!ScarletPC::Graphics::FidelityFxFrameGeneration::Get().PrepareCompatibilityFrame(
+                device.GetPhysical(), *device.GetLogical(), *cmdbuf, *frame->image,
+                swapchain.GetImageFormat(), VkExtent2D{frame->width, frame->height},
+                frame_ms)) {
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                LOG_WARNING(Render_Vulkan,
+                            "[Scarlet.FSR3] Prepare failed; FidelityFX swapchain will present "
+                            "the real frames without interpolation");
+            }
+        }
+    }
+
+    const std::array pre_barriers{
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_present_manager.cpp' $old.Trim() $new.Trim()
+
 # Scarlet Launcher graphics/window contract. Unsupported future algorithms remain selectable,
 # but the runtime logs and uses an explicit fallback rather than pretending they are active.
 $old = @'
