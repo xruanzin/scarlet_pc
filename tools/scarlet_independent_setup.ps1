@@ -10,6 +10,8 @@ param(
 
     [string]$IconPath,
 
+    [string]$LauncherBackgroundPath,
+
     [ValidateRange(1, 4)]
     [int]$Jobs = 1,
 
@@ -164,6 +166,9 @@ else {
 $launcherArgs = @{}
 if (-not [string]::IsNullOrWhiteSpace($resolvedIcon)) {
     $launcherArgs.IconPath = $resolvedIcon
+}
+if (-not [string]::IsNullOrWhiteSpace($LauncherBackgroundPath)) {
+    $launcherArgs.BackgroundPath = (Resolve-Path $LauncherBackgroundPath).Path
 }
 & (Join-Path $PSScriptRoot 'scarlet_launcher_build.ps1') @launcherArgs
 & (Join-Path $PSScriptRoot 'scarlet_independent_package.ps1')
