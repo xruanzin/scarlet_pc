@@ -1942,18 +1942,56 @@ $new = @'
         Settings::values.aspect_ratio.SetValue(
             ratio_16_10 ? Settings::AspectRatio::R16_10 : Settings::AspectRatio::R16_9);
 
+        // The launcher resolution is the OUTPUT resolution. Pick a render scale separately.
+        // With an upscaler enabled, reduce the guest render resolution according to the
+        // selected quality preset instead of accidentally supersampling it.
+        float desired_scale = static_cast<float>(scarlet_width) / 1920.0f;
+        const char* resolution_upscaler = std::getenv("SCARLET_UPSCALER");
+        const bool uses_upscaler =
+            resolution_upscaler && *resolution_upscaler &&
+            std::string_view{resolution_upscaler} != "native";
+        if (uses_upscaler) {
+            float upscale_ratio = 1.5f; // Quality
+            if (const char* quality = std::getenv("SCARLET_UPSCALER_QUALITY");
+                quality && *quality) {
+                const std::string_view preset{quality};
+                if (preset == "balanced") {
+                    upscale_ratio = 1.7f;
+                } else if (preset == "performance") {
+                    upscale_ratio = 2.0f;
+                } else if (preset == "ultra_performance") {
+                    upscale_ratio = 3.0f;
+                }
+            }
+            desired_scale /= upscale_ratio;
+        }
+
         Settings::ResolutionSetup setup = Settings::ResolutionSetup::Res1X;
-        if (scarlet_width >= 3800) {
-            setup = Settings::ResolutionSetup::Res3X;
-        } else if (scarlet_width >= 2500) {
-            setup = Settings::ResolutionSetup::Res2X;
-        } else if (scarlet_width >= 1900) {
-            setup = Settings::ResolutionSetup::Res3_2X;
-        } else if (scarlet_width >= 1550) {
+        if (desired_scale < 0.375f) {
+            setup = Settings::ResolutionSetup::Res1_4X;
+        } else if (desired_scale < 0.625f) {
+            setup = Settings::ResolutionSetup::Res1_2X;
+        } else if (desired_scale < 0.875f) {
+            setup = Settings::ResolutionSetup::Res3_4X;
+        } else if (desired_scale < 1.125f) {
+            setup = Settings::ResolutionSetup::Res1X;
+        } else if (desired_scale < 1.375f) {
             setup = Settings::ResolutionSetup::Res5_4X;
+        } else if (desired_scale < 1.75f) {
+            setup = Settings::ResolutionSetup::Res3_2X;
+        } else if (desired_scale < 2.5f) {
+            setup = Settings::ResolutionSetup::Res2X;
+        } else if (desired_scale < 3.5f) {
+            setup = Settings::ResolutionSetup::Res3X;
+        } else {
+            setup = Settings::ResolutionSetup::Res4X;
         }
         Settings::values.resolution_setup.SetValue(setup);
         Settings::UpdateRescalingInfo();
+        LOG_INFO(Frontend,
+                 "[Scarlet.Graphics] Output={}x{} internal_scale_request={:.3f} upscaler={}",
+                 scarlet_width, scarlet_height, desired_scale,
+                 resolution_upscaler && *resolution_upscaler ? resolution_upscaler : "native");
     }
 
     const char* scarlet_upscaler = std::getenv("SCARLET_UPSCALER");
