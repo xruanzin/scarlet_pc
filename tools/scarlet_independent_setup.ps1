@@ -104,6 +104,10 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedIcon)) {
 }
 & (Join-Path $PSScriptRoot 'scarlet_runtime_build.ps1') @runtimeArgs
 
+# Build the optional NVIDIA NGX sidecar after runtime source exists (it reuses Vulkan-Headers).
+# This does not make DLSS mandatory: unsupported GPUs/drivers simply leave the bridge inactive.
+& (Join-Path $PSScriptRoot 'scarlet_dlss_bridge_build.ps1')
+
 $launcherArgs = @{}
 if (-not [string]::IsNullOrWhiteSpace($resolvedIcon)) {
     $launcherArgs.IconPath = $resolvedIcon
