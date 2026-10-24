@@ -1010,7 +1010,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     g_ini_path = g_exe_dir / L"user" / L"config" / L"scarlet_launcher.ini";
     const fs::path background = g_exe_dir / L"assets" / L"scarlet_launcher_background.jpg";
     if (fs::is_regular_file(background)) {
-        g_background = std::make_unique<Image>(background.c_str());
+        // GDI+ Image(path) keeps the source file open for the lifetime of the Image.
+        // Clone it immediately so setup/packaging can replace the background while
+        // the launcher is running.
+        Image file_image(background.c_str());
+        if (file_image.GetLastStatus() == Ok) {
+            g_background.reset(file_image.Clone());
+        }
     }
 
     g_edit_brush = CreateSolidBrush(RGB(30, 25, 31));
