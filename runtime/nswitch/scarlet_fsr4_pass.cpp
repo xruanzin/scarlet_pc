@@ -157,7 +157,7 @@ VkImageBlit FullBlit(VkExtent2D source, VkExtent2D destination) {
         .srcOffsets =
             {
                 {0, 0, 0},
-                {static_cast<s32>(source.width), static_cast<s32>(source.height), 1},
+                {static_cast<std::int32_t>(source.width), static_cast<std::int32_t>(source.height), 1},
             },
         .dstSubresource =
             {
@@ -169,7 +169,7 @@ VkImageBlit FullBlit(VkExtent2D source, VkExtent2D destination) {
         .dstOffsets =
             {
                 {0, 0, 0},
-                {static_cast<s32>(destination.width), static_cast<s32>(destination.height), 1},
+                {static_cast<std::int32_t>(destination.width), static_cast<std::int32_t>(destination.height), 1},
             },
     };
 }
@@ -240,7 +240,7 @@ struct ScarletFsr4Pass::Impl {
             if (ReadFile(path, bytes)) {
                 return true;
             }
-            Fail("missing FSR4 asset: " + path.u8string());
+            Fail("missing FSR4 asset: " + path.string());
             return false;
         };
 
