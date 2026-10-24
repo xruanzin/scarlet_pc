@@ -43,7 +43,9 @@ foreach ($name in @(
     'scarlet_dlss_pass.h',
     'scarlet_dlss_pass.cpp',
     'scarlet_ffx_upscale.h',
-    'scarlet_ffx_upscale.cpp'
+    'scarlet_ffx_upscale.cpp',
+    'scarlet_fsr4_pass.h',
+    'scarlet_fsr4_pass.cpp'
 )) {
     $src = Join-Path $graphicsSourceDir $name
     $dst = Join-Path $graphicsTargetDir $name
@@ -64,6 +66,19 @@ if (-not (Test-Path (Join-Path $ffxIncludeDir 'ffx_api\ffx_framegeneration.h') -
     throw "FidelityFX headers are missing. Run tools\scarlet_fetch_fidelityfx.ps1 first."
 }
 $ffxIncludeCmake = $ffxIncludeDir.Replace('\', '/')
+
+$fsrVulkanDir = Join-Path $repoRoot 'third_party\FSR-Vulkan'
+$fsrVulkanHeader = Join-Path $fsrVulkanDir 'include\ffx_vk_fsr4_v07.h'
+if (-not (Test-Path $fsrVulkanHeader -PathType Leaf)) {
+    throw "FireBurn FSR-Vulkan provider is missing. Run git submodule update --init --recursive."
+}
+$fsrVulkanCmake = $fsrVulkanDir.Replace('\', '/')
+
+$vulkanImportLib = Join-Path $repoRoot 'build\tools\vulkan-loader-import\vulkan-1.lib'
+if (-not (Test-Path $vulkanImportLib -PathType Leaf)) {
+    throw "Vulkan loader import library is missing. Run tools\scarlet_vulkan_loader_import.ps1 first."
+}
+$vulkanImportCmake = $vulkanImportLib.Replace('\', '/')
 
 
 function Expand-Legacy([string]$Text) {
@@ -170,12 +185,30 @@ $new = @'
     renderer_vulkan/scarlet_dlss_pass.h
     renderer_vulkan/scarlet_ffx_upscale.cpp
     renderer_vulkan/scarlet_ffx_upscale.h
+    renderer_vulkan/scarlet_fsr4_pass.cpp
+    renderer_vulkan/scarlet_fsr4_pass.h
     renderer_vulkan/vk_texture_cache.cpp
 '@
 Replace-Literal 'src\video_core\CMakeLists.txt' $old.Trim() $new.Trim()
 
+$old = '    renderer_vulkan/scarlet_fsr4_pass.h'
+$new = $old + [Environment]::NewLine +
+    '    "' + $fsrVulkanCmake + '/src/ffx_vk_fsr4_v07.c"' + [Environment]::NewLine +
+    '    "' + $fsrVulkanCmake + '/src/ffx_vk_fsr4_v07_provider.c"' + [Environment]::NewLine +
+    '    "' + $fsrVulkanCmake + '/src/ffx_vk_fsr4_v07_assets.c"' + [Environment]::NewLine +
+    '    "' + $fsrVulkanCmake + '/src/ffx_vk_fsr4_v07_schedule.c"'
+Replace-Literal 'src\video_core\CMakeLists.txt' $old $new
+
 $old = 'target_include_directories(video_core PRIVATE ${HOST_SHADERS_INCLUDE})'
-$new = $old + [Environment]::NewLine + 'target_include_directories(video_core PRIVATE "' + $ffxIncludeCmake + '")'
+$new = $old + [Environment]::NewLine +
+    'target_include_directories(video_core PRIVATE "' + $ffxIncludeCmake + '")' +
+    [Environment]::NewLine +
+    'target_include_directories(video_core PRIVATE "' + $fsrVulkanCmake + '/include")'
+Replace-Literal 'src\video_core\CMakeLists.txt' $old $new
+
+$old = 'target_link_libraries(video_core PRIVATE sirit::sirit)'
+$new = $old + [Environment]::NewLine +
+    'target_link_libraries(video_core PRIVATE "' + $vulkanImportCmake + '")'
 Replace-Literal 'src\video_core\CMakeLists.txt' $old $new
 
 
@@ -1363,6 +1396,7 @@ $new = @'
 #include "video_core/renderer_vulkan/scarlet_dlss_client.h"
 #include "video_core/renderer_vulkan/scarlet_dlss_pass.h"
 #include "video_core/renderer_vulkan/scarlet_ffx_upscale.h"
+#include "video_core/renderer_vulkan/scarlet_fsr4_pass.h"
 #include "video_core/renderer_vulkan/vk_blit_screen.h"
 '@
 Replace-Literal 'src\video_core\renderer_vulkan\present\layer.cpp' $old.Trim() $new.Trim()
@@ -1378,6 +1412,7 @@ class RasterizerVulkan;
 class Scheduler;
 class ScarletDlssPass;
 class ScarletFfxUpscalePass;
+class ScarletFsr4Pass;
 
 class Layer final {
 '@
@@ -1393,6 +1428,7 @@ $new = @'
     std::variant<std::monostate, FXAA, SMAA> anti_alias{};
     std::unique_ptr<ScarletDlssPass> dlss_filter{};
     std::unique_ptr<ScarletFfxUpscalePass> ffx_upscale_filter{};
+    std::unique_ptr<ScarletFsr4Pass> fsr4_filter{};
     std::variant<std::monostate, SGSR, FSR> sr_filter{};
 '@
 Replace-Literal 'src\video_core\renderer_vulkan\present\layer.h' $old.Trim() $new.Trim()
@@ -1414,6 +1450,11 @@ $new = @'
          std::strcmp(scarlet_upscaler, "fsr31") == 0)) {
         ffx_upscale_filter = std::make_unique<ScarletFfxUpscalePass>(
             device, memory_allocator, image_count, output_size);
+    }
+    if (const char* scarlet_upscaler = std::getenv("SCARLET_UPSCALER");
+        scarlet_upscaler && std::strcmp(scarlet_upscaler, "fsr4") == 0) {
+        fsr4_filter = std::make_unique<ScarletFsr4Pass>(
+            device, memory_allocator, scheduler, image_count, output_size);
     }
     if (filters.get_scaling_filter() == Settings::ScalingFilter::Fsr) {
         sr_filter.emplace<FSR>(device, memory_allocator, image_count, output_size);
@@ -1443,6 +1484,14 @@ $new = @'
                               GetFormat(framebuffer), render_extent);
         if (dlss_view != source_image_view) {
             source_image_view = dlss_view;
+            crop_rect = {0, 0, 1, 1};
+        }
+    } else if (fsr4_filter && fsr4_filter->Ready()) {
+        const VkImageView fsr4_view =
+            fsr4_filter->Draw(device, scheduler, image_index, source_image,
+                              source_image_view, GetFormat(framebuffer), render_extent);
+        if (fsr4_view != source_image_view) {
+            source_image_view = fsr4_view;
             crop_rect = {0, 0, 1, 1};
         }
     } else if (ffx_upscale_filter && ffx_upscale_filter->Ready()) {
