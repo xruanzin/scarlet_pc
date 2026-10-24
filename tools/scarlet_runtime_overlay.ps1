@@ -39,7 +39,9 @@ foreach ($name in @(
     'scarlet_ffx_framegen.h',
     'scarlet_ffx_framegen.cpp',
     'scarlet_dlss_client.h',
-    'scarlet_dlss_client.cpp'
+    'scarlet_dlss_client.cpp',
+    'scarlet_dlss_pass.h',
+    'scarlet_dlss_pass.cpp'
 )) {
     $src = Join-Path $graphicsSourceDir $name
     $dst = Join-Path $graphicsTargetDir $name
@@ -162,6 +164,8 @@ $new = @'
     renderer_vulkan/scarlet_dlss_bridge.h
     renderer_vulkan/scarlet_dlss_client.cpp
     renderer_vulkan/scarlet_dlss_client.h
+    renderer_vulkan/scarlet_dlss_pass.cpp
+    renderer_vulkan/scarlet_dlss_pass.h
     renderer_vulkan/vk_texture_cache.cpp
 '@
 Replace-Literal 'src\video_core\CMakeLists.txt' $old.Trim() $new.Trim()
@@ -1317,6 +1321,99 @@ $new = @'
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
+
+
+
+# Route the original Scarlet display layer through NGX before the normal window-adaptation
+# pass. This is a real DLSS SR evaluation; neutral depth/motion are the compatibility baseline.
+$old = @'
+#include "video_core/renderer_vulkan/present/smaa.h"
+#include "video_core/renderer_vulkan/present/util.h"
+#include "video_core/renderer_vulkan/vk_blit_screen.h"
+'@
+$new = @'
+#include "video_core/renderer_vulkan/present/smaa.h"
+#include "video_core/renderer_vulkan/present/util.h"
+#include "video_core/renderer_vulkan/scarlet_dlss_client.h"
+#include "video_core/renderer_vulkan/scarlet_dlss_pass.h"
+#include "video_core/renderer_vulkan/vk_blit_screen.h"
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\present\layer.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+class RasterizerVulkan;
+class Scheduler;
+
+class Layer final {
+'@
+$new = @'
+class RasterizerVulkan;
+class Scheduler;
+class ScarletDlssPass;
+
+class Layer final {
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\present\layer.h' $old.Trim() $new.Trim()
+
+$old = @'
+    Settings::AntiAliasing anti_alias_setting{};
+    std::variant<std::monostate, FXAA, SMAA> anti_alias{};
+    std::variant<std::monostate, SGSR, FSR> sr_filter{};
+'@
+$new = @'
+    Settings::AntiAliasing anti_alias_setting{};
+    std::variant<std::monostate, FXAA, SMAA> anti_alias{};
+    std::unique_ptr<ScarletDlssPass> dlss_filter{};
+    std::variant<std::monostate, SGSR, FSR> sr_filter{};
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\present\layer.h' $old.Trim() $new.Trim()
+
+$old = @'
+    if (filters.get_scaling_filter() == Settings::ScalingFilter::Fsr) {
+        sr_filter.emplace<FSR>(device, memory_allocator, image_count, output_size);
+    } else if (filters.get_scaling_filter() == Settings::ScalingFilter::Sgsr) {
+'@
+$new = @'
+    if (ScarletPC::Graphics::DlssClient::Get().Requested() &&
+        ScarletPC::Graphics::DlssClient::Get().IsInitialized()) {
+        dlss_filter =
+            std::make_unique<ScarletDlssPass>(device, memory_allocator, image_count, output_size);
+    }
+    if (filters.get_scaling_filter() == Settings::ScalingFilter::Fsr) {
+        sr_filter.emplace<FSR>(device, memory_allocator, image_count, output_size);
+    } else if (filters.get_scaling_filter() == Settings::ScalingFilter::Sgsr) {
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\present\layer.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    auto crop_rect = Tegra::NormalizeCrop(framebuffer, texture_width, texture_height);
+    const VkExtent2D render_extent{
+        .width = scaled_width,
+        .height = scaled_height,
+    };
+
+    if (auto* fsr = std::get_if<FSR>(&sr_filter)) {
+'@
+$new = @'
+    auto crop_rect = Tegra::NormalizeCrop(framebuffer, texture_width, texture_height);
+    const VkExtent2D render_extent{
+        .width = scaled_width,
+        .height = scaled_height,
+    };
+
+    if (dlss_filter && dlss_filter->Ready()) {
+        const VkImageView dlss_view =
+            dlss_filter->Draw(device, scheduler, image_index, source_image, source_image_view,
+                              GetFormat(framebuffer), render_extent);
+        if (dlss_view != source_image_view) {
+            source_image_view = dlss_view;
+            crop_rect = {0, 0, 1, 1};
+        }
+    }
+
+    if (auto* fsr = std::get_if<FSR>(&sr_filter)) {
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\present\layer.cpp' $old.Trim() $new.Trim()
 
 
 # Optional NVIDIA NGX/DLSS integration. The bridge supplies extension requirements before
