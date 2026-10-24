@@ -41,7 +41,9 @@ foreach ($name in @(
     'scarlet_dlss_client.h',
     'scarlet_dlss_client.cpp',
     'scarlet_dlss_pass.h',
-    'scarlet_dlss_pass.cpp'
+    'scarlet_dlss_pass.cpp',
+    'scarlet_ffx_upscale.h',
+    'scarlet_ffx_upscale.cpp'
 )) {
     $src = Join-Path $graphicsSourceDir $name
     $dst = Join-Path $graphicsTargetDir $name
@@ -166,6 +168,8 @@ $new = @'
     renderer_vulkan/scarlet_dlss_client.h
     renderer_vulkan/scarlet_dlss_pass.cpp
     renderer_vulkan/scarlet_dlss_pass.h
+    renderer_vulkan/scarlet_ffx_upscale.cpp
+    renderer_vulkan/scarlet_ffx_upscale.h
     renderer_vulkan/vk_texture_cache.cpp
 '@
 Replace-Literal 'src\video_core\CMakeLists.txt' $old.Trim() $new.Trim()
@@ -1326,6 +1330,16 @@ Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
 
 $old = @'
+#include <variant>
+'@
+$new = @'
+#include <cstdlib>
+#include <cstring>
+#include <variant>
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\present\layer.cpp' $old.Trim() $new.Trim()
+
+$old = @'
 #include <optional>
 #include <variant>
 '@
@@ -1348,6 +1362,7 @@ $new = @'
 #include "video_core/renderer_vulkan/present/util.h"
 #include "video_core/renderer_vulkan/scarlet_dlss_client.h"
 #include "video_core/renderer_vulkan/scarlet_dlss_pass.h"
+#include "video_core/renderer_vulkan/scarlet_ffx_upscale.h"
 #include "video_core/renderer_vulkan/vk_blit_screen.h"
 '@
 Replace-Literal 'src\video_core\renderer_vulkan\present\layer.cpp' $old.Trim() $new.Trim()
@@ -1362,6 +1377,7 @@ $new = @'
 class RasterizerVulkan;
 class Scheduler;
 class ScarletDlssPass;
+class ScarletFfxUpscalePass;
 
 class Layer final {
 '@
@@ -1376,6 +1392,7 @@ $new = @'
     Settings::AntiAliasing anti_alias_setting{};
     std::variant<std::monostate, FXAA, SMAA> anti_alias{};
     std::unique_ptr<ScarletDlssPass> dlss_filter{};
+    std::unique_ptr<ScarletFfxUpscalePass> ffx_upscale_filter{};
     std::variant<std::monostate, SGSR, FSR> sr_filter{};
 '@
 Replace-Literal 'src\video_core\renderer_vulkan\present\layer.h' $old.Trim() $new.Trim()
@@ -1390,6 +1407,13 @@ $new = @'
         ScarletPC::Graphics::DlssClient::Get().IsInitialized()) {
         dlss_filter =
             std::make_unique<ScarletDlssPass>(device, memory_allocator, image_count, output_size);
+    }
+    if (const char* scarlet_upscaler = std::getenv("SCARLET_UPSCALER");
+        scarlet_upscaler &&
+        (std::strcmp(scarlet_upscaler, "fsr3") == 0 ||
+         std::strcmp(scarlet_upscaler, "fsr31") == 0)) {
+        ffx_upscale_filter = std::make_unique<ScarletFfxUpscalePass>(
+            device, memory_allocator, image_count, output_size);
     }
     if (filters.get_scaling_filter() == Settings::ScalingFilter::Fsr) {
         sr_filter.emplace<FSR>(device, memory_allocator, image_count, output_size);
@@ -1419,6 +1443,14 @@ $new = @'
                               GetFormat(framebuffer), render_extent);
         if (dlss_view != source_image_view) {
             source_image_view = dlss_view;
+            crop_rect = {0, 0, 1, 1};
+        }
+    } else if (ffx_upscale_filter && ffx_upscale_filter->Ready()) {
+        const VkImageView ffx_view =
+            ffx_upscale_filter->Draw(device, scheduler, image_index, source_image,
+                                     source_image_view, GetFormat(framebuffer), render_extent);
+        if (ffx_view != source_image_view) {
+            source_image_view = ffx_view;
             crop_rect = {0, 0, 1, 1};
         }
     }
@@ -1881,11 +1913,15 @@ $new = @'
         if (upscaler == "fsr1") {
             Settings::values.scaling_filter.SetValue(Settings::ScalingFilter::Fsr);
             LOG_INFO(Frontend, "[Scarlet.Graphics] Upscaler: FSR 1");
-        } else if (upscaler == "fsr3" || upscaler == "fsr31" || upscaler == "fsr4") {
-            Settings::values.scaling_filter.SetValue(Settings::ScalingFilter::Fsr);
+        } else if (upscaler == "fsr3" || upscaler == "fsr31") {
+            Settings::values.scaling_filter.SetValue(Settings::ScalingFilter::Bilinear);
+            LOG_INFO(Frontend, "[Scarlet.Graphics] Upscaler: {} temporal / FidelityFX",
+                     upscaler == "fsr31" ? "FSR 3.1" : "FSR 3");
+        } else if (upscaler == "fsr4") {
+            Settings::values.scaling_filter.SetValue(Settings::ScalingFilter::Bilinear);
             LOG_WARNING(Frontend,
-                        "[Scarlet.Graphics] {} requested; current renderer uses FSR 1 fallback",
-                        upscaler);
+                        "[Scarlet.Graphics] FSR 4 requested; experimental Vulkan v07 provider "
+                        "requires its model asset bundle");
         } else if (upscaler == "dlss") {
             // NGX runs as a dedicated Vulkan presentation-layer pass. Keep the built-in
             // spatial scaler neutral so the DLSS output is not filtered twice.
