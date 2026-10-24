@@ -141,6 +141,13 @@ struct FidelityFxFrameGeneration::Impl {
 
     ffxContext swapchain_context{};
     VkSwapchainKHR swapchain{};
+    // FidelityFX create descriptors may be retained by the runtime until the
+    // corresponding context is destroyed. Keep every create chain in Impl.
+    VkSwapchainKHR swapchain_storage{};
+    ffxCreateContextDescFrameGenerationSwapChainVK swapchain_desc{};
+    ffxCreateBackendVKDesc framegen_backend_desc{};
+    ffxCreateContextDescFrameGenerationHudless framegen_hudless_desc{};
+    ffxCreateContextDescFrameGeneration framegen_desc{};
     PFN_vkGetSwapchainImagesKHR get_images{};
     PFN_vkAcquireNextImageKHR acquire{};
     PFN_vkQueuePresentKHR present{};
@@ -308,6 +315,9 @@ struct FidelityFxFrameGeneration::Impl {
         framegen_context = nullptr;
         framegen_size = {};
         framegen_format = VK_FORMAT_UNDEFINED;
+        framegen_backend_desc = {};
+        framegen_hudless_desc = {};
+        framegen_desc = {};
     }
 
     bool EnsureFramegenContext(VkExtent2D size, VkFormat color_format) {
@@ -317,31 +327,36 @@ struct FidelityFxFrameGeneration::Impl {
         }
         DestroyFramegenContext();
 
-        ffxCreateBackendVKDesc backend{};
-        backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
-        backend.vkDevice = device;
-        backend.vkPhysicalDevice = physical;
-        backend.vkDeviceProcAddr = vk.get_device_proc;
+        framegen_backend_desc = {};
+        framegen_backend_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
+        framegen_backend_desc.vkDevice = device;
+        framegen_backend_desc.vkPhysicalDevice = physical;
+        framegen_backend_desc.vkDeviceProcAddr = vk.get_device_proc;
 
-        ffxCreateContextDescFrameGenerationHudless hudless_desc{};
-        hudless_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_HUDLESS;
-        hudless_desc.hudlessBackBufferFormat = ffxApiGetSurfaceFormatVK(color_format);
+        framegen_hudless_desc = {};
+        framegen_hudless_desc.header.type =
+            FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_HUDLESS;
+        framegen_hudless_desc.hudlessBackBufferFormat =
+            ffxApiGetSurfaceFormatVK(color_format);
 
-        ffxCreateContextDescFrameGeneration desc{};
-        desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
-        desc.header.pNext = &backend.header;
-        backend.header.pNext = &hudless_desc.header;
+        framegen_desc = {};
+        framegen_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
+        framegen_desc.header.pNext = &framegen_backend_desc.header;
+        framegen_backend_desc.header.pNext = &framegen_hudless_desc.header;
         // Compatibility mode deliberately keeps all FFX work on the existing queue.
         // This avoids requesting extra Vulkan queues from the runtime before that path
         // has been validated on AMD integrated GPUs.
-        desc.flags = 0;
-        desc.displaySize = {size.width, size.height};
-        desc.maxRenderSize = {size.width, size.height};
-        desc.backBufferFormat = ffxApiGetSurfaceFormatVK(color_format);
+        framegen_desc.flags = 0;
+        framegen_desc.displaySize = {size.width, size.height};
+        framegen_desc.maxRenderSize = {size.width, size.height};
+        framegen_desc.backBufferFormat = ffxApiGetSurfaceFormatVK(color_format);
 
         ffxContext context{};
-        const auto rc = create(&context, &desc.header, nullptr);
+        const auto rc = create(&context, &framegen_desc.header, nullptr);
         if (rc != FFX_API_RETURN_OK) {
+            LOG_WARNING(Render_Vulkan,
+                        "[Scarlet.FSR3] FidelityFX frame-generation context creation failed (rc={})",
+                        rc);
             Fail("FidelityFX frame-generation context creation failed");
             return false;
         }
@@ -460,25 +475,33 @@ bool FidelityFxFrameGeneration::CreateSwapchain(
     impl->physical = physical_device;
     impl->device = device;
 
-    ffxCreateContextDescFrameGenerationSwapChainVK desc{};
-    desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FGSWAPCHAIN_VK;
-    desc.physicalDevice = physical_device;
-    desc.device = device;
-    desc.swapchain = swapchain;
-    desc.allocator = nullptr;
-    desc.createInfo = create_info;
-    desc.createInfo.oldSwapchain = *swapchain;
-    desc.gameQueue = ToFfxQueue(impl->graphics_queue, impl->graphics_family);
-    desc.asyncComputeQueue = desc.gameQueue;
-    desc.presentQueue = ToFfxQueue(impl->present_queue, impl->present_family);
-    desc.imageAcquireQueue = desc.presentQueue;
+    impl->swapchain_storage = *swapchain;
+    impl->swapchain_desc = {};
+    impl->swapchain_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FGSWAPCHAIN_VK;
+    impl->swapchain_desc.physicalDevice = physical_device;
+    impl->swapchain_desc.device = device;
+    impl->swapchain_desc.swapchain = &impl->swapchain_storage;
+    impl->swapchain_desc.allocator = nullptr;
+    impl->swapchain_desc.createInfo = create_info;
+    impl->swapchain_desc.createInfo.oldSwapchain = impl->swapchain_storage;
+    impl->swapchain_desc.gameQueue =
+        ToFfxQueue(impl->graphics_queue, impl->graphics_family);
+    impl->swapchain_desc.asyncComputeQueue = impl->swapchain_desc.gameQueue;
+    impl->swapchain_desc.presentQueue =
+        ToFfxQueue(impl->present_queue, impl->present_family);
+    impl->swapchain_desc.imageAcquireQueue = impl->swapchain_desc.presentQueue;
 
     ffxContext context{};
-    const auto rc = impl->create(&context, &desc.header, nullptr);
+    const auto rc = impl->create(&context, &impl->swapchain_desc.header, nullptr);
     if (rc != FFX_API_RETURN_OK) {
+        LOG_WARNING(Render_Vulkan,
+                    "[Scarlet.FSR3] FidelityFX frame-interpolation swapchain creation failed (rc={})",
+                    rc);
         impl->Fail("FidelityFX frame-interpolation swapchain creation failed");
+        impl->swapchain_storage = VK_NULL_HANDLE;
         return false;
     }
+    *swapchain = impl->swapchain_storage;
 
     ffxQueryDescSwapchainReplacementFunctionsVK query{};
     query.header.type = FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_FUNCTIONS_VK;
@@ -522,6 +545,8 @@ void FidelityFxFrameGeneration::DestroySwapchain() {
         impl->swapchain_context = nullptr;
     }
     impl->swapchain = VK_NULL_HANDLE;
+    impl->swapchain_storage = VK_NULL_HANDLE;
+    impl->swapchain_desc = {};
     impl->get_images = nullptr;
     impl->acquire = nullptr;
     impl->present = nullptr;
