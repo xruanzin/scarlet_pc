@@ -35,7 +35,12 @@ foreach ($name in @('scarlet_software_keyboard.h', 'scarlet_software_keyboard.cp
 # Project-owned FidelityFX adapter; the AMD SDK itself remains under third_party.
 $graphicsSourceDir = Join-Path $repoRoot 'runtime\nswitch'
 $graphicsTargetDir = Join-Path $SourceDir 'src\video_core\renderer_vulkan'
-foreach ($name in @('scarlet_ffx_framegen.h', 'scarlet_ffx_framegen.cpp')) {
+foreach ($name in @(
+    'scarlet_ffx_framegen.h',
+    'scarlet_ffx_framegen.cpp',
+    'scarlet_dlss_client.h',
+    'scarlet_dlss_client.cpp'
+)) {
     $src = Join-Path $graphicsSourceDir $name
     $dst = Join-Path $graphicsTargetDir $name
     if (-not (Test-Path $src -PathType Leaf)) {
@@ -43,6 +48,12 @@ foreach ($name in @('scarlet_ffx_framegen.h', 'scarlet_ffx_framegen.cpp')) {
     }
     Copy-Item $src $dst -Force
 }
+
+$dlssBridgeHeader = Join-Path $repoRoot 'runtime\nvidia\scarlet_dlss_bridge.h'
+if (-not (Test-Path $dlssBridgeHeader -PathType Leaf)) {
+    throw "Missing Scarlet DLSS bridge ABI header: $dlssBridgeHeader"
+}
+Copy-Item $dlssBridgeHeader (Join-Path $graphicsTargetDir 'scarlet_dlss_bridge.h') -Force
 
 $ffxIncludeDir = Join-Path $repoRoot 'third_party\FidelityFX-SDK\ffx-api\include'
 if (-not (Test-Path (Join-Path $ffxIncludeDir 'ffx_api\ffx_framegeneration.h') -PathType Leaf)) {
@@ -148,6 +159,9 @@ $new = @'
     renderer_vulkan/vk_swapchain.h
     renderer_vulkan/scarlet_ffx_framegen.cpp
     renderer_vulkan/scarlet_ffx_framegen.h
+    renderer_vulkan/scarlet_dlss_bridge.h
+    renderer_vulkan/scarlet_dlss_client.cpp
+    renderer_vulkan/scarlet_dlss_client.h
     renderer_vulkan/vk_texture_cache.cpp
 '@
 Replace-Literal 'src\video_core\CMakeLists.txt' $old.Trim() $new.Trim()
@@ -1302,6 +1316,99 @@ $new = @'
         if (explicit_content_probe) {
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+
+
+# Optional NVIDIA NGX/DLSS integration. The bridge supplies extension requirements before
+# Vulkan instance/device creation and is inert unless SCARLET_UPSCALER=dlss.
+$old = @'
+#include "core/frontend/emu_window.h"
+#include "video_core/vulkan_common/vulkan_instance.h"
+'@
+$new = @'
+#include "core/frontend/emu_window.h"
+#include "video_core/renderer_vulkan/scarlet_dlss_client.h"
+#include "video_core/vulkan_common/vulkan_instance.h"
+'@
+Replace-Literal 'src\video_core\vulkan_common\vulkan_instance.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    if (enable_validation && AreExtensionsSupported(dld, properties, std::array{VK_EXT_DEBUG_UTILS_EXTENSION_NAME}))
+        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    return extensions;
+'@
+$new = @'
+    if (enable_validation && AreExtensionsSupported(dld, properties, std::array{VK_EXT_DEBUG_UTILS_EXTENSION_NAME}))
+        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+    if (auto& dlss = ScarletPC::Graphics::DlssClient::Get(); dlss.Requested()) {
+        for (const auto& required : dlss.InstanceExtensions()) {
+            const auto available = std::ranges::find_if(properties, [&](const auto& property) {
+                return std::strcmp(required.extensionName, property.extensionName) == 0;
+            });
+            if (available == properties.end()) {
+                LOG_WARNING(Render_Vulkan,
+                            "[Scarlet.DLSS] Required Vulkan instance extension unavailable: {}",
+                            required.extensionName);
+                continue;
+            }
+            const auto duplicate = std::ranges::find_if(extensions, [&](const char* name) {
+                return std::strcmp(name, required.extensionName) == 0;
+            });
+            if (duplicate == extensions.end()) {
+                extensions.push_back(required.extensionName);
+            }
+        }
+    }
+    return extensions;
+'@
+Replace-Literal 'src\video_core\vulkan_common\vulkan_instance.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+#include "video_core/vulkan_common/vulkan_device.h"
+#include "video_core/vulkan_common/vulkan_wrapper.h"
+'@
+$new = @'
+#include "video_core/renderer_vulkan/scarlet_dlss_client.h"
+#include "video_core/vulkan_common/vulkan_device.h"
+#include "video_core/vulkan_common/vulkan_wrapper.h"
+'@
+Replace-Literal 'src\video_core\vulkan_common\vulkan_device.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    LOG_INFO(Render_Vulkan, "Graphics pipeline libraries: {}",
+             IsGraphicsPipelineLibrarySupported() ? "enabled" : "unavailable or disabled");
+
+    logical = vk::Device::Create(physical, queue_cis, ExtensionListForVulkan(loaded_extensions), first_next, dld);
+
+    graphics_queue = logical.GetQueue(graphics_family);
+'@
+$new = @'
+    LOG_INFO(Render_Vulkan, "Graphics pipeline libraries: {}",
+             IsGraphicsPipelineLibrarySupported() ? "enabled" : "unavailable or disabled");
+
+    if (auto& dlss = ScarletPC::Graphics::DlssClient::Get(); dlss.Requested()) {
+        for (const auto& required : dlss.DeviceExtensions(instance, physical)) {
+            if (!supported_extensions.contains(required.extensionName)) {
+                LOG_WARNING(Render_Vulkan,
+                            "[Scarlet.DLSS] Required Vulkan device extension unavailable: {}",
+                            required.extensionName);
+                continue;
+            }
+            loaded_extensions.insert(required.extensionName);
+        }
+    }
+
+    logical = vk::Device::Create(physical, queue_cis, ExtensionListForVulkan(loaded_extensions), first_next, dld);
+
+    if (auto& dlss = ScarletPC::Graphics::DlssClient::Get(); dlss.Requested()) {
+        (void)dlss.Initialize(instance, physical, *logical, dld.vkGetInstanceProcAddr,
+                              dld.vkGetDeviceProcAddr);
+    }
+
+    graphics_queue = logical.GetQueue(graphics_family);
+'@
+Replace-Literal 'src\video_core\vulkan_common\vulkan_device.cpp' $old.Trim() $new.Trim()
 
 
 # FidelityFX frame-generation swapchain plumbing.
