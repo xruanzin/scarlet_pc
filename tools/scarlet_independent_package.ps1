@@ -125,6 +125,17 @@ if (Test-Path $runtimeProvenance) {
     Copy-Item $runtimeProvenance (Join-Path $licensesOut 'runtime-provenance.json') -Force
 }
 
+# AMD FidelityFX SDK runtime used by the optional FSR 3 frame-generation path.
+$ffxRoot = Join-Path $repoRoot 'third_party\FidelityFX-SDK'
+$ffxDll = Join-Path $ffxRoot 'PrebuiltSignedDLL\amd_fidelityfx_vk.dll'
+$ffxLicense = Join-Path $ffxRoot 'LICENSE.txt'
+if (Test-Path $ffxDll -PathType Leaf) {
+    Copy-Item $ffxDll (Join-Path $OutputDir 'amd_fidelityfx_vk.dll') -Force
+}
+if (Test-Path $ffxLicense -PathType Leaf) {
+    Copy-Item $ffxLicense (Join-Path $licensesOut 'FidelityFX-SDK.txt') -Force
+}
+
 @'
 Scarlet PC
 
@@ -134,6 +145,7 @@ Player-facing layout:
   ScarletLauncher.exe        (recommended entry point)
   ScarletPC.exe              (game runtime)
   assets\scarlet_launcher_background.jpg
+  amd_fidelityfx_vk.dll        (optional FSR 3 frame generation runtime)
   aot\scarlet-main.dll
   aot\scarlet-rtld.dll
   aot\scarlet-multimedia.dll
