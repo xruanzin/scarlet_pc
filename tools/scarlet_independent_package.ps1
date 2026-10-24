@@ -136,6 +136,23 @@ if (Test-Path $ffxLicense -PathType Leaf) {
     Copy-Item $ffxLicense (Join-Path $licensesOut 'FidelityFX-SDK.txt') -Force
 }
 
+# Experimental FSR4 source-v07 provider/model bundle used by the GoW3 Vulkan reference path.
+$fsr4ProviderRoot = Join-Path $repoRoot 'third_party\FSR-Vulkan'
+$fsr4AssetsRoot = Join-Path $repoRoot 'third_party\fsr4-v07-assets'
+$fsr4AssetsOut = Join-Path $assetsOut 'fsr4-v07'
+if (Test-Path $fsr4AssetsRoot -PathType Container) {
+    New-Item -ItemType Directory -Force -Path $fsr4AssetsOut | Out-Null
+    Copy-Item (Join-Path $fsr4AssetsRoot '*') $fsr4AssetsOut -Recurse -Force
+}
+$fsr4ProviderLicense = Join-Path $fsr4ProviderRoot 'LICENSE.txt'
+$fsr4ProviderNotice = Join-Path $fsr4ProviderRoot 'NOTICE.md'
+if (Test-Path $fsr4ProviderLicense -PathType Leaf) {
+    Copy-Item $fsr4ProviderLicense (Join-Path $licensesOut 'FSR-Vulkan.txt') -Force
+}
+if (Test-Path $fsr4ProviderNotice -PathType Leaf) {
+    Copy-Item $fsr4ProviderNotice (Join-Path $licensesOut 'FSR-Vulkan-NOTICE.md') -Force
+}
+
 # Optional NVIDIA DLSS sidecar. The runtime loads this only when DLSS is selected.
 $dlssStage = Join-Path $repoRoot 'build\scarlet-dlss-bridge\stage'
 foreach ($name in @('ScarletDlssBridge.dll', 'nvngx_dlss.dll')) {
@@ -158,7 +175,8 @@ Player-facing layout:
   ScarletLauncher.exe        (recommended entry point)
   ScarletPC.exe              (game runtime)
   assets\scarlet_launcher_background.jpg
-  amd_fidelityfx_vk.dll        (FSR 3 frame generation runtime)
+  amd_fidelityfx_vk.dll        (FSR 3/3.1 + frame generation runtime)
+  assets\fsr4-v07               (experimental FSR4 v07 shaders/models)
   ScarletDlssBridge.dll         (optional NVIDIA NGX bridge)
   nvngx_dlss.dll                (NVIDIA DLSS runtime, when staged)
   aot\scarlet-main.dll
