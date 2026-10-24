@@ -1996,6 +1996,10 @@ $new = @'
         const bool uses_upscaler =
             resolution_upscaler && *resolution_upscaler &&
             std::string_view{resolution_upscaler} != "native";
+        const bool temporal_fsr =
+            resolution_upscaler &&
+            (std::string_view{resolution_upscaler} == "fsr3" ||
+             std::string_view{resolution_upscaler} == "fsr31");
         if (uses_upscaler) {
             float upscale_ratio = 1.5f; // Quality
             if (const char* quality = std::getenv("SCARLET_UPSCALER_QUALITY");
@@ -2010,6 +2014,16 @@ $new = @'
                 }
             }
             desired_scale /= upscale_ratio;
+
+            // The renderer only exposes discrete guest render scales. At 1366x768,
+            // FSR 3 Performance requests ~0.356X; nearest-value rounding selected
+            // the experimental 0.25X path, which effectively asks FSR to upscale
+            // roughly 2.8x and has proven unstable on the AMD Windows path.
+            // Temporal FSR needs at least the 0.5X guest target until arbitrary
+            // render extents are supported.
+            if (temporal_fsr) {
+                desired_scale = std::max(desired_scale, 0.5f);
+            }
         }
 
         Settings::ResolutionSetup setup = Settings::ResolutionSetup::Res1X;
