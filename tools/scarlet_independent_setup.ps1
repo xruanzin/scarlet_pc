@@ -108,6 +108,10 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedIcon)) {
 # This does not make DLSS mandatory: unsupported GPUs/drivers simply leave the bridge inactive.
 & (Join-Path $PSScriptRoot 'scarlet_dlss_bridge_build.ps1')
 
+# FSR4 v07 uses the same external model/shader bundle as the GoW3 Vulkan reference path.
+# Downloads are cached under third_party and only missing files are fetched.
+& (Join-Path $PSScriptRoot 'scarlet_fetch_fsr4_v07_assets.ps1') -Tiers both
+
 $launcherArgs = @{}
 if (-not [string]::IsNullOrWhiteSpace($resolvedIcon)) {
     $launcherArgs.IconPath = $resolvedIcon
