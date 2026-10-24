@@ -15,6 +15,8 @@ param(
 
     [switch]$RefreshRuntimeSource,
 
+    [switch]$RebuildRuntime,
+
     [switch]$RebuildAot
 )
 
@@ -95,14 +97,64 @@ if (-not [string]::IsNullOrWhiteSpace($IconPath)) {
     }
 }
 
-$runtimeArgs = @{
-    Jobs = $Jobs
-    RefreshSource = $RefreshRuntimeSource
+$runtimeStage = Join-Path $repoRoot 'build\scarlet-runtime\scarlet-stage'
+$runtimeExe = Join-Path $runtimeStage 'ScarletPC.exe'
+$runtimeManifest = Join-Path $runtimeStage 'scarlet_runtime_manifest.json'
+
+$runtimeInputs = [System.Collections.Generic.List[string]]::new()
+foreach ($path in @(
+    (Join-Path $PSScriptRoot 'scarlet_runtime_build.ps1'),
+    (Join-Path $PSScriptRoot 'scarlet_runtime_overlay.ps1'),
+    (Join-Path $PSScriptRoot 'scarlet_vulkan_loader_import.ps1'),
+    (Join-Path $PSScriptRoot 'scarlet_fetch_fidelityfx.ps1'),
+    (Join-Path $repoRoot 'licenses\third-party\runtime-provenance.json')
+)) {
+    if (Test-Path $path -PathType Leaf) {
+        $runtimeInputs.Add($path)
+    }
 }
-if (-not [string]::IsNullOrWhiteSpace($resolvedIcon)) {
-    $runtimeArgs.IconPath = $resolvedIcon
+
+$runtimeSourceOverlayDir = Join-Path $repoRoot 'runtime\nswitch'
+if (Test-Path $runtimeSourceOverlayDir -PathType Container) {
+    Get-ChildItem $runtimeSourceOverlayDir -Recurse -File | ForEach-Object {
+        $runtimeInputs.Add($_.FullName)
+    }
 }
-& (Join-Path $PSScriptRoot 'scarlet_runtime_build.ps1') @runtimeArgs
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedIcon) -and (Test-Path $resolvedIcon -PathType Leaf)) {
+    $runtimeInputs.Add($resolvedIcon)
+}
+
+$runtimeNeedsBuild = $RebuildRuntime -or $RefreshRuntimeSource
+if (-not $runtimeNeedsBuild) {
+    if (-not (Test-Path $runtimeExe -PathType Leaf) -or
+        -not (Test-Path $runtimeManifest -PathType Leaf)) {
+        $runtimeNeedsBuild = $true
+    }
+    else {
+        $runtimeBuiltAt = (Get-Item $runtimeExe).LastWriteTimeUtc
+        foreach ($input in $runtimeInputs) {
+            if ((Get-Item $input).LastWriteTimeUtc -gt $runtimeBuiltAt) {
+                $runtimeNeedsBuild = $true
+                break
+            }
+        }
+    }
+}
+
+if ($runtimeNeedsBuild) {
+    $runtimeArgs = @{
+        Jobs = $Jobs
+        RefreshSource = $RefreshRuntimeSource
+    }
+    if (-not [string]::IsNullOrWhiteSpace($resolvedIcon)) {
+        $runtimeArgs.IconPath = $resolvedIcon
+    }
+    & (Join-Path $PSScriptRoot 'scarlet_runtime_build.ps1') @runtimeArgs
+}
+else {
+    Write-Host '[Scarlet PC] Reusing existing self-built runtime; runtime inputs are unchanged.' -ForegroundColor Green
+}
 
 # Build the optional NVIDIA NGX sidecar after runtime source exists (it reuses Vulkan-Headers).
 # This does not make DLSS mandatory: unsupported GPUs/drivers simply leave the bridge inactive.
