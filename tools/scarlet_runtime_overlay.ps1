@@ -177,12 +177,19 @@ $new = @'
 Replace-Literal 'src\__PRODUCT___cmd\CMakeLists.txt' $old.Trim() $new.Trim()
 
 # Compile Scarlet's FidelityFX bridge into the Vulkan video core.
-$old = @'
+# Fast incremental builds preserve the already-patched runtime checkout. Later overlay
+# steps add provider .c files between these entries, so the original full replacement
+# block is no longer a reliable idempotence check. Use a stable Scarlet source as the
+# sentinel and only patch the upstream list when it is genuinely absent.
+$videoCoreCmake = Join-Path $SourceDir 'src\video_core\CMakeLists.txt'
+$videoCoreCmakeText = [IO.File]::ReadAllText($videoCoreCmake)
+if (-not $videoCoreCmakeText.Contains('renderer_vulkan/scarlet_ffx_framegen.cpp')) {
+    $old = @'
     renderer_vulkan/vk_swapchain.cpp
     renderer_vulkan/vk_swapchain.h
     renderer_vulkan/vk_texture_cache.cpp
 '@
-$new = @'
+    $new = @'
     renderer_vulkan/vk_swapchain.cpp
     renderer_vulkan/vk_swapchain.h
     renderer_vulkan/scarlet_ffx_framegen.cpp
@@ -198,7 +205,8 @@ $new = @'
     renderer_vulkan/scarlet_fsr4_pass.h
     renderer_vulkan/vk_texture_cache.cpp
 '@
-Replace-Literal 'src\video_core\CMakeLists.txt' $old.Trim() $new.Trim()
+    Replace-Literal 'src\video_core\CMakeLists.txt' $old.Trim() $new.Trim()
+}
 
 $old = '    renderer_vulkan/scarlet_fsr4_pass.h'
 $new = $old + [Environment]::NewLine +
