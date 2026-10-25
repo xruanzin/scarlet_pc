@@ -284,30 +284,40 @@ if ($usingNinja -and (Test-Path $cache)) {
     }
 }
 
-Write-Host '[Scarlet PC] Configuring self-built runtime.' -ForegroundColor Cyan
 Write-Host "[Scarlet PC] Runtime revision: $revision" -ForegroundColor Cyan
 Write-Host '[Scarlet PC] AOT primary; dynamic fallback: enabled' -ForegroundColor Cyan
 
-$configure = @('-S', $SourceDir, '-B', $BuildDir) + $generatorArgs
-if ($usingNinja) { $configure += '-DCMAKE_BUILD_TYPE=Release' }
-$configure += @(
-    '-DENABLE_QT=OFF',
-    '-DYUZU_CMD=ON',
-    ("-DCMAKE_INSTALL_PREFIX={0}" -f ((Join-Path $BuildDir 'install') -replace '\\','/')),
-    ("-D{0}=OFF" -f $legacyNoJitOption),
-    '-DENABLE_OPENGL=OFF',
-    '-DENABLE_WEB_SERVICE=OFF',
-    '-DENABLE_UPDATE_CHECKER=OFF',
-    '-DUSE_DISCORD_PRESENCE=OFF',
-    '-DYUZU_ROOM=OFF',
-    '-DYUZU_ROOM_STANDALONE=OFF',
-    '-DBUILD_TESTING=OFF',
-    '-DYUZU_TESTS=OFF',
-    "-DGLSLANGVALIDATOR:FILEPATH=$glslangValidator"
-)
+$buildNinja = Join-Path $BuildDir 'build.ninja'
+$canSkipConfigure = $FastIncremental -and $usingNinja -and
+    (Test-Path $cache -PathType Leaf) -and (Test-Path $buildNinja -PathType Leaf)
 
-& cmake @configure
-if ($LASTEXITCODE -ne 0) { throw 'Scarlet runtime CMake configure failed.' }
+if ($canSkipConfigure) {
+    Write-Host '[Scarlet PC] Fast incremental mode: reusing existing CMake/Ninja graph without reconfigure.' -ForegroundColor Green
+}
+else {
+    Write-Host '[Scarlet PC] Configuring self-built runtime.' -ForegroundColor Cyan
+
+    $configure = @('-S', $SourceDir, '-B', $BuildDir) + $generatorArgs
+    if ($usingNinja) { $configure += '-DCMAKE_BUILD_TYPE=Release' }
+    $configure += @(
+        '-DENABLE_QT=OFF',
+        '-DYUZU_CMD=ON',
+        ("-DCMAKE_INSTALL_PREFIX={0}" -f ((Join-Path $BuildDir 'install') -replace '\\','/')),
+        ("-D{0}=OFF" -f $legacyNoJitOption),
+        '-DENABLE_OPENGL=OFF',
+        '-DENABLE_WEB_SERVICE=OFF',
+        '-DENABLE_UPDATE_CHECKER=OFF',
+        '-DUSE_DISCORD_PRESENCE=OFF',
+        '-DYUZU_ROOM=OFF',
+        '-DYUZU_ROOM_STANDALONE=OFF',
+        '-DBUILD_TESTING=OFF',
+        '-DYUZU_TESTS=OFF',
+        "-DGLSLANGVALIDATOR:FILEPATH=$glslangValidator"
+    )
+
+    & cmake @configure
+    if ($LASTEXITCODE -ne 0) { throw 'Scarlet runtime CMake configure failed.' }
+}
 
 $buildLog = Join-Path $BuildDir 'scarlet_runtime_build.log'
 Write-Host '[Scarlet PC] Building runtime...' -ForegroundColor Cyan
