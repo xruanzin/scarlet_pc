@@ -321,9 +321,21 @@ else {
 
 $buildLog = Join-Path $BuildDir 'scarlet_runtime_build.log'
 Write-Host '[Scarlet PC] Building runtime...' -ForegroundColor Cyan
-& cmake --build $BuildDir --config Release --target $legacyTarget --parallel $Jobs 2>&1 |
-    Tee-Object -FilePath $buildLog | Out-Null
-$buildExit = $LASTEXITCODE
+
+# Windows PowerShell 5.1 promotes native stderr lines to ErrorRecord objects. With
+# ErrorActionPreference=Stop, harmless CMake/dependency warnings can abort the wrapper
+# even when cmake/ninja itself is still healthy. Let native stderr flow into the log and
+# decide success strictly from the process exit code.
+$previousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & cmake --build $BuildDir --config Release --target $legacyTarget --parallel $Jobs 2>&1 |
+        Tee-Object -FilePath $buildLog | Out-Null
+    $buildExit = $LASTEXITCODE
+}
+finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
 if ($buildExit -ne 0) {
     Write-Host '[Scarlet PC] Runtime build failed. Last compiler messages:' -ForegroundColor Red
     Get-Content $buildLog -Tail 80
