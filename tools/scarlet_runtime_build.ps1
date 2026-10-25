@@ -4,7 +4,8 @@
     [ValidateRange(1, 4)]
     [int]$Jobs = 1,
     [string]$IconPath,
-    [switch]$RefreshSource
+    [switch]$RefreshSource,
+    [switch]$FastIncremental
 )
 
 $ErrorActionPreference = 'Stop'
@@ -153,7 +154,14 @@ $glslangValidator = Get-ScarletGlslangValidator
 
 # FidelityFX SDK headers/runtime are pinned to the same revision used by Zelda-on-PC's
 # Vulkan FSR 3 frame-generation integration.
-& (Join-Path $PSScriptRoot 'scarlet_fetch_fidelityfx.ps1')
+if (-not $FastIncremental) {
+    & (Join-Path $PSScriptRoot 'scarlet_fetch_fidelityfx.ps1')
+} else {
+    $fastFfxHeader = Join-Path $repoRoot 'third_party\FidelityFX-SDK\ffx-api\include\ffx_api\ffx_framegeneration.h'
+    if (-not (Test-Path $fastFfxHeader -PathType Leaf)) {
+        throw 'Fast incremental build needs the existing FidelityFX checkout. Run the full setup once first.'
+    }
+}
 
 # The FSR4 v07 provider is a pinned submodule. Initialize it automatically for users who
 # pulled the branch without --recurse-submodules.
@@ -176,7 +184,9 @@ if (-not (Test-Path $fsrVulkanHeader -PathType Leaf)) {
 # FireBurn's provider intentionally calls the normal Vulkan loader entry points. Scarlet's
 # upstream runtime normally uses only Vulkan headers, so generate a tiny import library
 # locally from the system vulkan-1.dll export contract; no Vulkan SDK install is required.
-& (Join-Path $PSScriptRoot 'scarlet_vulkan_loader_import.ps1')
+if (-not $FastIncremental -or -not (Test-Path $vulkanImportLib -PathType Leaf)) {
+    & (Join-Path $PSScriptRoot 'scarlet_vulkan_loader_import.ps1')
+}
 
 
 if ($RefreshSource -and (Test-Path $SourceDir)) { Remove-Item $SourceDir -Recurse -Force }
@@ -190,23 +200,31 @@ if (-not (Test-Path (Join-Path $SourceDir '.git'))) {
 
 Push-Location $SourceDir
 try {
-    & git fetch --quiet origin $revision --depth 1
-    if ($LASTEXITCODE -ne 0) { throw 'Could not fetch pinned runtime revision.' }
-    & git checkout --quiet --detach $revision
-    if ($LASTEXITCODE -ne 0) { throw 'Could not checkout pinned runtime revision.' }
+    if ($FastIncremental) {
+        $actual = (& git rev-parse HEAD).Trim()
+        if ($actual -ne $revision) {
+            throw "Fast incremental runtime source is not at the pinned revision: $actual"
+        }
+        Write-Host '[Scarlet PC] Fast incremental mode: preserving patched runtime source and Ninja cache.' -ForegroundColor Green
+    } else {
+        & git fetch --quiet origin $revision --depth 1
+        if ($LASTEXITCODE -ne 0) { throw 'Could not fetch pinned runtime revision.' }
+        & git checkout --quiet --detach $revision
+        if ($LASTEXITCODE -ne 0) { throw 'Could not checkout pinned runtime revision.' }
 
-    # The Scarlet overlay intentionally edits the pinned runtime checkout.
-    # Reset those generated/local edits before applying the current overlay again,
-    # otherwise an interrupted or older build can leave stale branding/loader code.
-    & git reset --hard --quiet $revision
-    if ($LASTEXITCODE -ne 0) { throw 'Could not reset pinned runtime source.' }
-    & git clean -fdq
-    if ($LASTEXITCODE -ne 0) { throw 'Could not clean pinned runtime source.' }
+        # The Scarlet overlay intentionally edits the pinned runtime checkout.
+        # Reset those generated/local edits before applying the current overlay again,
+        # otherwise an interrupted or older build can leave stale branding/loader code.
+        & git reset --hard --quiet $revision
+        if ($LASTEXITCODE -ne 0) { throw 'Could not reset pinned runtime source.' }
+        & git clean -fdq
+        if ($LASTEXITCODE -ne 0) { throw 'Could not clean pinned runtime source.' }
 
-    & git submodule update --quiet --init --recursive
-    if ($LASTEXITCODE -ne 0) { throw 'Runtime submodule update failed.' }
-    $actual = (& git rev-parse HEAD).Trim()
-    if ($actual -ne $revision) { throw "Runtime source revision mismatch: $actual" }
+        & git submodule update --quiet --init --recursive
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime submodule update failed.' }
+        $actual = (& git rev-parse HEAD).Trim()
+        if ($actual -ne $revision) { throw "Runtime source revision mismatch: $actual" }
+    }
 } finally {
     Pop-Location
 }
@@ -221,15 +239,19 @@ New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
 # Windows resource compilers do not always track the referenced .ico as a Ninja dependency.
 # Drop only compiled .rc resources so a changed Scarlet icon is guaranteed to be embedded.
-Get-ChildItem $BuildDir -Recurse -File -Filter '*.rc.res' -ErrorAction SilentlyContinue |
-    Remove-Item -Force -ErrorAction SilentlyContinue
+if (-not $FastIncremental) {
+    Get-ChildItem $BuildDir -Recurse -File -Filter '*.rc.res' -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+}
 
 # The public log format is part of Scarlet PC branding. This pinned runtime has
 # two logging implementations; force both formatter objects to rebuild so an
 # incremental Ninja build can never keep legacy __FILE__ paths such as suyu_cmd\suyu.cpp.
-foreach ($objectName in @('text_formatter.cpp.obj', 'logging.cpp.obj')) {
-    Get-ChildItem $BuildDir -Recurse -File -Filter $objectName -ErrorAction SilentlyContinue |
-        Remove-Item -Force -ErrorAction SilentlyContinue
+if (-not $FastIncremental) {
+    foreach ($objectName in @('text_formatter.cpp.obj', 'logging.cpp.obj')) {
+        Get-ChildItem $BuildDir -Recurse -File -Filter $objectName -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
 }
 
 $cmakeHelp = (& cmake --help | Out-String)
