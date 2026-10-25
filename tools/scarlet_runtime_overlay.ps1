@@ -2,7 +2,9 @@
     [Parameter(Mandatory = $true)]
     [string]$SourceDir,
 
-    [string]$IconPath
+    [string]$IconPath,
+
+    [switch]$FastIncremental
 )
 
 $ErrorActionPreference = 'Stop'
@@ -134,6 +136,10 @@ function Replace-Literal([string]$RelativePath, [string]$Old, [string]$New) {
     $preview = $oldLf
     if ($preview.Length -gt 180) { $preview = $preview.Substring(0, 180) + '...' }
     $preview = $preview.Replace("`n", ' / ')
+    if ($FastIncremental) {
+        Write-Host "[Scarlet PC] Quick overlay: skipping already-transformed block in $displayPath" -ForegroundColor DarkGray
+        return
+    }
     throw "Scarlet runtime overlay: expected source text not found in $displayPath :: $preview"
 }
 
