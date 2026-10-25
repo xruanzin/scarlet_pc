@@ -283,9 +283,55 @@ case Core::SystemResultStatus::Success:
         break; // Expected case
 '@
 $new = @'
-case Core::SystemResultStatus::Success:
+case Core::SystemResultStatus::Success: {
         LOG_INFO(Frontend, "[Scarlet.Game] Pokemon Scarlet loaded");
+
+        // Per-game settings are applied during System::Load and can overwrite the
+        // resolution scale selected before boot. Re-apply Scarlet's temporal-FSR
+        // render scale now that the renderer is powered on, then refresh its base
+        // settings so AccelerateDisplay reports the actually scaled framebuffer.
+        const char* postload_upscaler = std::getenv("SCARLET_UPSCALER");
+        if (postload_upscaler &&
+            (std::string_view{postload_upscaler} == "fsr3" ||
+             std::string_view{postload_upscaler} == "fsr31")) {
+            int postload_width = 1920;
+            if (const char* width = std::getenv("SCARLET_WINDOW_WIDTH"); width && *width) {
+                postload_width = std::max(1, std::atoi(width));
+            }
+
+            float postload_scale = static_cast<float>(postload_width) / 1920.0f;
+            float upscale_ratio = 1.5f;
+            if (const char* quality = std::getenv("SCARLET_UPSCALER_QUALITY");
+                quality && *quality) {
+                const std::string_view preset{quality};
+                if (preset == "balanced") {
+                    upscale_ratio = 1.7f;
+                } else if (preset == "performance") {
+                    upscale_ratio = 2.0f;
+                } else if (preset == "ultra_performance") {
+                    upscale_ratio = 3.0f;
+                }
+            }
+            postload_scale = std::max(postload_scale / upscale_ratio, 0.5f);
+
+            Settings::ResolutionSetup postload_setup = Settings::ResolutionSetup::Res1X;
+            if (postload_scale < 0.625f) {
+                postload_setup = Settings::ResolutionSetup::Res1_2X;
+            } else if (postload_scale < 0.875f) {
+                postload_setup = Settings::ResolutionSetup::Res3_4X;
+            } else {
+                postload_setup = Settings::ResolutionSetup::Res1X;
+            }
+
+            Settings::values.resolution_setup.SetValue(postload_setup);
+            Settings::UpdateRescalingInfo();
+            system.ApplySettings();
+            LOG_INFO(Frontend,
+                     "[Scarlet.Graphics] Post-load temporal render scale applied: request={:.3f} actual={:.3f}",
+                     postload_scale, Settings::values.resolution_info.up_factor);
+        }
         break;
+    }
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
