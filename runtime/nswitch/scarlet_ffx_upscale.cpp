@@ -207,6 +207,23 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
         output_extent.width == 0 || output_extent.height == 0) {
         return false;
     }
+
+    // FSR super resolution requires the render resolution to be no larger than
+    // the presentation resolution. Passing a 1920x1080 render target to a
+    // 1280x720 upscale context reached the AMD runtime with an invalid
+    // downscaling configuration and crashed inside ffxCreateContext on the
+    // proprietary Windows driver. Fail closed and keep normal presentation
+    // instead of ever entering the FidelityFX DLL with invalid extents.
+    if (wanted_input.width > output_extent.width ||
+        wanted_input.height > output_extent.height) {
+        LOG_ERROR(Render_Vulkan,
+                  "[Scarlet.FSR3] Invalid temporal extent {}x{} -> {}x{}; "
+                  "render scale was not applied, disabling temporal pass safely",
+                  wanted_input.width, wanted_input.height,
+                  output_extent.width, output_extent.height);
+        dispatch_failed = true;
+        return false;
+    }
     if (impl->context && !images.empty() &&
         input_extent.width == wanted_input.width &&
         input_extent.height == wanted_input.height && source_format == format) {
