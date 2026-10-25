@@ -230,7 +230,10 @@ try {
     Pop-Location
 }
 
-$overlayArgs = @{ SourceDir = $SourceDir }
+$overlayArgs = @{
+    SourceDir = $SourceDir
+    FastIncremental = $FastIncremental
+}
 if (-not [string]::IsNullOrWhiteSpace($IconPath)) {
     $overlayArgs.IconPath = $IconPath
 }
