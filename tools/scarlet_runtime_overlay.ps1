@@ -1582,6 +1582,89 @@ $new = @'
 '@
 Replace-Literal 'src\video_core\renderer_vulkan\present\layer.cpp' $old.Trim() $new.Trim()
 
+$previousTemporalLayer = @'
+    auto crop_rect = Tegra::NormalizeCrop(framebuffer, texture_width, texture_height);
+    const VkExtent2D render_extent{
+        .width = scaled_width,
+        .height = scaled_height,
+    };
+
+    if (dlss_filter && dlss_filter->Ready()) {
+        const VkImageView dlss_view =
+            dlss_filter->Draw(device, scheduler, image_index, source_image, source_image_view,
+                              GetFormat(framebuffer), render_extent);
+        if (dlss_view != source_image_view) {
+            source_image_view = dlss_view;
+            crop_rect = {0, 0, 1, 1};
+        }
+    } else if (fsr4_filter && fsr4_filter->Ready()) {
+        const VkImageView fsr4_view =
+            fsr4_filter->Draw(device, scheduler, image_index, source_image,
+                              source_image_view, GetFormat(framebuffer), render_extent);
+        if (fsr4_view != source_image_view) {
+            source_image_view = fsr4_view;
+            crop_rect = {0, 0, 1, 1};
+        }
+    } else if (ffx_upscale_filter && ffx_upscale_filter->Ready()) {
+        const VkImageView ffx_view =
+            ffx_upscale_filter->Draw(device, scheduler, image_index, source_image,
+                                     source_image_view, GetFormat(framebuffer), render_extent);
+        if (ffx_view != source_image_view) {
+            source_image_view = ffx_view;
+            crop_rect = {0, 0, 1, 1};
+        }
+    }
+
+    if (auto* fsr = std::get_if<FSR>(&sr_filter)) {
+'@
+$currentTemporalLayer = @'
+    auto crop_rect = Tegra::NormalizeCrop(framebuffer, texture_width, texture_height);
+    const VkExtent2D render_extent{
+        .width = scaled_width,
+        .height = scaled_height,
+    };
+
+    if (dlss_filter && dlss_filter->Ready()) {
+        const VkImageView dlss_view =
+            dlss_filter->Draw(device, scheduler, image_index, source_image, source_image_view,
+                              GetFormat(framebuffer), render_extent);
+        if (dlss_view != source_image_view) {
+            source_image_view = dlss_view;
+            crop_rect = {0, 0, 1, 1};
+        }
+    } else if (fsr4_filter && fsr4_filter->Ready()) {
+        const VkImageView fsr4_view =
+            fsr4_filter->Draw(device, scheduler, image_index, source_image,
+                              source_image_view, GetFormat(framebuffer), render_extent);
+        if (fsr4_view != source_image_view) {
+            source_image_view = fsr4_view;
+            crop_rect = {0, 0, 1, 1};
+        }
+    } else if (ffx_upscale_filter && ffx_upscale_filter->Ready()) {
+        static bool scarlet_logged_temporal_input = false;
+        if (!scarlet_logged_temporal_input) {
+            scarlet_logged_temporal_input = true;
+            const auto& scarlet_resolution = Settings::values.resolution_info;
+            LOG_INFO(Render_Vulkan,
+                     "[Scarlet.FSR3] Presentation input: framebuffer={}x{} texture={}x{} "
+                     "scaled={}x{} resolution_active={} up_factor={:.3f} down_factor={:.3f}",
+                     framebuffer.width, framebuffer.height, texture_width, texture_height,
+                     scaled_width, scaled_height, scarlet_resolution.active,
+                     scarlet_resolution.up_factor, scarlet_resolution.down_factor);
+        }
+        const VkImageView ffx_view =
+            ffx_upscale_filter->Draw(device, scheduler, image_index, source_image,
+                                     source_image_view, GetFormat(framebuffer), render_extent);
+        if (ffx_view != source_image_view) {
+            source_image_view = ffx_view;
+            crop_rect = {0, 0, 1, 1};
+        }
+    }
+
+    if (auto* fsr = std::get_if<FSR>(&sr_filter)) {
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\present\layer.cpp' $previousTemporalLayer.Trim() $currentTemporalLayer.Trim()
+
 $old = @'
     auto crop_rect = Tegra::NormalizeCrop(framebuffer, texture_width, texture_height);
     const VkExtent2D render_extent{
