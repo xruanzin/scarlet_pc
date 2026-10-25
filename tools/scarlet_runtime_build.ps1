@@ -184,6 +184,7 @@ if (-not (Test-Path $fsrVulkanHeader -PathType Leaf)) {
 # FireBurn's provider intentionally calls the normal Vulkan loader entry points. Scarlet's
 # upstream runtime normally uses only Vulkan headers, so generate a tiny import library
 # locally from the system vulkan-1.dll export contract; no Vulkan SDK install is required.
+$vulkanImportLib = Join-Path $repoRoot 'build\tools\vulkan-loader-import\vulkan-1.lib'
 if (-not $FastIncremental -or -not (Test-Path $vulkanImportLib -PathType Leaf)) {
     & (Join-Path $PSScriptRoot 'scarlet_vulkan_loader_import.ps1')
 }
