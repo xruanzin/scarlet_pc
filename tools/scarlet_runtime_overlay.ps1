@@ -1780,6 +1780,7 @@ $old = @'
 '@
 $new = @'
 #include "video_core/renderer_vulkan/scarlet_dlss_client.h"
+#include "video_core/renderer_vulkan/scarlet_ffx_framegen.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 '@
@@ -1820,6 +1821,164 @@ $new = @'
 '@
 Replace-Literal 'src\video_core\vulkan_common\vulkan_device.cpp' $old.Trim() $new.Trim()
 
+
+
+# FidelityFX FG queue isolation.
+$old = '    [[nodiscard]] Queue GetQueue(u32 family_index) const noexcept;'
+$new = '    [[nodiscard]] Queue GetQueue(u32 family_index, u32 queue_index = 0) const noexcept;'
+Replace-Literal 'src\video_core\vulkan_common\vulkan_wrapper.h' $old $new
+
+$old = @'
+Queue Device::GetQueue(u32 family_index) const noexcept {
+    VkQueue queue;
+    dld->vkGetDeviceQueue(handle, family_index, 0, &queue);
+    return Queue(queue, *dld);
+}
+'@
+$new = @'
+Queue Device::GetQueue(u32 family_index, u32 queue_index) const noexcept {
+    VkQueue queue;
+    dld->vkGetDeviceQueue(handle, family_index, queue_index, &queue);
+    return Queue(queue, *dld);
+}
+'@
+Replace-Literal 'src\video_core\vulkan_common\vulkan_wrapper.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    /// Returns the main present queue.
+    vk::Queue GetPresentQueue() const {
+        return present_queue;
+    }
+
+    /// Returns main graphics queue family index.
+'@
+$new = @'
+    /// Returns the main present queue.
+    vk::Queue GetPresentQueue() const {
+        return present_queue;
+    }
+
+    /// Returns a present-capable queue reserved exclusively for FidelityFX FG.
+    vk::Queue GetFrameGenerationPresentQueue() const {
+        return framegen_present_queue;
+    }
+
+    bool HasFrameGenerationPresentQueue() const {
+        return has_framegen_present_queue;
+    }
+
+    /// Returns main graphics queue family index.
+'@
+Replace-Literal 'src\video_core\vulkan_common\vulkan_device.h' $old.Trim() $new.Trim()
+
+$old = @'
+    vk::Queue graphics_queue;    ///< Main graphics queue.
+    vk::Queue present_queue;     ///< Main present queue.
+    u32 instance_version{};
+'@
+$new = @'
+    vk::Queue graphics_queue;         ///< Main graphics queue.
+    vk::Queue present_queue;          ///< Main present queue.
+    vk::Queue framegen_present_queue; ///< Queue reserved exclusively for FidelityFX FG.
+    bool has_framegen_present_queue{};
+    u32 instance_version{};
+'@
+Replace-Literal 'src\video_core\vulkan_common\vulkan_device.h' $old.Trim() $new.Trim()
+
+$old = @'
+std::vector<VkDeviceQueueCreateInfo> Device::GetDeviceQueueCreateInfos() const {
+    static constexpr float QUEUE_PRIORITY = 1.0f;
+
+    ankerl::unordered_dense::set<u32> unique_queue_families{graphics_family, present_family};
+    std::vector<VkDeviceQueueCreateInfo> queue_cis;
+    queue_cis.reserve(unique_queue_families.size());
+
+    for (const u32 queue_family : unique_queue_families) {
+        auto& ci = queue_cis.emplace_back(VkDeviceQueueCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .queueFamilyIndex = queue_family,
+            .queueCount = 1,
+            .pQueuePriorities = nullptr,
+        });
+        ci.pQueuePriorities = &QUEUE_PRIORITY;
+    }
+
+    return queue_cis;
+}
+'@
+$new = @'
+std::vector<VkDeviceQueueCreateInfo> Device::GetDeviceQueueCreateInfos() const {
+    static constexpr float QUEUE_PRIORITIES[] = {1.0f, 1.0f};
+
+    const auto queue_family_properties = physical.GetQueueFamilyProperties();
+    const bool framegen_requested =
+        ScarletPC::Graphics::FidelityFxFrameGeneration::Get().Requested();
+
+    ankerl::unordered_dense::set<u32> unique_queue_families{graphics_family, present_family};
+    std::vector<VkDeviceQueueCreateInfo> queue_cis;
+    queue_cis.reserve(unique_queue_families.size());
+
+    for (const u32 queue_family : unique_queue_families) {
+        u32 requested_count = 1;
+        if (framegen_requested && queue_family == present_family &&
+            queue_family < queue_family_properties.size() &&
+            queue_family_properties[queue_family].queueCount >= 2) {
+            const VkQueueFlags flags = queue_family_properties[queue_family].queueFlags;
+            if (flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT)) {
+                requested_count = 2;
+            }
+        }
+
+        auto& ci = queue_cis.emplace_back(VkDeviceQueueCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .queueFamilyIndex = queue_family,
+            .queueCount = requested_count,
+            .pQueuePriorities = QUEUE_PRIORITIES,
+        });
+    }
+
+    return queue_cis;
+}
+'@
+Replace-Literal 'src\video_core\vulkan_common\vulkan_device.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    graphics_queue = logical.GetQueue(graphics_family);
+    present_queue = logical.GetQueue(present_family);
+
+    VmaVulkanFunctions functions{};
+'@
+$new = @'
+    graphics_queue = logical.GetQueue(graphics_family);
+    present_queue = logical.GetQueue(present_family);
+
+    has_framegen_present_queue = false;
+    if (ScarletPC::Graphics::FidelityFxFrameGeneration::Get().Requested()) {
+        const auto queue_family_properties = physical.GetQueueFamilyProperties();
+        if (present_family < queue_family_properties.size() &&
+            queue_family_properties[present_family].queueCount >= 2) {
+            const VkQueueFlags flags = queue_family_properties[present_family].queueFlags;
+            if (flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT)) {
+                framegen_present_queue = logical.GetQueue(present_family, 1);
+                has_framegen_present_queue = true;
+                LOG_INFO(Render_Vulkan,
+                         "[Scarlet.FSR3] Reserved dedicated Vulkan present queue family={} index=1 for Frame Generation",
+                         present_family);
+            }
+        }
+        if (!has_framegen_present_queue) {
+            LOG_WARNING(Render_Vulkan,
+                        "[Scarlet.FSR3] No spare present-capable Vulkan queue; Frame Generation swapchain disabled");
+        }
+    }
+
+    VmaVulkanFunctions functions{};
+'@
+Replace-Literal 'src\video_core\vulkan_common\vulkan_device.cpp' $old.Trim() $new.Trim()
 
 # FidelityFX frame-generation swapchain plumbing.
 $old = @'
@@ -1947,10 +2106,12 @@ $new = @'
     ffx_swapchain = VK_NULL_HANDLE;
 
     if (frame_generation_requested &&
-        (swapchain_ci.imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+        (swapchain_ci.imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) &&
+        device.HasFrameGenerationPresentQueue()) {
         auto& ffx = ScarletPC::Graphics::FidelityFxFrameGeneration::Get();
         ffx.SetQueues(device.GetGraphicsQueue().Handle(), device.GetGraphicsFamily(),
-                      device.GetPresentQueue().Handle(), device.GetPresentFamily());
+                      device.GetFrameGenerationPresentQueue().Handle(),
+                      device.GetPresentFamily());
         VkSwapchainKHR candidate = *created_swapchain;
         if (ffx.CreateSwapchain(device.GetPhysical(), *device.GetLogical(), &candidate,
                                 swapchain_ci)) {
@@ -1968,6 +2129,9 @@ $new = @'
 #endif
             created_swapchain = device.GetLogical().CreateSwapchainKHR(swapchain_ci);
         }
+    } else if (frame_generation_requested && !device.HasFrameGenerationPresentQueue()) {
+        LOG_WARNING(Render_Vulkan,
+                    "[Scarlet.FSR3] Frame Generation requested but no dedicated present queue is available");
     }
 
     if (ffx_active) {
