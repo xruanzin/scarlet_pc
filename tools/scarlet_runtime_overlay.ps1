@@ -4770,7 +4770,7 @@ if ($scarletPipelineUpdated -ne $scarletPipelineText) {
 }
 
 # Migrate an already-patched incremental runtime to the new default-on preload.
-$scarletRuntimeCmdPath = Join-Path $SourceDir 'src\__PRODUCT___cmd\__PRODUCT__.cpp'
+$scarletRuntimeCmdPath = Join-Path $SourceDir (Expand-Legacy 'src\__PRODUCT___cmd\__PRODUCT__.cpp')
 if (Test-Path -LiteralPath $scarletRuntimeCmdPath) {
     $scarletRuntimeCmdText = [IO.File]::ReadAllText($scarletRuntimeCmdPath)
     $scarletPreloadOld = @'
