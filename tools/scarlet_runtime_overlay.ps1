@@ -5138,4 +5138,25 @@ $scarletSchedulerText = $scarletSchedulerText.Replace(
 
 Write-Host '[Scarlet PC] Vulkan CPU batching: 32-draw dispatch cadence, 64 KiB chunks.' -ForegroundColor DarkGray
 
+
+# Keep the Vulkan recording worker responsive on CPU-bound Ryzen APUs. The GPU
+# emulation thread is already Critical upstream; High here avoids starving audio.
+$scarletSchedulerPath = Join-Path $SourceDir 'src\video_core\renderer_vulkan\vk_scheduler.cpp'
+$scarletSchedulerText = [IO.File]::ReadAllText($scarletSchedulerPath)
+$scarletSchedulerPriorityOld = @'
+void Scheduler::WorkerThread(std::stop_token stop_token) {
+    Common::SetCurrentThreadName("VulkanWorker");
+'@
+$scarletSchedulerPriorityNew = @'
+void Scheduler::WorkerThread(std::stop_token stop_token) {
+    Common::SetCurrentThreadName("VulkanWorker");
+    Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
+'@
+if ($scarletSchedulerText.Contains($scarletSchedulerPriorityOld.Trim()) -and
+    -not $scarletSchedulerText.Contains('ThreadPriority::High')) {
+    $scarletSchedulerText =
+        $scarletSchedulerText.Replace($scarletSchedulerPriorityOld.Trim(),
+                                      $scarletSchedulerPriorityNew.Trim())
+    [IO.File]::WriteAllText($scarletSchedulerPath, $scarletSchedulerText, $utf8)
+}
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
