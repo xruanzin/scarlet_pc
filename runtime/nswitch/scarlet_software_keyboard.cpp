@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <climits>
 #include <cstdlib>
 #include <cwctype>
@@ -16,6 +17,24 @@
 #include "common/logging/log.h"
 #include "common/string_util.h"
 #include "video_core/renderer_vulkan/scarlet_keyboard_overlay.h"
+
+namespace ScarletPC {
+
+using Core::Frontend::InlineAppearParameters;
+using Core::Frontend::InlineTextParameters;
+using Core::Frontend::KeyboardInitializeParameters;
+using Service::AM::Frontend::SwkbdReplyType;
+using Service::AM::Frontend::SwkbdResult;
+using Service::AM::Frontend::SwkbdTextCheckResult;
+using Service::AM::Frontend::SwkbdType;
+
+namespace {
+
+struct KeyboardResponse {
+    bool accepted{};
+    bool silent{};
+    std::u16string text;
+};
 
 #ifdef _WIN32
 
@@ -43,7 +62,7 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
     KeyboardOverlay::Result native_result{};
     while (!KeyboardOverlay::PollResult(native_result)) {
         KeyboardOverlay::TickInput();
-        Sleep(16);
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }
 
     KeyboardResponse response{};
