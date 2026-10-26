@@ -5392,17 +5392,6 @@ $scarletArmRecompText = $scarletArmRecompText.Replace(
 # represents exactly that physical core. Answer it in-place, preserving coverage
 # counters but avoiding PhysicalCore -> Svc::Call -> scheduler -> RunThread.
 if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] inline svc 0x10')) {
-    $scarletSvcExitOld = @'
-        if (impl->ctx.pending_svc != kNoPendingSvc) {
-            // Log every SVC call from rtld (first few hundred only to avoid spam)
-            LOG_TRACE(Core_ARM, "recomp SVC {} at pc={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
-                       impl->ctx.pending_svc, impl->ctx.pc, impl->ctx.x[0], impl->ctx.x[1],
-                       impl->ctx.x[2], impl->ctx.x[3]);
-            g_counters.svc_calls.fetch_add(1, std::memory_order_relaxed);
-            g_counters.RecordSvc(static_cast<u32>(impl->ctx.pending_svc));
-            return HaltReason::SupervisorCall;
-        }
-'@
     $scarletSvcExitNew = @'
         if (impl->ctx.pending_svc != kNoPendingSvc) {
             const u32 svc_number = static_cast<u32>(impl->ctx.pending_svc);
@@ -5427,11 +5416,29 @@ if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] inline svc 0x10')) {
             return HaltReason::SupervisorCall;
         }
 '@
-    if (-not $scarletArmRecompText.Contains($scarletSvcExitOld.Trim())) {
-        throw 'Scarlet runtime overlay: ArmRecomp SVC exit block missing'
+
+    # Incremental runtime trees may already have comments/diagnostic guards changed
+    # around this block. Match the semantic SVC-exit block instead of exact text.
+    $scarletSvcExitPattern =
+        '(?s)        if \(impl->ctx\.pending_svc != kNoPendingSvc\) \{\r?\n' +
+        '(?:(?!\r?\n        \}).)*?' +
+        'g_counters\.svc_calls\.fetch_add\(1, std::memory_order_relaxed\);' +
+        '(?:(?!\r?\n        \}).)*?' +
+        'return HaltReason::SupervisorCall;\r?\n        \}'
+    $scarletSvcExitRegex = [regex]::new(
+        $scarletSvcExitPattern,
+        [Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    $scarletSvcExitMatch = $scarletSvcExitRegex.Match($scarletArmRecompText)
+    if (-not $scarletSvcExitMatch.Success) {
+        throw 'Scarlet runtime overlay: semantic ArmRecomp SVC exit block missing'
     }
-    $scarletArmRecompText =
-        $scarletArmRecompText.Replace($scarletSvcExitOld.Trim(), $scarletSvcExitNew.Trim())
+    $scarletArmRecompText = $scarletSvcExitRegex.Replace(
+        $scarletArmRecompText,
+        $scarletSvcExitNew.Trim(),
+        1
+    )
+    Write-Host '[Scarlet PC] Inlined hot SVC 0x10 in preserved ArmRecomp tree.' -ForegroundColor DarkGray
 }
 
 # Keep the first-entry verification log accurate after SetRecompLongSlices().
