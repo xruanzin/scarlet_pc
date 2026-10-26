@@ -871,6 +871,8 @@ $new = @'
         Settings::values.vram_usage_mode.SetValue(
             scarlet_gpu_safe ? Settings::VramUsageMode::Conservative
                              : Settings::VramUsageMode::Aggressive);
+        Settings::values.nvdec_emulation.SetValue(Settings::NvdecEmulation::Gpu);
+        Settings::values.accelerate_astc.SetValue(Settings::AstcDecodeMode::Gpu);
         Settings::values.gpu_unswizzle_enabled.SetValue(!scarlet_gpu_safe);
         Settings::values.gpu_unswizzle_texture_size.SetValue(
             Settings::GpuUnswizzleSize::VerySmall);
