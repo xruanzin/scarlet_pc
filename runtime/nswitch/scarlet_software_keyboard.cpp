@@ -62,6 +62,52 @@ constexpr int kBaseWidth = 1280;
 constexpr int kBaseHeight = 720;
 
 std::atomic<HWND> g_keyboard_window{nullptr};
+std::atomic_bool g_keyboard_overlay_active{false};
+std::atomic_bool g_keyboard_desktop_request{false};
+std::atomic_bool g_keyboard_desktop_ack{false};
+std::atomic_bool g_keyboard_restore_request{false};
+std::atomic_bool g_keyboard_restore_ack{false};
+
+bool WaitForWindowHandshake(std::atomic_bool& flag, DWORD timeout_ms = 2500) {
+    const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+    while (GetTickCount64() < deadline) {
+        if (flag.load(std::memory_order_acquire)) {
+            return true;
+        }
+        Sleep(10);
+    }
+    return flag.load(std::memory_order_acquire);
+}
+
+void RequestDesktopForKeyboard() {
+    g_keyboard_overlay_active.store(true, std::memory_order_release);
+    g_keyboard_desktop_ack.store(false, std::memory_order_release);
+    g_keyboard_desktop_request.store(true, std::memory_order_release);
+    if (WaitForWindowHandshake(g_keyboard_desktop_ack)) {
+        LOG_INFO(Service_AM,
+                 "[Scarlet.Keyboard] Exclusive fullscreen released before keyboard");
+    } else {
+        LOG_WARNING(Service_AM,
+                    "[Scarlet.Keyboard] Timed out waiting for desktop-mode handoff; continuing");
+    }
+}
+
+void RequestFullscreenAfterKeyboard(HWND owner) {
+    g_keyboard_overlay_active.store(false, std::memory_order_release);
+    if (owner != nullptr && IsWindow(owner)) {
+        SetForegroundWindow(owner);
+        BringWindowToTop(owner);
+    }
+    g_keyboard_restore_ack.store(false, std::memory_order_release);
+    g_keyboard_restore_request.store(true, std::memory_order_release);
+    if (WaitForWindowHandshake(g_keyboard_restore_ack)) {
+        LOG_INFO(Service_AM,
+                 "[Scarlet.Keyboard] Game fullscreen restored after keyboard");
+    } else {
+        LOG_WARNING(Service_AM,
+                    "[Scarlet.Keyboard] Timed out waiting for fullscreen restore");
+    }
+}
 
 std::wstring ToWide(std::u16string_view value) {
     std::wstring out;
@@ -923,18 +969,25 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
         return {};
     }
 
+    // Exclusive Vulkan presentation can cover any owned Win32 popup. Ask the
+    // SDL/main thread to leave exclusive mode first, then size/place the keyboard
+    // against the restored desktop/window geometry.
+    RequestDesktopForKeyboard();
+
     RECT client{};
     GetClientRect(owner, &client);
     const int width = client.right - client.left;
     const int height = client.bottom - client.top;
     if (width <= 0 || height <= 0) {
         LOG_ERROR(Service_AM, "[Scarlet.Keyboard] Invalid game client size");
+        RequestFullscreenAfterKeyboard(owner);
         return {};
     }
 
     POINT client_origin{0, 0};
     if (!ClientToScreen(owner, &client_origin)) {
         LOG_ERROR(Service_AM, "[Scarlet.Keyboard] Could not locate game client area");
+        RequestFullscreenAfterKeyboard(owner);
         return {};
     }
 
@@ -965,6 +1018,7 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
         LOG_ERROR(Service_AM,
                   "[Scarlet.Keyboard] Failed to create keyboard overlay, Win32 error={}",
                   error_code);
+        RequestFullscreenAfterKeyboard(owner);
         return {};
     }
 
@@ -1088,7 +1142,7 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
     if (state.font_key) DeleteObject(state.font_key);
     if (state.font_label) DeleteObject(state.font_label);
 
-    SetForegroundWindow(owner);
+    RequestFullscreenAfterKeyboard(owner);
     return response;
 }
 
@@ -1127,6 +1181,42 @@ void UpdateKeyboardText(const InlineTextParameters& params) {
 #endif
 
 } // namespace
+
+bool ConsumeKeyboardDesktopModeRequest() {
+#ifdef _WIN32
+    return g_keyboard_desktop_request.exchange(false, std::memory_order_acq_rel);
+#else
+    return false;
+#endif
+}
+
+bool ConsumeKeyboardFullscreenRestoreRequest() {
+#ifdef _WIN32
+    return g_keyboard_restore_request.exchange(false, std::memory_order_acq_rel);
+#else
+    return false;
+#endif
+}
+
+void AcknowledgeKeyboardDesktopMode() {
+#ifdef _WIN32
+    g_keyboard_desktop_ack.store(true, std::memory_order_release);
+#endif
+}
+
+void AcknowledgeKeyboardFullscreenRestore() {
+#ifdef _WIN32
+    g_keyboard_restore_ack.store(true, std::memory_order_release);
+#endif
+}
+
+bool KeyboardOverlayActive() {
+#ifdef _WIN32
+    return g_keyboard_overlay_active.load(std::memory_order_acquire);
+#else
+    return false;
+#endif
+}
 
 SoftwareKeyboardApplet::~SoftwareKeyboardApplet() {
     CloseKeyboard(true);
