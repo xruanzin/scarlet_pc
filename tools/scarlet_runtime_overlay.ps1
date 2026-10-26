@@ -3516,37 +3516,41 @@ $new = @'
     render_targets.is_rescaled = is_rescaling;
 
     // Diagnose Scarlet's real scene MRT layout so the temporal bridge can select
-    // the game's actual velocity target instead of guessing. Keep this bounded:
-    // render-target state can change thousands of times per frame.
-    if (depth_buffer_id) {
-        static u32 scarlet_temporal_probe_logs = 0;
-        if (scarlet_temporal_probe_logs < 96) {
+    // the game's actual velocity target instead of guessing. Use warning level so
+    // the probe survives normal runtime log filtering, and keep it strictly bounded.
+    static u32 scarlet_temporal_state_logs = 0;
+    if (scarlet_temporal_state_logs < 64) {
+        LOG_WARNING(HW_GPU,
+                    "[Scarlet.FSR3.Probe] state depth={} active_mask={:#x}",
+                    static_cast<u32>(depth_buffer_id), rt_active_mask);
+        if (depth_buffer_id) {
             const auto& scarlet_probe_depth = slot_image_views[depth_buffer_id];
-            LOG_INFO(HW_GPU,
-                     "[Scarlet.FSR3.Probe] depth format={} extent={}x{} active_mask={:#x}",
-                     static_cast<u32>(scarlet_probe_depth.format),
-                     scarlet_probe_depth.size.width, scarlet_probe_depth.size.height,
-                     rt_active_mask);
-            for (size_t scarlet_probe_rt = 0;
-                 scarlet_probe_rt < render_targets.color_buffer_ids.size();
-                 ++scarlet_probe_rt) {
-                if ((rt_active_mask & (1u << scarlet_probe_rt)) == 0) {
-                    continue;
-                }
-                const ImageViewId scarlet_probe_id =
-                    render_targets.color_buffer_ids[scarlet_probe_rt];
-                if (!scarlet_probe_id) {
-                    continue;
-                }
-                const auto& scarlet_probe_view = slot_image_views[scarlet_probe_id];
-                LOG_INFO(HW_GPU,
-                         "[Scarlet.FSR3.Probe]   rt{} format={} extent={}x{}",
-                         scarlet_probe_rt, static_cast<u32>(scarlet_probe_view.format),
-                         scarlet_probe_view.size.width, scarlet_probe_view.size.height);
-            }
-            ++scarlet_temporal_probe_logs;
+            LOG_WARNING(HW_GPU,
+                        "[Scarlet.FSR3.Probe] depth format={} extent={}x{}",
+                        static_cast<u32>(scarlet_probe_depth.format),
+                        scarlet_probe_depth.size.width, scarlet_probe_depth.size.height);
         }
+        for (size_t scarlet_probe_rt = 0;
+             scarlet_probe_rt < render_targets.color_buffer_ids.size();
+             ++scarlet_probe_rt) {
+            if ((rt_active_mask & (1u << scarlet_probe_rt)) == 0) {
+                continue;
+            }
+            const ImageViewId scarlet_probe_id =
+                render_targets.color_buffer_ids[scarlet_probe_rt];
+            if (!scarlet_probe_id) {
+                continue;
+            }
+            const auto& scarlet_probe_view = slot_image_views[scarlet_probe_id];
+            LOG_WARNING(HW_GPU,
+                        "[Scarlet.FSR3.Probe] rt{} format={} extent={}x{}",
+                        scarlet_probe_rt, static_cast<u32>(scarlet_probe_view.format),
+                        scarlet_probe_view.size.width, scarlet_probe_view.size.height);
+        }
+        ++scarlet_temporal_state_logs;
+    }
 
+    if (depth_buffer_id) {
         auto& scarlet_depth = slot_image_views[depth_buffer_id];
         for (size_t scarlet_rt = 0; scarlet_rt < render_targets.color_buffer_ids.size();
              ++scarlet_rt) {
@@ -3584,6 +3588,85 @@ $new = @'
     if (render_targets != previous_render_targets) {
 '@
 Replace-Literal 'src\video_core\texture_cache\texture_cache.h' $old.Trim() $new.Trim()
+
+# Fast-incremental migration for preserved runtime trees that already contain the
+# previous INFO-level Scarlet temporal probe.
+$old = @'
+    // Diagnose Scarlet's real scene MRT layout so the temporal bridge can select
+    // the game's actual velocity target instead of guessing. Keep this bounded:
+    // render-target state can change thousands of times per frame.
+    if (depth_buffer_id) {
+        static u32 scarlet_temporal_probe_logs = 0;
+        if (scarlet_temporal_probe_logs < 96) {
+            const auto& scarlet_probe_depth = slot_image_views[depth_buffer_id];
+            LOG_INFO(HW_GPU,
+                     "[Scarlet.FSR3.Probe] depth format={} extent={}x{} active_mask={:#x}",
+                     static_cast<u32>(scarlet_probe_depth.format),
+                     scarlet_probe_depth.size.width, scarlet_probe_depth.size.height,
+                     rt_active_mask);
+            for (size_t scarlet_probe_rt = 0;
+                 scarlet_probe_rt < render_targets.color_buffer_ids.size();
+                 ++scarlet_probe_rt) {
+                if ((rt_active_mask & (1u << scarlet_probe_rt)) == 0) {
+                    continue;
+                }
+                const ImageViewId scarlet_probe_id =
+                    render_targets.color_buffer_ids[scarlet_probe_rt];
+                if (!scarlet_probe_id) {
+                    continue;
+                }
+                const auto& scarlet_probe_view = slot_image_views[scarlet_probe_id];
+                LOG_INFO(HW_GPU,
+                         "[Scarlet.FSR3.Probe]   rt{} format={} extent={}x{}",
+                         scarlet_probe_rt, static_cast<u32>(scarlet_probe_view.format),
+                         scarlet_probe_view.size.width, scarlet_probe_view.size.height);
+            }
+            ++scarlet_temporal_probe_logs;
+        }
+
+        auto& scarlet_depth = slot_image_views[depth_buffer_id];
+'@
+$new = @'
+    // Diagnose Scarlet's real scene MRT layout so the temporal bridge can select
+    // the game's actual velocity target instead of guessing. Use warning level so
+    // the probe survives normal runtime log filtering, and keep it strictly bounded.
+    static u32 scarlet_temporal_state_logs = 0;
+    if (scarlet_temporal_state_logs < 64) {
+        LOG_WARNING(HW_GPU,
+                    "[Scarlet.FSR3.Probe] state depth={} active_mask={:#x}",
+                    static_cast<u32>(depth_buffer_id), rt_active_mask);
+        if (depth_buffer_id) {
+            const auto& scarlet_probe_depth = slot_image_views[depth_buffer_id];
+            LOG_WARNING(HW_GPU,
+                        "[Scarlet.FSR3.Probe] depth format={} extent={}x{}",
+                        static_cast<u32>(scarlet_probe_depth.format),
+                        scarlet_probe_depth.size.width, scarlet_probe_depth.size.height);
+        }
+        for (size_t scarlet_probe_rt = 0;
+             scarlet_probe_rt < render_targets.color_buffer_ids.size();
+             ++scarlet_probe_rt) {
+            if ((rt_active_mask & (1u << scarlet_probe_rt)) == 0) {
+                continue;
+            }
+            const ImageViewId scarlet_probe_id =
+                render_targets.color_buffer_ids[scarlet_probe_rt];
+            if (!scarlet_probe_id) {
+                continue;
+            }
+            const auto& scarlet_probe_view = slot_image_views[scarlet_probe_id];
+            LOG_WARNING(HW_GPU,
+                        "[Scarlet.FSR3.Probe] rt{} format={} extent={}x{}",
+                        scarlet_probe_rt, static_cast<u32>(scarlet_probe_view.format),
+                        scarlet_probe_view.size.width, scarlet_probe_view.size.height);
+        }
+        ++scarlet_temporal_state_logs;
+    }
+
+    if (depth_buffer_id) {
+        auto& scarlet_depth = slot_image_views[depth_buffer_id];
+'@
+Replace-Literal 'src\video_core\texture_cache\texture_cache.h' $old.Trim() $new.Trim()
+
 
 $old = @'
     return {};
