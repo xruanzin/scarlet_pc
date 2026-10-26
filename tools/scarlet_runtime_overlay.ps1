@@ -2987,6 +2987,118 @@ $new = @'
 '@
 Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
 
+
+# Exclusive fullscreen focus handling for Windows/AMD:
+# own the leave/re-enter sequence explicitly instead of allowing SDL's automatic
+# minimize-on-focus-loss to race the Vulkan swapchain/display-mode transition.
+$old = @'
+    /// Is the window being shown?
+    bool is_shown = true;
+
+    /// Internal SDL2 render window
+'@
+$new = @'
+    /// Is the window being shown?
+    bool is_shown = true;
+
+    /// Scarlet exclusive fullscreen is temporarily released while another
+    /// desktop window owns focus (Win key / Alt+Tab). It is restored only when
+    /// the game window gains keyboard focus again.
+    bool scarlet_exclusive_focus_suspended = false;
+
+    /// Internal SDL2 render window
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.h' $old.Trim() $new.Trim()
+
+# Do not let SDL auto-minimize exclusive fullscreen while Scarlet performs its
+# own synchronous focus transition. This avoids two mode switches racing each other.
+$old = @'
+    render_window =
+        SDL_CreateWindow(window_title.c_str(), scarlet_window_width, scarlet_window_height,
+                         window_flags);
+'@
+$new = @'
+    SDL_SetHint("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0");
+
+    render_window =
+        SDL_CreateWindow(window_title.c_str(), scarlet_window_width, scarlet_window_height,
+                         window_flags);
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2_vk.cpp' $old.Trim() $new.Trim()
+
+# SDL3 fullscreen/display-mode changes may be asynchronous. Synchronize the
+# transition before Vulkan observes the window size or recreates presentation state.
+$old = @'
+        if (SDL_SetWindowFullscreen(render_window, true)) {
+            return;
+        }
+'@
+$new = @'
+        if (SDL_SetWindowFullscreen(render_window, true)) {
+            if (!SDL_SyncWindow(render_window)) {
+                LOG_WARNING(Frontend,
+                            "[Scarlet.Graphics] Exclusive fullscreen synchronization timed out: {}",
+                            SDL_GetError());
+            }
+            OnResize();
+            return;
+        }
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
+
+# On Win-key/Alt+Tab focus loss, release exclusive mode first so Windows can
+# restore the desktop mode. Re-enter the requested Scarlet mode only after the
+# game regains keyboard focus, then refresh the framebuffer layout so Vulkan
+# can rebuild presentation state against the final dimensions.
+$old = @'
+    switch (event.type) {
+    case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+'@
+$new = @'
+    switch (event.type) {
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+        if (Settings::values.fullscreen_mode.GetValue() == Settings::FullscreenMode::Exclusive &&
+            (SDL_GetWindowFlags(render_window) & SDL_WINDOW_FULLSCREEN) != 0) {
+            scarlet_exclusive_focus_suspended = true;
+            LOG_INFO(Frontend,
+                     "[Scarlet.Graphics] Focus lost; releasing exclusive fullscreen to desktop");
+            if (!SDL_SetWindowFullscreen(render_window, false)) {
+                LOG_ERROR(Frontend,
+                          "[Scarlet.Graphics] Failed to leave exclusive fullscreen: {}",
+                          SDL_GetError());
+            } else {
+                if (!SDL_SyncWindow(render_window)) {
+                    LOG_WARNING(Frontend,
+                                "[Scarlet.Graphics] Desktop-mode restore synchronization timed out: {}",
+                                SDL_GetError());
+                }
+                OnResize();
+                LOG_INFO(Frontend,
+                         "[Scarlet.Graphics] Desktop display mode restored after focus loss");
+            }
+        }
+        break;
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+        if (scarlet_exclusive_focus_suspended) {
+            scarlet_exclusive_focus_suspended = false;
+            LOG_INFO(Frontend,
+                     "[Scarlet.Graphics] Focus regained; restoring Scarlet exclusive fullscreen");
+            Fullscreen();
+            if (!SDL_SyncWindow(render_window)) {
+                LOG_WARNING(Frontend,
+                            "[Scarlet.Graphics] Fullscreen restore synchronization timed out: {}",
+                            SDL_GetError());
+            }
+            OnResize();
+            is_shown = true;
+            LOG_INFO(Frontend,
+                     "[Scarlet.Graphics] Exclusive fullscreen restored after focus regain");
+        }
+        break;
+    case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
+
 # SDL may not emit a resize event before Vulkan constructs the first presentation
 # layer. Seed the framebuffer layout from the actual pixel size immediately so
 # FSR's output extent matches the real exclusive mode instead of 1280x720.
