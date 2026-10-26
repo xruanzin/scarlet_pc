@@ -79,17 +79,21 @@ bool WaitForWindowHandshake(std::atomic_bool& flag, DWORD timeout_ms = 2500) {
     return flag.load(std::memory_order_acquire);
 }
 
-void RequestDesktopForKeyboard() {
+bool RequestDesktopForKeyboard() {
     g_keyboard_overlay_active.store(true, std::memory_order_release);
     g_keyboard_desktop_ack.store(false, std::memory_order_release);
     g_keyboard_desktop_request.store(true, std::memory_order_release);
     if (WaitForWindowHandshake(g_keyboard_desktop_ack)) {
         LOG_INFO(Service_AM,
                  "[Scarlet.Keyboard] Fullscreen keyboard overlay mode ready");
-    } else {
-        LOG_WARNING(Service_AM,
-                    "[Scarlet.Keyboard] Timed out waiting for fullscreen keyboard overlay mode; continuing");
+        return true;
     }
+
+    g_keyboard_overlay_active.store(false, std::memory_order_release);
+    LOG_ERROR(Service_AM,
+              "[Scarlet.Keyboard] Fullscreen keyboard overlay mode was not confirmed; "
+              "keyboard will not open over a windowed game");
+    return false;
 }
 
 void RequestFullscreenAfterKeyboard(HWND owner) {
@@ -972,7 +976,9 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
     // Exclusive Vulkan presentation can cover any owned Win32 popup. Ask the
     // SDL/main thread to switch to borderless fullscreen first. The game stays
     // full-screen and visible behind the keyboard; the Windows desktop is not exposed.
-    RequestDesktopForKeyboard();
+    if (!RequestDesktopForKeyboard()) {
+        return {};
+    }
 
     RECT client{};
     GetClientRect(owner, &client);
