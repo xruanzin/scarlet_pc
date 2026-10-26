@@ -86,39 +86,19 @@ void UpdateKeyboardText(const InlineTextParameters& params) {
 } // namespace
 
 bool ConsumeKeyboardDesktopModeRequest() {
-#ifdef _WIN32
-    return g_keyboard_desktop_request.exchange(false, std::memory_order_acq_rel);
-#else
     return false;
-#endif
 }
 
 bool ConsumeKeyboardFullscreenRestoreRequest() {
-#ifdef _WIN32
-    return g_keyboard_restore_request.exchange(false, std::memory_order_acq_rel);
-#else
     return false;
-#endif
 }
 
-void AcknowledgeKeyboardDesktopMode() {
-#ifdef _WIN32
-    g_keyboard_desktop_ack.store(true, std::memory_order_release);
-#endif
-}
+void AcknowledgeKeyboardDesktopMode() {}
 
-void AcknowledgeKeyboardFullscreenRestore() {
-#ifdef _WIN32
-    g_keyboard_restore_ack.store(true, std::memory_order_release);
-#endif
-}
+void AcknowledgeKeyboardFullscreenRestore() {}
 
 bool KeyboardOverlayActive() {
-#ifdef _WIN32
-    return g_keyboard_overlay_active.load(std::memory_order_acquire);
-#else
-    return false;
-#endif
+    return KeyboardOverlay::Visible();
 }
 
 SoftwareKeyboardApplet::~SoftwareKeyboardApplet() {
