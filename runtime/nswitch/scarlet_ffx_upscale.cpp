@@ -585,10 +585,10 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
 
         dispatch.jitterOffset = {0.0f, 0.0f};
         dispatch.motionVectorScale = real_temporal
-            ? FfxFloatCoords2D{
+            ? FfxVkPortableFloat2{
                   MotionVectorScale(input_extent.width, "SCARLET_FSR_MOTION_SCALE_X"),
                   MotionVectorScale(input_extent.height, "SCARLET_FSR_MOTION_SCALE_Y")}
-            : FfxFloatCoords2D{1.0f, 1.0f};
+            : FfxVkPortableFloat2{1.0f, 1.0f};
         dispatch.renderSize = {input_extent.width, input_extent.height};
         dispatch.outputSize = {output_extent.width, output_extent.height};
         dispatch.frameTimeMilliseconds = FrameTimeMs();
