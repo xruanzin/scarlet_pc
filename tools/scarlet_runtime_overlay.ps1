@@ -2799,6 +2799,156 @@ $new = @'
 '@
 Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2_vk.cpp' $old.Trim() $new.Trim()
 
+
+# Make Scarlet's "fullscreen" mode a real SDL3 exclusive display mode instead of
+# silently resizing back to the desktop mode. The requested output resolution is
+# therefore a real display mode; "borderless" keeps the desktop mode unchanged.
+$old = @'
+    case Settings::FullscreenMode::Exclusive:
+        // Set window size to render size before entering fullscreen -- SDL3 does not resize window
+        // to display dimensions automatically in this mode.
+        {
+            const SDL_DisplayMode* display_mode =
+                SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+            if (display_mode) {
+                SDL_SetWindowSize(render_window, display_mode->w, display_mode->h);
+            } else {
+                LOG_ERROR(Frontend, "SDL_GetDesktopDisplayMode failed: {}", SDL_GetError());
+            }
+        }
+
+        if (SDL_SetWindowFullscreen(render_window, true)) {
+            return;
+        }
+
+        LOG_ERROR(Frontend, "Fullscreening failed: {}", SDL_GetError());
+        LOG_INFO(Frontend, "Attempting to use borderless fullscreen...");
+        [[fallthrough]];
+'@
+$new = @'
+    case Settings::FullscreenMode::Exclusive:
+        {
+            int requested_width = 0;
+            int requested_height = 0;
+            if (const char* value = std::getenv("SCARLET_WINDOW_WIDTH"); value && *value) {
+                requested_width = std::max(320, std::atoi(value));
+            }
+            if (const char* value = std::getenv("SCARLET_WINDOW_HEIGHT"); value && *value) {
+                requested_height = std::max(180, std::atoi(value));
+            }
+
+            SDL_DisplayID display = SDL_GetDisplayForWindow(render_window);
+            if (display == 0) {
+                display = SDL_GetPrimaryDisplay();
+            }
+
+            SDL_DisplayMode exclusive_mode{};
+            const bool have_requested_mode =
+                requested_width > 0 && requested_height > 0 &&
+                SDL_GetClosestFullscreenDisplayMode(
+                    display, requested_width, requested_height, 0.0f, false, &exclusive_mode);
+
+            if (have_requested_mode) {
+                if (SDL_SetWindowFullscreenMode(render_window, &exclusive_mode)) {
+                    SDL_SetWindowSize(render_window, exclusive_mode.w, exclusive_mode.h);
+                    LOG_INFO(Frontend,
+                             "[Scarlet.Graphics] Exclusive display mode selected: {}x{} @ {:.3f} Hz",
+                             exclusive_mode.w, exclusive_mode.h, exclusive_mode.refresh_rate);
+                } else {
+                    LOG_ERROR(Frontend, "SDL_SetWindowFullscreenMode failed: {}", SDL_GetError());
+                }
+            } else {
+                const SDL_DisplayMode* desktop_mode = SDL_GetDesktopDisplayMode(display);
+                if (desktop_mode) {
+                    SDL_SetWindowFullscreenMode(render_window, desktop_mode);
+                    SDL_SetWindowSize(render_window, desktop_mode->w, desktop_mode->h);
+                    LOG_WARNING(Frontend,
+                                "[Scarlet.Graphics] Requested exclusive mode {}x{} unavailable; "
+                                "falling back to desktop {}x{}",
+                                requested_width, requested_height,
+                                desktop_mode->w, desktop_mode->h);
+                } else {
+                    LOG_ERROR(Frontend, "SDL_GetDesktopDisplayMode failed: {}", SDL_GetError());
+                }
+            }
+        }
+
+        if (SDL_SetWindowFullscreen(render_window, true)) {
+            return;
+        }
+
+        LOG_ERROR(Frontend, "Fullscreening failed: {}", SDL_GetError());
+        LOG_INFO(Frontend, "Attempting to use borderless fullscreen...");
+        [[fallthrough]];
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
+
+# SDL may not emit a resize event before Vulkan constructs the first presentation
+# layer. Seed the framebuffer layout from the actual pixel size immediately so
+# FSR's output extent matches the real exclusive mode instead of 1280x720.
+$old = @'
+    if (fullscreen) {
+        Fullscreen();
+        ShowCursor(false);
+    }
+
+    // Retrieve native window handles via SDL3 property system
+'@
+$new = @'
+    if (fullscreen) {
+        Fullscreen();
+        ShowCursor(false);
+    }
+    OnResize();
+
+    // Retrieve native window handles via SDL3 property system
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2_vk.cpp' $old.Trim() $new.Trim()
+
+# When downscaling is active, ensure the scanout image itself owns the scaled
+# host image before presentation. Otherwise the texture cache can keep the
+# display image at 1920x1080 even though the render scale is 0.5x, which makes
+# the temporal upscaler receive a full-resolution source and disable itself.
+$old = @'
+    const auto GetImageViewForFramebuffer = [&](ImageId image_id) {
+        ImageViewInfo info{ImageViewType::e2D, view_format};
+        if (config.blending == Tegra::BlendMode::Opaque) {
+            info.x_source = static_cast<u8>(SwizzleSource::R);
+            info.y_source = static_cast<u8>(SwizzleSource::G);
+            info.z_source = static_cast<u8>(SwizzleSource::B);
+            info.w_source = static_cast<u8>(SwizzleSource::OneFloat);
+        }
+        return std::make_pair(&slot_image_views[FindOrEmplaceImageView(image_id, info)],
+                              slot_images[image_id].IsRescaled());
+    };
+'@
+$new = @'
+    const auto GetImageViewForFramebuffer = [&](ImageId image_id) {
+        auto& image = slot_images[image_id];
+
+        // Temporal FSR needs the real scaled host allocation, not merely scaled
+        // dimensions in presentation metadata. Force a rescale of the scanout
+        // image when the renderer is in a downscale mode and the image is safe
+        // to rescale. Subsequent guest writes then target the scaled host image.
+        const auto& resolution = Settings::values.resolution_info;
+        if (resolution.active && resolution.downscale && !image.IsRescaled() &&
+            ImageCanRescale(image)) {
+            ScaleUp(image);
+        }
+
+        ImageViewInfo info{ImageViewType::e2D, view_format};
+        if (config.blending == Tegra::BlendMode::Opaque) {
+            info.x_source = static_cast<u8>(SwizzleSource::R);
+            info.y_source = static_cast<u8>(SwizzleSource::G);
+            info.z_source = static_cast<u8>(SwizzleSource::B);
+            info.w_source = static_cast<u8>(SwizzleSource::OneFloat);
+        }
+        return std::make_pair(&slot_image_views[FindOrEmplaceImageView(image_id, info)],
+                              image.IsRescaled());
+    };
+'@
+Replace-Literal 'src\video_core\texture_cache\texture_cache.h' $old.Trim() $new.Trim()
+
 # Scarlet graphics identity in the Vulkan bring-up log.
 $old = @'
 CollectPhysicalMemoryInfo();
