@@ -5450,4 +5450,121 @@ $scarletArmRecompText = $scarletArmRecompText.Replace(
 [IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
 Write-Host '[Scarlet PC] CPU hot path: AOT long slices=1024 + inline SVC 0x10.' -ForegroundColor DarkGray
 
+
+# Scarlet synchronization hot paths. Preserve the exact slow path whenever
+# contention exists; skip the global scheduler lock only when userspace proves
+# there is nobody to wake.
+$scarletCondPath = Join-Path $SourceDir 'src\core\hle\kernel\k_condition_variable.cpp'
+$scarletCondText = [IO.File]::ReadAllText($scarletCondPath)
+
+if (-not $scarletCondText.Contains('[Scarlet.Perf] uncontended mutex unlock fast path')) {
+    $scarletCondClassAnchor = 'class ThreadQueueImplForKConditionVariableWaitForAddress final'
+    $scarletUnlockHelper = @'
+// [Scarlet.Perf] uncontended mutex unlock fast path
+bool TryUnlockNoWaiters(KernelCore& kernel, KProcessAddress address) {
+    auto& monitor = GetCurrentProcess(kernel).GetExclusiveMonitor();
+    const auto current_core = kernel.CurrentPhysicalCoreIndex();
+
+    // Read the exact lock word through the guest exclusive monitor. If the
+    // wait-mask is already present, the slow scheduler path must choose the next
+    // owner. If another core adds contention after this read, our exclusive
+    // store fails and we fall back as well.
+    const u32 current =
+        monitor.ExclusiveRead32(current_core, GetInteger(address));
+    if ((current & Svc::HandleWaitMask) != 0) {
+        monitor.ClearExclusive(current_core);
+        return false;
+    }
+
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return monitor.ExclusiveWrite32(current_core, GetInteger(address), 0);
+}
+
+'@
+    if (-not $scarletCondText.Contains($scarletCondClassAnchor)) {
+        throw 'Scarlet runtime overlay: condition-variable class anchor missing'
+    }
+    $scarletCondText =
+        $scarletCondText.Replace($scarletCondClassAnchor,
+                                 $scarletUnlockHelper + $scarletCondClassAnchor)
+
+    $scarletSignalAddrOld = @'
+Result KConditionVariable::SignalToAddress(KernelCore& kernel, KProcessAddress addr) {
+    KThread* owner_thread = GetCurrentThreadPointer(kernel);
+
+    // Signal the address.
+'@
+    $scarletSignalAddrNew = @'
+Result KConditionVariable::SignalToAddress(KernelCore& kernel, KProcessAddress addr) {
+    KThread* owner_thread = GetCurrentThreadPointer(kernel);
+
+    // Most Scarlet mutex unlocks are uncontended. Avoid taking the global
+    // scheduler lock when the guest lock word proves that no waiter exists.
+    // Lock-trace mode deliberately keeps the full path for diagnostics.
+    if (!LockTrace::Enabled() && TryUnlockNoWaiters(kernel, addr)) {
+        R_SUCCEED();
+    }
+
+    // Signal the address.
+'@
+    if (-not $scarletCondText.Contains($scarletSignalAddrOld.Trim())) {
+        throw 'Scarlet runtime overlay: SignalToAddress fast-path anchor missing'
+    }
+    $scarletCondText =
+        $scarletCondText.Replace($scarletSignalAddrOld.Trim(),
+                                 $scarletSignalAddrNew.Trim())
+
+    $scarletCvSignalOld = @'
+void KConditionVariable::Signal(u64 cv_key, s32 count) {
+    // Perform signaling.
+    s32 num_waiters{};
+'@
+    $scarletCvSignalNew = @'
+void KConditionVariable::Signal(u64 cv_key, s32 count) {
+    // Scarlet's userspace CV word is set to 1 before a waiter is inserted while
+    // holding the scheduler lock, and cleared when the last waiter leaves. A
+    // zero therefore linearizes this signal before any concurrent new waiter
+    // and lets the common no-waiter case avoid the scheduler lock entirely.
+    u32 has_waiter_flag{};
+    if (ReadFromUser(m_system.Kernel(), std::addressof(has_waiter_flag), cv_key) &&
+        has_waiter_flag == 0) {
+        return;
+    }
+
+    // Perform signaling.
+    s32 num_waiters{};
+'@
+    if (-not $scarletCondText.Contains($scarletCvSignalOld.Trim())) {
+        throw 'Scarlet runtime overlay: condition-variable Signal anchor missing'
+    }
+    $scarletCondText =
+        $scarletCondText.Replace($scarletCvSignalOld.Trim(),
+                                 $scarletCvSignalNew.Trim())
+
+    [IO.File]::WriteAllText($scarletCondPath, $scarletCondText, $utf8)
+    Write-Host '[Scarlet PC] Sync fast paths: uncontended mutex/CV signals avoid scheduler lock.' -ForegroundColor DarkGray
+}
+
+# Inline SVC 0x10 never reaches HLE, so do not inflate the "SVCs to HLE" total.
+$scarletArmRecompPath = Join-Path $SourceDir 'src\core\arm\recomp\arm_recomp.cpp'
+$scarletArmRecompText = [IO.File]::ReadAllText($scarletArmRecompPath)
+$scarletInlineSvcOld = @'
+            if (svc_number == 0x10) {
+                g_counters.svc_calls.fetch_add(1, std::memory_order_relaxed);
+                g_counters.RecordSvc(svc_number);
+'@
+$scarletInlineSvcNew = @'
+            if (svc_number == 0x10) {
+                // Count in the per-SVC histogram, but not in "SVCs to HLE":
+                // this call is completed entirely inside ArmRecomp.
+                g_counters.RecordSvc(svc_number);
+'@
+if ($scarletArmRecompText.Contains($scarletInlineSvcOld.Trim())) {
+    $scarletArmRecompText =
+        $scarletArmRecompText.Replace($scarletInlineSvcOld.Trim(),
+                                      $scarletInlineSvcNew.Trim())
+    [IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
+    Write-Host '[Scarlet PC] Coverage now excludes inline SVC 0x10 from HLE transitions.' -ForegroundColor DarkGray
+}
+
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
