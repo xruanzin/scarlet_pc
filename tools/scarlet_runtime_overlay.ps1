@@ -3364,9 +3364,6 @@ CollectPhysicalMemoryInfo();
 '@
 Replace-Literal 'src\video_core\vulkan_common\vulkan_device.cpp' $old.Trim() $new.Trim()
 
-Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
-
-
 # --- Scarlet FSR3 real temporal input bridge ---------------------------------
 # Capture a real depth target plus a compatible 2-channel floating-point MRT
 # from the texture cache and forward them to the presentation FSR pass. The
@@ -3448,7 +3445,12 @@ $new = @'
 
     if (depth_buffer_id) {
         auto& scarlet_depth = slot_image_views[depth_buffer_id];
-        for (const ImageViewId color_id : render_targets.color_buffer_ids) {
+        for (size_t scarlet_rt = 0; scarlet_rt < render_targets.color_buffer_ids.size();
+             ++scarlet_rt) {
+            if ((rt_active_mask & (1u << scarlet_rt)) == 0) {
+                continue;
+            }
+            const ImageViewId color_id = render_targets.color_buffer_ids[scarlet_rt];
             if (!color_id) {
                 continue;
             }
@@ -3583,3 +3585,5 @@ $new = @'
                                      temporal_inputs);
 '@
 Replace-Literal 'src\video_core\renderer_vulkan\present\layer.cpp' $old.Trim() $new.Trim()
+
+Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
