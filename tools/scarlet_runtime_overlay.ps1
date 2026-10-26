@@ -4212,8 +4212,6 @@ if (-not $scarletRasterizerText.Contains('[Scarlet.FSR3.Bridge] temporal framebu
     const auto [depth_view, motion_view] =
         texture_cache.TryFindScarletTemporalImageViews();
     if (depth_view && motion_view) {
-        const bool depth_scaled = depth_view->IsRescaled();
-        const bool motion_scaled = motion_view->IsRescaled();
         const auto depth_format =
             MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, depth_view->format).format;
         const auto motion_format =
@@ -4222,17 +4220,17 @@ if (-not $scarletRasterizerText.Contains('[Scarlet.FSR3.Bridge] temporal framebu
         info.depth_image = depth_view->ImageHandle();
         info.depth_format = depth_format;
         info.depth_aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
-        info.depth_width =
-            depth_scaled ? resolution.ScaleUp(depth_view->size.width) : depth_view->size.width;
-        info.depth_height =
-            depth_scaled ? resolution.ScaleUp(depth_view->size.height) : depth_view->size.height;
+        // The retained Scarlet temporal views are captured from the already-scaled
+        // scene MRT set. Their ImageView size is the physical render extent.
+        // Applying resolution.ScaleUp() here a second time turns 960x540 into
+        // 480x270 in Performance mode and makes FSR reject the pair.
+        info.depth_width = depth_view->size.width;
+        info.depth_height = depth_view->size.height;
 
         info.motion_image = motion_view->ImageHandle();
         info.motion_format = motion_format;
-        info.motion_width =
-            motion_scaled ? resolution.ScaleUp(motion_view->size.width) : motion_view->size.width;
-        info.motion_height =
-            motion_scaled ? resolution.ScaleUp(motion_view->size.height) : motion_view->size.height;
+        info.motion_width = motion_view->size.width;
+        info.motion_height = motion_view->size.height;
 
         static u32 scarlet_temporal_payload_logs = 0;
         if (scarlet_temporal_payload_logs < 16) {
@@ -4307,6 +4305,59 @@ if (-not $scarletLayerText.Contains('[Scarlet.FSR3.Bridge] layer temporal inputs
     }
 }
 Write-Host '[Scarlet PC] Forced temporal payload forwarding into active presentation path.' -ForegroundColor DarkGray
+
+# Repair temporal extents in preserved runtime trees. The selected Scarlet MRTs
+# are already at the physical FSR render size (e.g. 960x540). Do not apply the
+# global resolution scale to them a second time.
+$scarletRasterizerPath = Join-Path $SourceDir 'src\video_core\renderer_vulkan\vk_rasterizer.cpp'
+$scarletRasterizerText = [IO.File]::ReadAllText($scarletRasterizerPath)
+$scarletDoubleScaleOld = @'
+        const bool depth_scaled = depth_view->IsRescaled();
+        const bool motion_scaled = motion_view->IsRescaled();
+        const auto depth_format =
+            MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, depth_view->format).format;
+        const auto motion_format =
+            MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, motion_view->format).format;
+
+        info.depth_image = depth_view->ImageHandle();
+        info.depth_format = depth_format;
+        info.depth_aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+        info.depth_width =
+            depth_scaled ? resolution.ScaleUp(depth_view->size.width) : depth_view->size.width;
+        info.depth_height =
+            depth_scaled ? resolution.ScaleUp(depth_view->size.height) : depth_view->size.height;
+
+        info.motion_image = motion_view->ImageHandle();
+        info.motion_format = motion_format;
+        info.motion_width =
+            motion_scaled ? resolution.ScaleUp(motion_view->size.width) : motion_view->size.width;
+        info.motion_height =
+            motion_scaled ? resolution.ScaleUp(motion_view->size.height) : motion_view->size.height;
+'@
+$scarletDoubleScaleNew = @'
+        const auto depth_format =
+            MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, depth_view->format).format;
+        const auto motion_format =
+            MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, motion_view->format).format;
+
+        info.depth_image = depth_view->ImageHandle();
+        info.depth_format = depth_format;
+        info.depth_aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+        info.depth_width = depth_view->size.width;
+        info.depth_height = depth_view->size.height;
+
+        info.motion_image = motion_view->ImageHandle();
+        info.motion_format = motion_format;
+        info.motion_width = motion_view->size.width;
+        info.motion_height = motion_view->size.height;
+'@
+if ($scarletRasterizerText.Contains($scarletDoubleScaleOld.Trim())) {
+    $scarletRasterizerText =
+        $scarletRasterizerText.Replace($scarletDoubleScaleOld.Trim(), $scarletDoubleScaleNew.Trim())
+    [IO.File]::WriteAllText($scarletRasterizerPath, $scarletRasterizerText, $utf8)
+    Write-Host '[Scarlet PC] Fixed double-scaling of Scarlet FSR3 temporal extents.' -ForegroundColor DarkGray
+}
+
 
 
 $scarletForcedProbeMarker = '[Scarlet.FSR3.Probe.Force]'
@@ -4457,8 +4508,6 @@ $new = @'
         ++scarlet_rasterizer_bridge_logs;
     }
     if (depth_view && motion_view) {
-        const bool depth_scaled = depth_view->IsRescaled();
-        const bool motion_scaled = motion_view->IsRescaled();
         const auto depth_format =
             MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, depth_view->format).format;
         const auto motion_format =
@@ -4467,17 +4516,17 @@ $new = @'
         info.depth_image = depth_view->ImageHandle();
         info.depth_format = depth_format;
         info.depth_aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
-        info.depth_width =
-            depth_scaled ? resolution.ScaleUp(depth_view->size.width) : depth_view->size.width;
-        info.depth_height =
-            depth_scaled ? resolution.ScaleUp(depth_view->size.height) : depth_view->size.height;
+        // The retained Scarlet temporal views are captured from the already-scaled
+        // scene MRT set. Their ImageView size is the physical render extent.
+        // Applying resolution.ScaleUp() here a second time turns 960x540 into
+        // 480x270 in Performance mode and makes FSR reject the pair.
+        info.depth_width = depth_view->size.width;
+        info.depth_height = depth_view->size.height;
 
         info.motion_image = motion_view->ImageHandle();
         info.motion_format = motion_format;
-        info.motion_width =
-            motion_scaled ? resolution.ScaleUp(motion_view->size.width) : motion_view->size.width;
-        info.motion_height =
-            motion_scaled ? resolution.ScaleUp(motion_view->size.height) : motion_view->size.height;
+        info.motion_width = motion_view->size.width;
+        info.motion_height = motion_view->size.height;
     }
     return info;
 }
