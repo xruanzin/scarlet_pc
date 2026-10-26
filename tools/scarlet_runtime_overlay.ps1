@@ -2936,6 +2936,55 @@ $new = @'
 '@
 Replace-Literal 'src\video_core\texture_cache\texture_cache.h' $old.Trim() $new.Trim()
 
+# Scarlet temporal upscalers own their output extent. When active, use the complete
+# host framebuffer as the presentation rectangle instead of MaxRectangle(). This avoids
+# 1366x768 being rounded to a 1365x768 16:9 sub-rectangle and prevents a stale
+# 1280x720 layout from leaving visible bars around the image.
+$old = @'
+    auto screen = MaxRectangle(screen_window_area, emulation_aspect_ratio);
+    if (window_aspect_ratio < emulation_aspect_ratio) {
+        screen = screen.TranslateX((screen_window_area.GetWidth() - screen.GetWidth()) / 2);
+    } else {
+        screen = screen.TranslateY((height - screen.GetHeight()) / 2);
+    }
+'@
+$new = @'
+    Common::Rectangle<u32> screen{};
+    const char* scarlet_upscaler = std::getenv("SCARLET_UPSCALER");
+    const bool scarlet_temporal_output =
+        scarlet_upscaler &&
+        (std::string_view{scarlet_upscaler} == "fsr3" ||
+         std::string_view{scarlet_upscaler} == "fsr31" ||
+         std::string_view{scarlet_upscaler} == "fsr4" ||
+         std::string_view{scarlet_upscaler} == "dlss");
+    if (scarlet_temporal_output) {
+        screen = screen_window_area;
+    } else {
+        screen = MaxRectangle(screen_window_area, emulation_aspect_ratio);
+        if (window_aspect_ratio < emulation_aspect_ratio) {
+            screen = screen.TranslateX((screen_window_area.GetWidth() - screen.GetWidth()) / 2);
+        } else {
+            screen = screen.TranslateY((height - screen.GetHeight()) / 2);
+        }
+    }
+'@
+Replace-Literal 'src\core\frontend\framebuffer_layout.cpp' $old.Trim() $new.Trim()
+
+# framebuffer_layout.cpp now inspects the Scarlet upscaler environment.
+$old = @'
+#include <cmath>
+
+#include "common/assert.h"
+'@
+$new = @'
+#include <cmath>
+#include <cstdlib>
+#include <string_view>
+
+#include "common/assert.h"
+'@
+Replace-Literal 'src\core\frontend\framebuffer_layout.cpp' $old.Trim() $new.Trim()
+
 # Scarlet graphics identity in the Vulkan bring-up log.
 $old = @'
 CollectPhysicalMemoryInfo();
