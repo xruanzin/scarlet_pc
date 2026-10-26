@@ -149,12 +149,14 @@ typedef struct {
 // Pass that returned value to unpin(); the guest slot itself may be recycled.
 uint64_t nvn_cmdstream_pin(uint64_t handle);
 void nvn_cmdstream_unpin(uint64_t resolved);
+void nvn_cmdstream_pin_batch(const uint64_t *handles, uint64_t *resolved, int n);
+void nvn_cmdstream_unpin_batch(const uint64_t *resolved, int n);
 
 // Optional asynchronous Vulkan command-list executor. Scarlet's generated game
 // can keep doing CPU work while the renderer translates already-submitted NVN
 // lists. LARECOMP_RENDER_THREAD=0 restores the fully synchronous path.
 bool renderthread_active(void);
-bool renderthread_submit_batch(const uint64_t *resolved, int n);
+bool renderthread_submit_batch(const uint64_t *handles, int n);
 uint64_t renderthread_queue_fence(NvnSync *sync);
 void renderthread_wait_ticket(uint64_t ticket);
 void renderthread_present_sync(NvnTexture *tex);
@@ -191,7 +193,8 @@ enum {
 
 // renderer backend (runtime/nvn/metal.m)
 void backend_init(void);
-void backend_execute(uint64_t handle);            // run a recorded command list
+void backend_execute(uint64_t handle);            // run one already-pinned recorded command list
+void backend_execute_batch(const uint64_t *handles, int n); // run one NVN submit batch under one renderer lock
 void backend_present(NvnTexture *tex);            // show a texture in the window
 void backend_texture_destroyed(NvnTexture *tex);
 void backend_pool_written(uint64_t addr, uint64_t size);
