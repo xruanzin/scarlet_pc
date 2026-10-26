@@ -476,7 +476,8 @@ NVN(nvnCommandBufferSetDebugLabel) { (void)c; }
 
 static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
     CmdRec *r = (CmdRec *)(uintptr_t)at;
-    memset(r, 0, sizeof *r);
+    // Jump handles only consume op/size/x[0]. Avoid clearing the remaining
+    // payload on every command-list allocation.
     r->op = op;
     r->size = size;
     return r;
@@ -557,8 +558,8 @@ static CmdRec *rec_uninit(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     return r;
 }
 
-// BARRIER/END/OBJECT are tiny control records whose handlers expect omitted
-// fields to be zero. Keep that guarantee only for those uncommon records.
+// BARRIER/OBJECT are tiny control records whose handlers expect omitted fields
+// to be zero. CMD_END itself has no payload and uses rec_uninit directly.
 static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     CmdRec *r = rec_uninit(c, cb, op, extra);
     memset(r->x, 0, sizeof r->x);
@@ -696,7 +697,7 @@ NVN(nvnCommandBufferEndRecording) {
             LOG("[trace] list %llx holds the traced draw\n", (unsigned long long)cb->start);
             break;
         }
-    rec(c, cb, CMD_END, 0);
+    rec_uninit(c, cb, CMD_END, 0);
     cb->recording = false;
     uint64_t handle = cb->start;
     // The next recording should consume the next tiny slot in the game's
