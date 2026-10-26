@@ -7,6 +7,14 @@
 
 namespace ScarletPC {
 
+// Cross-thread handshake with the SDL window. The Win32 keyboard runs on its own
+// UI thread; exclusive fullscreen transitions must stay on the SDL/main thread.
+bool ConsumeKeyboardDesktopModeRequest();
+bool ConsumeKeyboardFullscreenRestoreRequest();
+void AcknowledgeKeyboardDesktopMode();
+void AcknowledgeKeyboardFullscreenRestore();
+bool KeyboardOverlayActive();
+
 class SoftwareKeyboardApplet final : public Core::Frontend::SoftwareKeyboardApplet {
 public:
     ~SoftwareKeyboardApplet() override;
