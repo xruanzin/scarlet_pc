@@ -3520,12 +3520,12 @@ $new = @'
     // the probe survives normal runtime log filtering, and keep it strictly bounded.
     static u32 scarlet_temporal_state_logs = 0;
     if (scarlet_temporal_state_logs < 64) {
-        LOG_WARNING(HW_GPU,
+        LOG_WARNING(Render_Vulkan,
                     "[Scarlet.FSR3.Probe] state depth={} active_mask={:#x}",
                     static_cast<u32>(depth_buffer_id), rt_active_mask);
         if (depth_buffer_id) {
             const auto& scarlet_probe_depth = slot_image_views[depth_buffer_id];
-            LOG_WARNING(HW_GPU,
+            LOG_WARNING(Render_Vulkan,
                         "[Scarlet.FSR3.Probe] depth format={} extent={}x{}",
                         static_cast<u32>(scarlet_probe_depth.format),
                         scarlet_probe_depth.size.width, scarlet_probe_depth.size.height);
@@ -3542,7 +3542,7 @@ $new = @'
                 continue;
             }
             const auto& scarlet_probe_view = slot_image_views[scarlet_probe_id];
-            LOG_WARNING(HW_GPU,
+            LOG_WARNING(Render_Vulkan,
                         "[Scarlet.FSR3.Probe] rt{} format={} extent={}x{}",
                         scarlet_probe_rt, static_cast<u32>(scarlet_probe_view.format),
                         scarlet_probe_view.size.width, scarlet_probe_view.size.height);
@@ -3574,8 +3574,8 @@ $new = @'
                 static bool scarlet_logged_temporal_candidate = false;
                 if (!scarlet_logged_temporal_candidate) {
                     scarlet_logged_temporal_candidate = true;
-                    LOG_INFO(HW_GPU,
-                             "[Scarlet.FSR3.Probe] selected temporal candidate rt{} format={} depth_format={} extent={}x{}",
+                    LOG_WARNING(Render_Vulkan,
+                                "[Scarlet.FSR3.Probe] selected temporal candidate rt{} format={} depth_format={} extent={}x{}",
                              scarlet_rt, static_cast<u32>(scarlet_motion.format),
                              static_cast<u32>(scarlet_depth.format),
                              scarlet_motion.size.width, scarlet_motion.size.height);
@@ -3632,12 +3632,12 @@ $new = @'
     // the probe survives normal runtime log filtering, and keep it strictly bounded.
     static u32 scarlet_temporal_state_logs = 0;
     if (scarlet_temporal_state_logs < 64) {
-        LOG_WARNING(HW_GPU,
+        LOG_WARNING(Render_Vulkan,
                     "[Scarlet.FSR3.Probe] state depth={} active_mask={:#x}",
                     static_cast<u32>(depth_buffer_id), rt_active_mask);
         if (depth_buffer_id) {
             const auto& scarlet_probe_depth = slot_image_views[depth_buffer_id];
-            LOG_WARNING(HW_GPU,
+            LOG_WARNING(Render_Vulkan,
                         "[Scarlet.FSR3.Probe] depth format={} extent={}x{}",
                         static_cast<u32>(scarlet_probe_depth.format),
                         scarlet_probe_depth.size.width, scarlet_probe_depth.size.height);
@@ -3654,7 +3654,7 @@ $new = @'
                 continue;
             }
             const auto& scarlet_probe_view = slot_image_views[scarlet_probe_id];
-            LOG_WARNING(HW_GPU,
+            LOG_WARNING(Render_Vulkan,
                         "[Scarlet.FSR3.Probe] rt{} format={} extent={}x{}",
                         scarlet_probe_rt, static_cast<u32>(scarlet_probe_view.format),
                         scarlet_probe_view.size.width, scarlet_probe_view.size.height);
@@ -3666,6 +3666,21 @@ $new = @'
         auto& scarlet_depth = slot_image_views[depth_buffer_id];
 '@
 Replace-Literal 'src\video_core\texture_cache\texture_cache.h' $old.Trim() $new.Trim()
+
+# Robust fast-incremental migration: the user's preserved runtime tree can contain
+# an older textual form of the probe. Promote only Scarlet.FSR3.Probe messages to
+# Render_Vulkan so they are visible with the normal runtime log filter.
+$scarletTextureCachePath = Join-Path $SourceDir 'src\video_core\texture_cache\texture_cache.h'
+$scarletTextureCacheText = [IO.File]::ReadAllText($scarletTextureCachePath)
+$scarletProbePattern = 'LOG_(?:INFO|WARNING)\(HW_GPU,(\s*"\[Scarlet\.FSR3\.Probe\])'
+$scarletTextureCacheUpdated = [regex]::Replace(
+    $scarletTextureCacheText,
+    $scarletProbePattern,
+    'LOG_WARNING(Render_Vulkan,$1'
+)
+if ($scarletTextureCacheUpdated -ne $scarletTextureCacheText) {
+    [IO.File]::WriteAllText($scarletTextureCachePath, $scarletTextureCacheUpdated, $utf8)
+}
 
 
 $old = @'
