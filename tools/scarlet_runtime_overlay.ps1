@@ -2657,19 +2657,18 @@ $new = @'
         Settings::values.aspect_ratio.SetValue(
             ratio_16_10 ? Settings::AspectRatio::R16_10 : Settings::AspectRatio::R16_9);
 
-        // The launcher resolution is the OUTPUT resolution. Pick a render scale separately.
-        // With an upscaler enabled, reduce the guest render resolution according to the
-        // selected quality preset instead of accidentally supersampling it.
-        float desired_scale = static_cast<float>(scarlet_width) / 1920.0f;
+        // Output/display resolution and temporal render resolution are separate.
+        // Changing the monitor/window size must never act like suyu's user-facing
+        // 0.5x/2x resolution multiplier. Keep native guest resolution unless a
+        // temporal upscaler explicitly needs a lower render target.
         const char* resolution_upscaler = std::getenv("SCARLET_UPSCALER");
-        const bool uses_upscaler =
-            resolution_upscaler && *resolution_upscaler &&
-            std::string_view{resolution_upscaler} != "native";
         const bool temporal_fsr =
             resolution_upscaler &&
             (std::string_view{resolution_upscaler} == "fsr3" ||
              std::string_view{resolution_upscaler} == "fsr31");
-        if (uses_upscaler) {
+
+        float fsr_render_scale = 1.0f;
+        if (temporal_fsr) {
             float upscale_ratio = 1.5f; // Quality
             if (const char* quality = std::getenv("SCARLET_UPSCALER_QUALITY");
                 quality && *quality) {
@@ -2682,44 +2681,32 @@ $new = @'
                     upscale_ratio = 3.0f;
                 }
             }
-            desired_scale /= upscale_ratio;
 
-            // The renderer only exposes discrete guest render scales. At 1366x768,
-            // FSR 3 Performance requests ~0.356X; nearest-value rounding selected
-            // the experimental 0.25X path, which effectively asks FSR to upscale
-            // roughly 2.8x and has proven unstable on the AMD Windows path.
-            // Temporal FSR needs at least the 0.5X guest target until arbitrary
-            // render extents are supported.
-            if (temporal_fsr) {
-                desired_scale = std::max(desired_scale, 0.5f);
-            }
+            // Guest docked rendering is 1920 wide. Convert the selected output
+            // mode + FSR quality ratio into a dedicated FSR input scale.
+            fsr_render_scale =
+                (static_cast<float>(scarlet_width) / 1920.0f) / upscale_ratio;
+
+            // The current texture-cache allocator exposes discrete host scales.
+            // 0.5x is the lowest stable temporal input on the target AMD Windows
+            // path; arbitrary FSR extents can replace this later without changing
+            // the display-resolution contract.
+            fsr_render_scale = std::max(fsr_render_scale, 0.5f);
         }
 
         Settings::ResolutionSetup setup = Settings::ResolutionSetup::Res1X;
-        if (desired_scale < 0.375f) {
-            setup = Settings::ResolutionSetup::Res1_4X;
-        } else if (desired_scale < 0.625f) {
-            setup = Settings::ResolutionSetup::Res1_2X;
-        } else if (desired_scale < 0.875f) {
-            setup = Settings::ResolutionSetup::Res3_4X;
-        } else if (desired_scale < 1.125f) {
-            setup = Settings::ResolutionSetup::Res1X;
-        } else if (desired_scale < 1.375f) {
-            setup = Settings::ResolutionSetup::Res5_4X;
-        } else if (desired_scale < 1.75f) {
-            setup = Settings::ResolutionSetup::Res3_2X;
-        } else if (desired_scale < 2.5f) {
-            setup = Settings::ResolutionSetup::Res2X;
-        } else if (desired_scale < 3.5f) {
-            setup = Settings::ResolutionSetup::Res3X;
-        } else {
-            setup = Settings::ResolutionSetup::Res4X;
+        if (temporal_fsr) {
+            if (fsr_render_scale < 0.625f) {
+                setup = Settings::ResolutionSetup::Res1_2X;
+            } else if (fsr_render_scale < 0.875f) {
+                setup = Settings::ResolutionSetup::Res3_4X;
+            }
         }
         Settings::values.resolution_setup.SetValue(setup);
         Settings::UpdateRescalingInfo();
         LOG_INFO(Frontend,
-                 "[Scarlet.Graphics] Output={}x{} internal_scale_request={:.3f} upscaler={}",
-                 scarlet_width, scarlet_height, desired_scale,
+                 "[Scarlet.Graphics] Output={}x{} fsr_render_scale={:.3f} upscaler={}",
+                 scarlet_width, scarlet_height, fsr_render_scale,
                  resolution_upscaler && *resolution_upscaler ? resolution_upscaler : "native");
     }
 
