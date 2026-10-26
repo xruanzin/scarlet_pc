@@ -5488,15 +5488,21 @@ bool TryUnlockNoWaiters(KernelCore& kernel, KProcessAddress address) {
         $scarletCondText.Replace($scarletCondClassAnchor,
                                  $scarletUnlockHelper + $scarletCondClassAnchor)
 
-    $scarletSignalAddrOld = @'
-Result KConditionVariable::SignalToAddress(KernelCore& kernel, KProcessAddress addr) {
-    KThread* owner_thread = GetCurrentThreadPointer(kernel);
-
-    // Signal the address.
-'@
-    $scarletSignalAddrNew = @'
-Result KConditionVariable::SignalToAddress(KernelCore& kernel, KProcessAddress addr) {
-    KThread* owner_thread = GetCurrentThreadPointer(kernel);
+    # Insert the uncontended unlock fast path structurally. Incremental trees can
+    # have diagnostics/comments inserted between the signature and scheduler path.
+    if (-not $scarletCondText.Contains('TryUnlockNoWaiters(kernel, addr)')) {
+        $scarletSignalAddrPattern =
+            '(?s)(Result KConditionVariable::SignalToAddress\(KernelCore& kernel, KProcessAddress addr\)\s*\{\s*' +
+            'KThread\*\s+owner_thread\s*=\s*GetCurrentThreadPointer\(kernel\);)'
+        $scarletSignalAddrRegex = [regex]::new(
+            $scarletSignalAddrPattern,
+            [Text.RegularExpressions.RegexOptions]::Singleline
+        )
+        $scarletSignalAddrMatch = $scarletSignalAddrRegex.Match($scarletCondText)
+        if (-not $scarletSignalAddrMatch.Success) {
+            throw 'Scarlet runtime overlay: semantic SignalToAddress anchor missing'
+        }
+        $scarletSignalAddrInsert = @'
 
     // Most Scarlet mutex unlocks are uncontended. Avoid taking the global
     // scheduler lock when the guest lock word proves that no waiter exists.
@@ -5504,23 +5510,27 @@ Result KConditionVariable::SignalToAddress(KernelCore& kernel, KProcessAddress a
     if (!LockTrace::Enabled() && TryUnlockNoWaiters(kernel, addr)) {
         R_SUCCEED();
     }
-
-    // Signal the address.
 '@
-    if (-not $scarletCondText.Contains($scarletSignalAddrOld.Trim())) {
-        throw 'Scarlet runtime overlay: SignalToAddress fast-path anchor missing'
+        $scarletCondText = $scarletSignalAddrRegex.Replace(
+            $scarletCondText,
+            '$1' + $scarletSignalAddrInsert,
+            1
+        )
+        Write-Host '[Scarlet PC] Added uncontended mutex unlock fast path.' -ForegroundColor DarkGray
     }
-    $scarletCondText =
-        $scarletCondText.Replace($scarletSignalAddrOld.Trim(),
-                                 $scarletSignalAddrNew.Trim())
 
-    $scarletCvSignalOld = @'
-void KConditionVariable::Signal(u64 cv_key, s32 count) {
-    // Perform signaling.
-    s32 num_waiters{};
-'@
-    $scarletCvSignalNew = @'
-void KConditionVariable::Signal(u64 cv_key, s32 count) {
+    # Same approach for condition-variable signaling: inject immediately after
+    # the function signature regardless of surrounding comments/formatting.
+    if (-not $scarletCondText.Contains('has_waiter_flag == 0')) {
+        $scarletCvSignalPattern =
+            '(void KConditionVariable::Signal\(u64 cv_key, s32 count\)\s*\{)'
+        $scarletCvSignalRegex = [regex]::new($scarletCvSignalPattern)
+        $scarletCvSignalMatch = $scarletCvSignalRegex.Match($scarletCondText)
+        if (-not $scarletCvSignalMatch.Success) {
+            throw 'Scarlet runtime overlay: semantic condition-variable Signal anchor missing'
+        }
+        $scarletCvSignalInsert = @'
+
     // Scarlet's userspace CV word is set to 1 before a waiter is inserted while
     // holding the scheduler lock, and cleared when the last waiter leaves. A
     // zero therefore linearizes this signal before any concurrent new waiter
@@ -5530,16 +5540,14 @@ void KConditionVariable::Signal(u64 cv_key, s32 count) {
         has_waiter_flag == 0) {
         return;
     }
-
-    // Perform signaling.
-    s32 num_waiters{};
 '@
-    if (-not $scarletCondText.Contains($scarletCvSignalOld.Trim())) {
-        throw 'Scarlet runtime overlay: condition-variable Signal anchor missing'
+        $scarletCondText = $scarletCvSignalRegex.Replace(
+            $scarletCondText,
+            '$1' + $scarletCvSignalInsert,
+            1
+        )
+        Write-Host '[Scarlet PC] Added no-waiter CV signal fast path.' -ForegroundColor DarkGray
     }
-    $scarletCondText =
-        $scarletCondText.Replace($scarletCvSignalOld.Trim(),
-                                 $scarletCvSignalNew.Trim())
 
     [IO.File]::WriteAllText($scarletCondPath, $scarletCondText, $utf8)
     Write-Host '[Scarlet PC] Sync fast paths: uncontended mutex/CV signals avoid scheduler lock.' -ForegroundColor DarkGray
