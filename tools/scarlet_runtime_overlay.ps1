@@ -5330,4 +5330,117 @@ if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] AOT chain budget=')) {
 [IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
 Write-Host '[Scarlet PC] Forced AOT chain budget 1024 in preserved runtime.' -ForegroundColor DarkGray
 
+
+# Scarlet CPU hot-path follow-up: keep native video decode off the Ryzen CPU,
+# make long AOT slices use the measured-best 1024 budget, and answer the
+# extremely hot GetCurrentProcessorNumber SVC directly inside ArmRecomp.
+$scarletRuntimeCmdPath = Join-Path $SourceDir (Expand-Legacy 'src\__PRODUCT___cmd\__PRODUCT__.cpp')
+$scarletRuntimeCmdText = [IO.File]::ReadAllText($scarletRuntimeCmdPath)
+
+# The upstream native-export block intentionally forces NVDEC to CPU for Intel
+# iGPU safety. Scarlet PC targets this AMD path and CPU decode is visibly hurting
+# cutscene/audio pacing. GPU decode is the default here; SCARLET_CPU_VIDEO=1 is
+# the conservative fallback.
+$scarletCpuVideoPattern =
+    '(?s)\s*// Decode video on the CPU unless the user has chosen otherwise\..*?' +
+    'if \(Settings::values\.nvdec_emulation\.UsingGlobal\(\) &&\s*' +
+    'Settings::values\.nvdec_emulation\.GetValue\(\) == Settings::NvdecEmulation::Gpu\) \{\s*' +
+    'Settings::values\.nvdec_emulation\.SetValue\(Settings::NvdecEmulation::Cpu\);\s*' +
+    'LOG_INFO\(Frontend, "Native export: using CPU video decoding"\);\s*' +
+    '\}'
+$scarletGpuVideoBlock = @'
+
+        // Scarlet PC: AMD APU performance profile. Keep video decode on the GPU
+        // unless explicitly forced back to CPU for compatibility testing.
+        const char* scarlet_cpu_video_env = std::getenv("SCARLET_CPU_VIDEO");
+        const bool scarlet_cpu_video =
+            scarlet_cpu_video_env && *scarlet_cpu_video_env &&
+            *scarlet_cpu_video_env != '0';
+        Settings::values.nvdec_emulation.SetValue(
+            scarlet_cpu_video ? Settings::NvdecEmulation::Cpu
+                              : Settings::NvdecEmulation::Gpu);
+        LOG_INFO(Frontend, "[Scarlet.Perf] Native video decode={}",
+                 scarlet_cpu_video ? "CPU-safe" : "GPU-fast");
+'@
+if ($scarletRuntimeCmdText.Contains('Native export: using CPU video decoding')) {
+    $scarletRuntimeCmdUpdated = [regex]::Replace(
+        $scarletRuntimeCmdText,
+        $scarletCpuVideoPattern,
+        $scarletGpuVideoBlock,
+        1)
+    if ($scarletRuntimeCmdUpdated -eq $scarletRuntimeCmdText) {
+        throw 'Scarlet runtime overlay: native CPU video-decode block found but migration failed'
+    }
+    $scarletRuntimeCmdText = $scarletRuntimeCmdUpdated
+    [IO.File]::WriteAllText($scarletRuntimeCmdPath, $scarletRuntimeCmdText, $utf8)
+    Write-Host '[Scarlet PC] Native video decode moved from CPU to GPU.' -ForegroundColor DarkGray
+}
+
+$scarletArmRecompPath = Join-Path $SourceDir 'src\core\arm\recomp\arm_recomp.cpp'
+$scarletArmRecompText = [IO.File]::ReadAllText($scarletArmRecompPath)
+
+# SetRecompLongSlices(true) is called after the static default and was restoring
+# 4096. The backend's own measurements put 1024 slightly ahead while returning
+# to the host much less often than the original 32.
+$scarletArmRecompText = $scarletArmRecompText.Replace(
+    'g_recomp_chain_budget.store(enabled ? 4096 : 32, std::memory_order_relaxed);',
+    'g_recomp_chain_budget.store(enabled ? 1024 : 32, std::memory_order_relaxed);'
+)
+
+# SVC 0x10 (GetCurrentProcessorNumber) is pure: suyu's implementation only
+# returns CurrentPhysicalCore().CoreIndex(). The ArmRecomp instance already
+# represents exactly that physical core. Answer it in-place, preserving coverage
+# counters but avoiding PhysicalCore -> Svc::Call -> scheduler -> RunThread.
+if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] inline svc 0x10')) {
+    $scarletSvcExitOld = @'
+        if (impl->ctx.pending_svc != kNoPendingSvc) {
+            // Log every SVC call from rtld (first few hundred only to avoid spam)
+            LOG_TRACE(Core_ARM, "recomp SVC {} at pc={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
+                       impl->ctx.pending_svc, impl->ctx.pc, impl->ctx.x[0], impl->ctx.x[1],
+                       impl->ctx.x[2], impl->ctx.x[3]);
+            g_counters.svc_calls.fetch_add(1, std::memory_order_relaxed);
+            g_counters.RecordSvc(static_cast<u32>(impl->ctx.pending_svc));
+            return HaltReason::SupervisorCall;
+        }
+'@
+    $scarletSvcExitNew = @'
+        if (impl->ctx.pending_svc != kNoPendingSvc) {
+            const u32 svc_number = static_cast<u32>(impl->ctx.pending_svc);
+
+            // [Scarlet.Perf] inline svc 0x10
+            // GetCurrentProcessorNumber has no scheduler or kernel side effects.
+            // The generated block has already advanced PC past the SVC.
+            if (svc_number == 0x10) {
+                g_counters.svc_calls.fetch_add(1, std::memory_order_relaxed);
+                g_counters.RecordSvc(svc_number);
+                impl->ctx.x[0] = static_cast<u64>(impl->core_index);
+                impl->ctx.pending_svc = kNoPendingSvc;
+                impl->ctx.halted = 0;
+                continue;
+            }
+
+            LOG_TRACE(Core_ARM, "recomp SVC {} at pc={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
+                       impl->ctx.pending_svc, impl->ctx.pc, impl->ctx.x[0], impl->ctx.x[1],
+                       impl->ctx.x[2], impl->ctx.x[3]);
+            g_counters.svc_calls.fetch_add(1, std::memory_order_relaxed);
+            g_counters.RecordSvc(svc_number);
+            return HaltReason::SupervisorCall;
+        }
+'@
+    if (-not $scarletArmRecompText.Contains($scarletSvcExitOld.Trim())) {
+        throw 'Scarlet runtime overlay: ArmRecomp SVC exit block missing'
+    }
+    $scarletArmRecompText =
+        $scarletArmRecompText.Replace($scarletSvcExitOld.Trim(), $scarletSvcExitNew.Trim())
+}
+
+# Keep the first-entry verification log accurate after SetRecompLongSlices().
+$scarletArmRecompText = $scarletArmRecompText.Replace(
+    '"[Scarlet.Perf] AOT chain budget={}", RecompChainBudget())',
+    '"[Scarlet.Perf] AOT chain budget={}; inline_svc10=on", RecompChainBudget())'
+)
+
+[IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
+Write-Host '[Scarlet PC] CPU hot path: AOT long slices=1024 + inline SVC 0x10.' -ForegroundColor DarkGray
+
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
