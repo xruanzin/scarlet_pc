@@ -1,6 +1,7 @@
 #include "video_core/renderer_vulkan/scarlet_keyboard_overlay_pass.h"
 
 #include <array>
+#include <tuple>
 #include <vector>
 
 #include "video_core/host_shaders/vulkan_present_frag_spv.h"
@@ -24,7 +25,7 @@ ScarletKeyboardOverlayPass::ScarletKeyboardOverlayPass(
     descriptor_pool =
         CreateWrappedDescriptorPool(device, 1, 1, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER});
 
-    const std::array<VkDescriptorSetLayout, 1> layouts{*descriptor_set_layout};
+    const std::vector<VkDescriptorSetLayout> layouts{*descriptor_set_layout};
     descriptor_sets = CreateWrappedDescriptorSets(descriptor_pool, layouts);
 
     const VkPushConstantRange range{
