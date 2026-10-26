@@ -25,7 +25,22 @@
 namespace Vulkan {
 namespace {
 
+constexpr VkFormat kFfxInputFormat = VK_FORMAT_R8G8B8A8_UNORM;
 constexpr VkFormat kFfxOutputFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+
+bool PortableFsrInputFormatSupported(VkFormat format) {
+    switch (format) {
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SRGB:
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_B8G8R8A8_SRGB:
+    case VK_FORMAT_R16G16B16A16_SFLOAT:
+    case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+        return true;
+    default:
+        return false;
+    }
+}
 
 std::atomic_bool g_temporal_disabled_for_run{false};
 
@@ -221,6 +236,8 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
     images.resize(image_count);
 
     for (auto& set : images) {
+        set.input = CreateWrappedImage(allocator, input_extent, kFfxInputFormat);
+        set.input_view = CreateWrappedImageView(device, set.input, kFfxInputFormat);
         set.output = CreateWrappedImage(allocator, output_extent, kFfxOutputFormat);
         set.output_view = CreateWrappedImageView(device, set.output, kFfxOutputFormat);
         set.depth = CreateWrappedImage(allocator, input_extent, VK_FORMAT_R32_SFLOAT);
@@ -237,6 +254,8 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
         VkClearColorValue zero{};
 
         for (auto& set : images) {
+            TransitionImageLayout(cmdbuf, *set.input, VK_IMAGE_LAYOUT_GENERAL,
+                                  VK_IMAGE_LAYOUT_UNDEFINED);
             TransitionImageLayout(cmdbuf, *set.output, VK_IMAGE_LAYOUT_GENERAL,
                                   VK_IMAGE_LAYOUT_UNDEFINED);
             TransitionImageLayout(cmdbuf, *set.depth, VK_IMAGE_LAYOUT_GENERAL,
@@ -323,17 +342,126 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
     scheduler.Record([this, source_image, image_index, reset, frame_id](vk::CommandBuffer cmdbuf) {
         auto& local = images[image_index];
 
-        GeneralBarrier(cmdbuf, source_image,
-                       VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                       VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        VkImage fsr_input_image = source_image;
+        VkFormat fsr_input_format = source_format;
+
+        // Scarlet's scanout is commonly VK_FORMAT_A8B8G8R8_UNORM_PACK32 (VkFormat 51).
+        // AMD FidelityFX 1.1.4 does not map that packed format to an FFX surface format.
+        // Normalize unsupported scanout formats into a known FSR-compatible RGBA8 image.
+        if (!PortableFsrInputFormatSupported(source_format)) {
+            const VkImageSubresourceRange range = ColorRange();
+            const std::array pre_blit{
+                VkImageMemoryBarrier{
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    .pNext = nullptr,
+                    .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT |
+                                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                     VK_ACCESS_SHADER_WRITE_BIT,
+                    .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+                    .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+                    .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = source_image,
+                    .subresourceRange = range,
+                },
+                VkImageMemoryBarrier{
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    .pNext = nullptr,
+                    .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                    .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                    .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+                    .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = *local.input,
+                    .subresourceRange = range,
+                },
+            };
+            cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, nullptr, nullptr, pre_blit);
+
+            const VkImageBlit blit{
+                .srcSubresource{
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+                .srcOffsets{
+                    VkOffset3D{0, 0, 0},
+                    VkOffset3D{static_cast<s32>(input_extent.width),
+                               static_cast<s32>(input_extent.height), 1},
+                },
+                .dstSubresource{
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+                .dstOffsets{
+                    VkOffset3D{0, 0, 0},
+                    VkOffset3D{static_cast<s32>(input_extent.width),
+                               static_cast<s32>(input_extent.height), 1},
+                },
+            };
+            cmdbuf.BlitImage(source_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                             *local.input, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             std::array{blit}, VK_FILTER_NEAREST);
+
+            const std::array post_blit{
+                VkImageMemoryBarrier{
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    .pNext = nullptr,
+                    .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+                    .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                    .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = source_image,
+                    .subresourceRange = range,
+                },
+                VkImageMemoryBarrier{
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    .pNext = nullptr,
+                    .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                    .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                    .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = *local.input,
+                    .subresourceRange = range,
+                },
+            };
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                                   nullptr, nullptr, post_blit);
+
+            fsr_input_image = *local.input;
+            fsr_input_format = kFfxInputFormat;
+
+            static std::atomic_bool logged_conversion{false};
+            if (!logged_conversion.exchange(true, std::memory_order_relaxed)) {
+                LOG_INFO(Render_Vulkan,
+                         "[Scarlet.FSR3] Normalizing unsupported scanout format {} to RGBA8 before FSR",
+                         static_cast<int>(source_format));
+            }
+        } else {
+            GeneralBarrier(cmdbuf, source_image,
+                           VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                           VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        }
 
         FfxVkPortableUpscaleDispatchInfo dispatch{};
         dispatch.structSize = sizeof(dispatch);
         dispatch.commandBuffer = *cmdbuf;
         dispatch.color = PortableImage(
-            source_image, source_format, input_extent.width, input_extent.height,
-            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            fsr_input_image, fsr_input_format, input_extent.width, input_extent.height,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT, FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
         dispatch.depth = PortableImage(
             *local.depth, VK_FORMAT_R32_SFLOAT, input_extent.width, input_extent.height,
