@@ -1,27 +1,21 @@
 // SPDX-License-Identifier: MIT
 // Native FidelityFX temporal upscaling for Scarlet PC.
-// Uses the official AMD FidelityFX Vulkan runtime, the same runtime family used
-// by Zelda-on-PC for its FSR 3 path.
+//
+// The FSR 3.1 path intentionally uses FireBurn/FSR-Vulkan's portable native
+// Vulkan backend, matching the integration used by SpartanPort's experimental
+// temporal-upscaler releases. It records directly into Scarlet's Vulkan command
+// buffer and does not load amd_fidelityfx_vk.dll.
 
 #include "video_core/renderer_vulkan/scarlet_ffx_upscale.h"
-
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#endif
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
-#include <string>
 
-#include <ffx_api/ffx_api.h>
-#include <ffx_api/ffx_upscale.h>
-#include <ffx_api/vk/ffx_api_vk.h>
+#include <ffx_vk_portable.h>
 
 #include "common/logging/log.h"
 #include "video_core/renderer_vulkan/present/util.h"
@@ -34,10 +28,6 @@ namespace {
 constexpr VkFormat kFfxOutputFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
 std::atomic_bool g_temporal_disabled_for_run{false};
-
-using CreateFn = PfnFfxCreateContext;
-using DestroyFn = PfnFfxDestroyContext;
-using DispatchFn = PfnFfxDispatch;
 
 bool FfxUpscaleRequested() {
     const char* value = std::getenv("SCARLET_UPSCALER");
@@ -58,33 +48,36 @@ float FrameTimeMs() {
     return 1000.0f / static_cast<float>(fps);
 }
 
-std::filesystem::path ExecutableDirectory() {
-#ifdef _WIN32
-    std::wstring path(32768, L'\0');
-    const DWORD size =
-        GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-    path.resize(size);
-    return std::filesystem::path(path).parent_path();
-#else
-    return {};
-#endif
+FfxVkPortableImage PortableImage(VkImage image, VkFormat format, std::uint32_t width,
+                                 std::uint32_t height, VkImageUsageFlags usage,
+                                 VkImageAspectFlags aspect,
+                                 FfxVkPortableResourceState state) {
+    FfxVkPortableImage result{};
+    result.structSize = sizeof(result);
+    result.image = image;
+    result.format = format;
+    result.extent = {width, height};
+    result.mipCount = 1;
+    result.arrayLayers = 1;
+    result.usage = usage;
+    result.aspect = aspect;
+    result.state = state;
+    return result;
 }
 
-FfxApiResource Resource(VkImage image, VkFormat format, std::uint32_t width,
-                        std::uint32_t height, std::uint32_t state, bool uav) {
-    FfxApiResource result{};
-    result.resource = reinterpret_cast<void*>(image);
-    result.state = state;
-    result.description.type = FFX_API_RESOURCE_TYPE_TEXTURE2D;
-    result.description.format = ffxApiGetSurfaceFormatVK(format);
-    result.description.width = width;
-    result.description.height = height;
-    result.description.depth = 1;
-    result.description.mipCount = 1;
-    result.description.flags = FFX_API_RESOURCE_FLAGS_NONE;
-    result.description.usage =
-        FFX_API_RESOURCE_USAGE_READ_ONLY | (uav ? FFX_API_RESOURCE_USAGE_UAV : 0);
-    return result;
+void LogValidationIssues(const char* stage, std::uint64_t issues) {
+    if (!issues) {
+        return;
+    }
+    for (std::uint32_t bit = 0; bit < 64; ++bit) {
+        const std::uint64_t flag = 1ull << bit;
+        if ((issues & flag) == 0) {
+            continue;
+        }
+        const char* name = ffxVkPortableValidationIssueName(flag);
+        LOG_WARNING(Render_Vulkan, "[Scarlet.FSR3] portable {} validation: {}",
+                    stage, name ? name : "unknown");
+    }
 }
 
 VkImageSubresourceRange ColorRange() {
@@ -118,66 +111,21 @@ void GeneralBarrier(vk::CommandBuffer cmdbuf, VkImage image, VkAccessFlags src_a
 } // namespace
 
 struct ScarletFfxUpscalePass::Impl {
-#ifdef _WIN32
-    HMODULE module{};
-#endif
-    CreateFn create{};
-    DestroyFn destroy{};
-    DispatchFn dispatch{};
-    ffxContext context{};
-    // FidelityFX keeps pointers from the create descriptor chain for the lifetime
-    // of the context. Keep the descriptors in Impl rather than on EnsureResources'
-    // stack so the backend chain never dangles after creation returns.
-    ffxCreateBackendVKDesc backend_desc{};
-    ffxCreateContextDescUpscale upscale_desc{};
-    bool loaded{};
-
-    bool Load() {
-        if (loaded) {
-            return true;
-        }
-#ifdef _WIN32
-        const auto path = ExecutableDirectory() / L"amd_fidelityfx_vk.dll";
-        module = LoadLibraryW(path.c_str());
-        if (!module) {
-            LOG_WARNING(Render_Vulkan,
-                        "[Scarlet.FSR3] amd_fidelityfx_vk.dll not found");
-            return false;
-        }
-#define SCARLET_FFX_LOAD(member, name)                                                     \
-        member = reinterpret_cast<decltype(member)>(GetProcAddress(module, name));         \
-        if (!member) {                                                                      \
-            LOG_WARNING(Render_Vulkan, "[Scarlet.FSR3] FidelityFX export missing: {}", name); \
-            return false;                                                                   \
-        }
-        SCARLET_FFX_LOAD(create, "ffxCreateContext");
-        SCARLET_FFX_LOAD(destroy, "ffxDestroyContext");
-        SCARLET_FFX_LOAD(dispatch, "ffxDispatch");
-#undef SCARLET_FFX_LOAD
-        loaded = true;
-        return true;
-#else
-        return false;
-#endif
-    }
+    FfxVkPortableUpscaleContext* context{};
+    FfxVkPortableUpscaleCreateInfo create_info{};
+    std::uint64_t frame_id{};
 
     void DestroyContext() {
-        if (context && destroy) {
-            ffxContext local = context;
-            destroy(&local, nullptr);
+        if (context) {
+            ffxVkPortableUpscaleContextDestroy(context);
             context = nullptr;
         }
-        backend_desc = {};
-        upscale_desc = {};
+        create_info = {};
+        frame_id = 0;
     }
 
     ~Impl() {
         DestroyContext();
-#ifdef _WIN32
-        if (module) {
-            FreeLibrary(module);
-        }
-#endif
     }
 };
 
@@ -186,7 +134,7 @@ ScarletFfxUpscalePass::ScarletFfxUpscalePass(const Device&, MemoryAllocator& all
                                              VkExtent2D output_extent_)
     : allocator{allocator_}, image_count{image_count_}, output_extent{output_extent_},
       impl{std::make_unique<Impl>()} {
-    ready = FfxUpscaleRequested() && impl->Load();
+    ready = FfxUpscaleRequested();
 }
 
 ScarletFfxUpscalePass::~ScarletFfxUpscalePass() = default;
@@ -212,30 +160,22 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
         return false;
     }
 
-    // FSR super resolution requires the render resolution to be no larger than
-    // the presentation resolution. Passing a 1920x1080 render target to a
-    // 1280x720 upscale context reached the AMD runtime with an invalid
-    // downscaling configuration and crashed inside ffxCreateContext on the
-    // proprietary Windows driver. Fail closed and keep normal presentation
-    // instead of ever entering the FidelityFX DLL with invalid extents.
-    // Temporal super resolution is only meaningful when the render size is
-    // strictly smaller than the presentation size in both dimensions. If Scarlet is
-    // still rendering at native/full resolution, fail closed for the whole process.
-    // Multiple presentation layers can own separate pass instances; disabling only one
-    // instance allowed another layer to re-enter ffxCreateContext with a 1:1 extent and
-    // crash the AMD Vulkan runtime.
+    // The temporal upscaler must receive a genuinely lower-resolution render.
+    // Scarlet currently has presentation paths that can still expose the native
+    // 1920x1080 framebuffer even when a lower resolution was requested. Never
+    // feed those to FSR; one bad layer disables temporal upscaling for the run.
     if (wanted_input.width >= output_extent.width ||
         wanted_input.height >= output_extent.height) {
         LOG_ERROR(Render_Vulkan,
                   "[Scarlet.FSR3] Invalid temporal extent {}x{} -> {}x{}; "
-                  "render scale was not applied, disabling FidelityFX temporal "
-                  "upscaling globally for this run",
+                  "render scale was not applied, disabling portable FSR globally for this run",
                   wanted_input.width, wanted_input.height,
                   output_extent.width, output_extent.height);
         dispatch_failed = true;
         g_temporal_disabled_for_run.store(true, std::memory_order_relaxed);
         return false;
     }
+
     if (impl->context && !images.empty() &&
         input_extent.width == wanted_input.width &&
         input_extent.height == wanted_input.height && source_format == format) {
@@ -243,7 +183,7 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
     }
 
     LOG_INFO(Render_Vulkan,
-             "[Scarlet.FSR3] Preparing temporal resources input={}x{} output={}x{} source_format={}",
+             "[Scarlet.FSR3] Preparing portable FSR resources input={}x{} output={}x{} source_format={}",
              wanted_input.width, wanted_input.height, output_extent.width, output_extent.height,
              static_cast<int>(format));
 
@@ -253,10 +193,6 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
     images.resize(image_count);
 
     for (auto& set : images) {
-        // FidelityFX writes the reconstructed image as a UAV/storage image. Do not
-        // inherit the guest framebuffer format here: sRGB and several packed formats
-        // are not storage-capable on all Vulkan drivers. The native FSR path uses
-        // RGBA16F for the same reason, and FidelityFX accepts it as an upscale output.
         set.output = CreateWrappedImage(allocator, output_extent, kFfxOutputFormat);
         set.output_view = CreateWrappedImageView(device, set.output, kFfxOutputFormat);
         set.depth = CreateWrappedImage(allocator, input_extent, VK_FORMAT_R32_SFLOAT);
@@ -264,8 +200,6 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
         set.motion = CreateWrappedImage(allocator, input_extent, VK_FORMAT_R16G16_SFLOAT);
         set.motion_view = CreateWrappedImageView(device, set.motion, VK_FORMAT_R16G16_SFLOAT);
     }
-
-    LOG_INFO(Render_Vulkan, "[Scarlet.FSR3] Temporal images allocated; initializing layouts");
 
     scheduler.Record([this](vk::CommandBuffer cmdbuf) {
         const auto range = ColorRange();
@@ -286,38 +220,58 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
         }
     });
     scheduler.Finish();
-    LOG_INFO(Render_Vulkan, "[Scarlet.FSR3] Temporal image initialization complete");
 
-    impl->backend_desc = {};
-    impl->backend_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
-    impl->backend_desc.vkDevice = *device.GetLogical();
-    impl->backend_desc.vkPhysicalDevice = device.GetPhysical();
-    impl->backend_desc.vkDeviceProcAddr = device.GetDispatchLoader().vkGetDeviceProcAddr;
+    FfxVkPortableDeviceInfo device_info{};
+    device_info.structSize = sizeof(device_info);
+    device_info.instance = VK_NULL_HANDLE;
+    device_info.physicalDevice = device.GetPhysical();
+    device_info.device = *device.GetLogical();
+    device_info.getDeviceProcAddr = device.GetDispatchLoader().vkGetDeviceProcAddr;
+    device_info.queue = device.GetGraphicsQueue().Handle();
+    device_info.queueFamilyIndex = device.GetGraphicsFamily();
+    device_info.shaderFloat16Enabled =
+        device.IsFloat16Supported() ? VK_TRUE : VK_FALSE;
+    device_info.subgroupSizeControlEnabled =
+        device.IsExtSubgroupSizeControlSupported() ? VK_TRUE : VK_FALSE;
+    device_info.synchronization2Enabled =
+        device.HasSynchronization2() ? VK_TRUE : VK_FALSE;
 
-    impl->upscale_desc = {};
-    impl->upscale_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
-    impl->upscale_desc.header.pNext = &impl->backend_desc.header;
-    impl->upscale_desc.flags = FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
-    impl->upscale_desc.maxRenderSize = {input_extent.width, input_extent.height};
-    impl->upscale_desc.maxUpscaleSize = {output_extent.width, output_extent.height};
-    impl->upscale_desc.fpMessage = nullptr;
+    // suyu creates the logical device from its accepted core feature set.
+    // FSR-Vulkan's checked accumulate shaders require formatless storage writes;
+    // this is a Vulkan 1.x core feature on the target AMD/NVIDIA desktop path.
+    device_info.shaderStorageImageWriteWithoutFormatEnabled = VK_TRUE;
 
-    LOG_INFO(Render_Vulkan, "[Scarlet.FSR3] Creating FidelityFX temporal context");
-    ffxContext context{};
-    const auto create_rc =
-        impl->create(&context, &impl->upscale_desc.header, nullptr);
-    if (create_rc != FFX_API_RETURN_OK) {
-        LOG_WARNING(Render_Vulkan,
-                    "[Scarlet.FSR3] {} context creation failed (rc={})",
-                    SelectedFsrName(), create_rc);
+    impl->create_info = {};
+    impl->create_info.structSize = sizeof(impl->create_info);
+    impl->create_info.flags = FFX_VK_PORTABLE_CONTEXT_AUTO_EXPOSURE;
+    impl->create_info.maxRenderSize = {input_extent.width, input_extent.height};
+    impl->create_info.maxOutputSize = {output_extent.width, output_extent.height};
+
+    const auto create_issues =
+        ffxVkPortableValidateUpscaleCreateInfo(&impl->create_info);
+    if (create_issues) {
+        LogValidationIssues("create", create_issues);
         dispatch_failed = true;
         g_temporal_disabled_for_run.store(true, std::memory_order_relaxed);
         return false;
     }
-    impl->context = context;
+
+    LOG_INFO(Render_Vulkan,
+             "[Scarlet.FSR3] Creating FireBurn portable FSR 3.1 Vulkan context");
+    const auto create_rc =
+        ffxVkPortableUpscaleContextCreate(&device_info, &impl->create_info, &impl->context);
+    if (create_rc != FFX_VK_PORTABLE_OK || !impl->context) {
+        LOG_WARNING(Render_Vulkan,
+                    "[Scarlet.FSR3] Portable {} context creation failed (rc={})",
+                    SelectedFsrName(), static_cast<int>(create_rc));
+        dispatch_failed = true;
+        g_temporal_disabled_for_run.store(true, std::memory_order_relaxed);
+        return false;
+    }
+
     reset_pending = true;
     LOG_INFO(Render_Vulkan,
-             "[Scarlet.FSR3] {} temporal upscaler ready {}x{} -> {}x{}",
+             "[Scarlet.FSR3] Portable {} temporal upscaler ready {}x{} -> {}x{}",
              SelectedFsrName(), input_extent.width, input_extent.height,
              output_extent.width, output_extent.height);
     return true;
@@ -335,9 +289,10 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
     auto& set = images[image_index];
     const bool reset = reset_pending;
     reset_pending = false;
+    const std::uint64_t frame_id = impl->frame_id++;
 
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([this, source_image, image_index, reset](vk::CommandBuffer cmdbuf) {
+    scheduler.Record([this, source_image, image_index, reset, frame_id](vk::CommandBuffer cmdbuf) {
         auto& local = images[image_index];
 
         GeneralBarrier(cmdbuf, source_image,
@@ -345,45 +300,68 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
                        VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
-        ffxDispatchDescUpscale dispatch{};
-        dispatch.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
-        dispatch.commandList = reinterpret_cast<void*>(*cmdbuf);
-        dispatch.color = Resource(source_image, source_format, input_extent.width,
-                                  input_extent.height, FFX_API_RESOURCE_STATE_COMPUTE_READ,
-                                  false);
-        dispatch.depth = Resource(*local.depth, VK_FORMAT_R32_SFLOAT, input_extent.width,
-                                  input_extent.height, FFX_API_RESOURCE_STATE_COMPUTE_READ,
-                                  false);
-        dispatch.motionVectors =
-            Resource(*local.motion, VK_FORMAT_R16G16_SFLOAT, input_extent.width,
-                     input_extent.height, FFX_API_RESOURCE_STATE_COMPUTE_READ, false);
-        dispatch.output =
-            Resource(*local.output, kFfxOutputFormat, output_extent.width, output_extent.height,
-                     FFX_API_RESOURCE_STATE_UNORDERED_ACCESS, true);
+        FfxVkPortableUpscaleDispatchInfo dispatch{};
+        dispatch.structSize = sizeof(dispatch);
+        dispatch.commandBuffer = *cmdbuf;
+        dispatch.color = PortableImage(
+            source_image, source_format, input_extent.width, input_extent.height,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT, FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
+        dispatch.depth = PortableImage(
+            *local.depth, VK_FORMAT_R32_SFLOAT, input_extent.width, input_extent.height,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT, FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
+        dispatch.motionVectors = PortableImage(
+            *local.motion, VK_FORMAT_R16G16_SFLOAT, input_extent.width, input_extent.height,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT, FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
+        dispatch.output = PortableImage(
+            *local.output, kFfxOutputFormat, output_extent.width, output_extent.height,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT, FFX_VK_PORTABLE_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        dispatch.exposure.structSize = sizeof(dispatch.exposure);
+        dispatch.reactiveMask.structSize = sizeof(dispatch.reactiveMask);
+        dispatch.transparencyAndCompositionMask.structSize =
+            sizeof(dispatch.transparencyAndCompositionMask);
+
         dispatch.jitterOffset = {0.0f, 0.0f};
-        dispatch.motionVectorScale = {static_cast<float>(input_extent.width),
-                                      static_cast<float>(input_extent.height)};
+        dispatch.motionVectorScale = {
+            static_cast<float>(input_extent.width),
+            static_cast<float>(input_extent.height),
+        };
         dispatch.renderSize = {input_extent.width, input_extent.height};
-        dispatch.upscaleSize = {output_extent.width, output_extent.height};
-        dispatch.enableSharpening = false;
-        dispatch.sharpness = 0.0f;
-        dispatch.frameTimeDelta = FrameTimeMs();
+        dispatch.outputSize = {output_extent.width, output_extent.height};
+        dispatch.frameTimeMilliseconds = FrameTimeMs();
         dispatch.preExposure = 1.0f;
-        dispatch.reset = reset;
         dispatch.cameraNear = 0.1f;
         dispatch.cameraFar = 1000.0f;
-        dispatch.cameraFovAngleVertical = 1.0471975512f;
-        dispatch.viewSpaceToMetersFactor = 1.0f;
-        dispatch.flags = 0;
+        dispatch.cameraVerticalFovRadians = 1.0471975512f;
+        dispatch.viewSpaceToMeters = 1.0f;
+        dispatch.sharpness = 0.0f;
+        dispatch.enableSharpening = VK_FALSE;
+        dispatch.reset = reset ? VK_TRUE : VK_FALSE;
+        dispatch.frameId = frame_id;
 
-        ffxContext context = impl->context;
-        if (impl->dispatch(&context, &dispatch.header) != FFX_API_RETURN_OK) {
+        const auto issues =
+            ffxVkPortableValidateUpscaleDispatchInfo(&impl->create_info, &dispatch);
+        if (issues) {
+            LogValidationIssues("dispatch", issues);
+            dispatch_failed = true;
+            g_temporal_disabled_for_run.store(true, std::memory_order_relaxed);
+            return;
+        }
+
+        const auto rc =
+            ffxVkPortableUpscaleContextRecordDispatch(impl->context, &dispatch);
+        if (rc != FFX_VK_PORTABLE_OK) {
             dispatch_failed = true;
             g_temporal_disabled_for_run.store(true, std::memory_order_relaxed);
             LOG_WARNING(Render_Vulkan,
-                        "[Scarlet.FSR3] {} dispatch failed; temporal upscaler disabled "
-                        "globally for this run",
-                        SelectedFsrName());
+                        "[Scarlet.FSR3] Portable {} dispatch failed (rc={}); "
+                        "temporal upscaler disabled globally for this run",
+                        SelectedFsrName(), static_cast<int>(rc));
             return;
         }
 
