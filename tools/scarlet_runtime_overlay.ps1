@@ -3521,8 +3521,8 @@ $new = @'
     static u32 scarlet_temporal_state_logs = 0;
     if (scarlet_temporal_state_logs < 64) {
         LOG_WARNING(Render_Vulkan,
-                    "[Scarlet.FSR3.Probe] state depth={} active_mask={:#x}",
-                    static_cast<u32>(depth_buffer_id), rt_active_mask);
+                    "[Scarlet.FSR3.Probe] state depth_present={} active_mask={:#x}",
+                    depth_buffer_id ? 1 : 0, rt_active_mask);
         if (depth_buffer_id) {
             const auto& scarlet_probe_depth = slot_image_views[depth_buffer_id];
             LOG_WARNING(Render_Vulkan,
@@ -3633,8 +3633,8 @@ $new = @'
     static u32 scarlet_temporal_state_logs = 0;
     if (scarlet_temporal_state_logs < 64) {
         LOG_WARNING(Render_Vulkan,
-                    "[Scarlet.FSR3.Probe] state depth={} active_mask={:#x}",
-                    static_cast<u32>(depth_buffer_id), rt_active_mask);
+                    "[Scarlet.FSR3.Probe] state depth_present={} active_mask={:#x}",
+                    depth_buffer_id ? 1 : 0, rt_active_mask);
         if (depth_buffer_id) {
             const auto& scarlet_probe_depth = slot_image_views[depth_buffer_id];
             LOG_WARNING(Render_Vulkan,
@@ -3702,8 +3702,8 @@ if (-not $scarletTextureCacheText.Contains($scarletForcedProbeMarker)) {
     if (scarlet_temporal_force_probe_logs < 256 &&
         (depth_buffer_id || rt_active_mask != 0)) {
         LOG_WARNING(Render_Vulkan,
-                    "[Scarlet.FSR3.Probe] state depth={} active_mask={:#x}",
-                    static_cast<u32>(depth_buffer_id), rt_active_mask);
+                    "[Scarlet.FSR3.Probe] state depth_present={} active_mask={:#x}",
+                    depth_buffer_id ? 1 : 0, rt_active_mask);
         if (depth_buffer_id) {
             const auto& scarlet_probe_depth = slot_image_views[depth_buffer_id];
             LOG_WARNING(Render_Vulkan,
