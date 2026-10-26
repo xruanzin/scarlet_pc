@@ -55,6 +55,10 @@ foreach ($name in @(
     'scarlet_dlss_pass.cpp',
     'scarlet_ffx_upscale.h',
     'scarlet_ffx_upscale.cpp',
+    'scarlet_keyboard_overlay.h',
+    'scarlet_keyboard_overlay.cpp',
+    'scarlet_keyboard_overlay_pass.h',
+    'scarlet_keyboard_overlay_pass.cpp',
     'scarlet_fsr4_pass.h',
     'scarlet_fsr4_pass.cpp'
 )) {
@@ -217,6 +221,10 @@ if (-not $videoCoreCmakeText.Contains('renderer_vulkan/scarlet_ffx_framegen.cpp'
     renderer_vulkan/scarlet_dlss_pass.h
     renderer_vulkan/scarlet_ffx_upscale.cpp
     renderer_vulkan/scarlet_ffx_upscale.h
+    renderer_vulkan/scarlet_keyboard_overlay.cpp
+    renderer_vulkan/scarlet_keyboard_overlay.h
+    renderer_vulkan/scarlet_keyboard_overlay_pass.cpp
+    renderer_vulkan/scarlet_keyboard_overlay_pass.h
     renderer_vulkan/scarlet_fsr4_pass.cpp
     renderer_vulkan/scarlet_fsr4_pass.h
     renderer_vulkan/vk_texture_cache.cpp
@@ -239,7 +247,10 @@ $new = $old + [Environment]::NewLine +
     'target_include_directories(video_core PRIVATE "' + $fsrVulkanCmake + '/include")'
 Replace-Literal 'src\video_core\CMakeLists.txt' $old $new
 
-$old = 'target_link_libraries(video_core PRIVATE sirit::sirit)'
+$old = 'target_link_libraries(video_core PRIVATE sirit::sirit)
+if(WIN32)
+    target_link_libraries(video_core PRIVATE gdi32 user32)
+endif()'
 $new = $old + [Environment]::NewLine +
     'target_link_libraries(video_core PRIVATE "' + $vulkanImportCmake + '")'
 Replace-Literal 'src\video_core\CMakeLists.txt' $old $new
@@ -3672,5 +3683,75 @@ $new = @'
                                      temporal_inputs);
 '@
 Replace-Literal 'src\video_core\renderer_vulkan\present\layer.cpp' $old.Trim() $new.Trim()
+
+# Native software keyboard: compose it in the same Vulkan frame after the game/FSR.
+$old = @'
+class PresentManager;
+class WindowAdaptPass;
+
+struct Frame;
+'@
+$new = @'
+class PresentManager;
+class WindowAdaptPass;
+class ScarletKeyboardOverlayPass;
+
+struct Frame;
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_blit_screen.h' $old.Trim() $new.Trim()
+
+$old = @'
+    std::unique_ptr<WindowAdaptPass> window_adapt{};
+    std::list<Layer> layers{};
+'@
+$new = @'
+    std::unique_ptr<WindowAdaptPass> window_adapt{};
+    std::unique_ptr<ScarletKeyboardOverlayPass> scarlet_keyboard_overlay{};
+    std::list<Layer> layers{};
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_blit_screen.h' $old.Trim() $new.Trim()
+
+$old = @'
+#include "video_core/renderer_vulkan/present/layer.h"
+#include "video_core/renderer_vulkan/vk_blit_screen.h"
+'@
+$new = @'
+#include "video_core/renderer_vulkan/present/layer.h"
+#include "video_core/renderer_vulkan/scarlet_keyboard_overlay_pass.h"
+#include "video_core/renderer_vulkan/vk_blit_screen.h"
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_blit_screen.cpp' $old.Trim() $new.Trim()
+
+# Recreate the keyboard compositor alongside the presentation pass so its renderpass
+# always matches the current output format.
+$old = @'
+    switch (scaling_filter) {
+'@
+$new = @'
+    scarlet_keyboard_overlay =
+        std::make_unique<ScarletKeyboardOverlayPass>(
+            device, memory_allocator, scheduler, swapchain_view_format);
+
+    switch (scaling_filter) {
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_blit_screen.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    window_adapt->Draw(device, rasterizer, scheduler, image_index, layers, framebuffers, layout, frame);
+
+    if (++image_index >= image_count) {
+'@
+$new = @'
+    window_adapt->Draw(device, rasterizer, scheduler, image_index, layers, framebuffers, layout, frame);
+
+    // The software keyboard is a real in-frame overlay. It does not create an HWND,
+    // alter fullscreen mode, or depend on desktop composition.
+    if (scarlet_keyboard_overlay) {
+        scarlet_keyboard_overlay->Draw(device, frame);
+    }
+
+    if (++image_index >= image_count) {
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_blit_screen.cpp' $old.Trim() $new.Trim()
 
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
