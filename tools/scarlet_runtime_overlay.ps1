@@ -3057,7 +3057,8 @@ $old = @'
 $new = @'
     switch (event.type) {
     case SDL_EVENT_WINDOW_FOCUS_LOST:
-        if (Settings::values.fullscreen_mode.GetValue() == Settings::FullscreenMode::Exclusive &&
+        if (!ScarletPC::KeyboardOverlayActive() &&
+            Settings::values.fullscreen_mode.GetValue() == Settings::FullscreenMode::Exclusive &&
             (SDL_GetWindowFlags(render_window) & SDL_WINDOW_FULLSCREEN) != 0) {
             scarlet_exclusive_focus_suspended = true;
             LOG_INFO(Frontend,
@@ -3124,31 +3125,44 @@ void EmuWindow_SDL2::WaitEvent() {
     // Called on main thread
     SDL_Event event;
 
-    // The virtual keyboard is a Win32 UI hosted on a worker thread, but SDL/Vulkan
-    // window-mode changes belong here. Release exclusive presentation before the
-    // popup is created, and restore it only after the keyboard has closed.
+    // The virtual keyboard is a Win32 overlay hosted on a worker thread, but
+    // exclusive Vulkan presentation can hide top-level overlays. Keep the game
+    // visually fullscreen by switching EXCLUSIVE -> BORDERLESS FULLSCREEN while
+    // the keyboard is active. The desktop must never become visible here.
     if (ScarletPC::ConsumeKeyboardDesktopModeRequest()) {
-        bool desktop_ready = true;
+        bool overlay_ready = true;
         if (Settings::values.fullscreen_mode.GetValue() == Settings::FullscreenMode::Exclusive &&
             (SDL_GetWindowFlags(render_window) & SDL_WINDOW_FULLSCREEN) != 0) {
             scarlet_exclusive_focus_suspended = true;
             LOG_INFO(Frontend,
-                     "[Scarlet.Keyboard] Releasing exclusive fullscreen for virtual keyboard");
-            if (!SDL_SetWindowFullscreen(render_window, false)) {
-                desktop_ready = false;
+                     "[Scarlet.Keyboard] Switching exclusive fullscreen to borderless keyboard mode");
+
+            // A null fullscreen display mode is SDL3's desktop/borderless fullscreen
+            // mode. Stay fullscreen the entire time so the game remains behind the
+            // keyboard instead of exposing the Windows desktop.
+            if (!SDL_SetWindowFullscreenMode(render_window, nullptr)) {
+                overlay_ready = false;
                 LOG_ERROR(Frontend,
-                          "[Scarlet.Keyboard] Failed to release exclusive fullscreen: {}",
+                          "[Scarlet.Keyboard] Failed to select borderless keyboard mode: {}",
+                          SDL_GetError());
+            } else if (!SDL_SetWindowFullscreen(render_window, true)) {
+                overlay_ready = false;
+                LOG_ERROR(Frontend,
+                          "[Scarlet.Keyboard] Failed to keep borderless fullscreen active: {}",
                           SDL_GetError());
             } else {
                 if (!SDL_SyncWindow(render_window)) {
                     LOG_WARNING(Frontend,
-                                "[Scarlet.Keyboard] Desktop transition synchronization timed out: {}",
+                                "[Scarlet.Keyboard] Borderless keyboard-mode synchronization timed out: {}",
                                 SDL_GetError());
                 }
                 OnResize();
+                is_shown = true;
+                LOG_INFO(Frontend,
+                         "[Scarlet.Keyboard] Borderless fullscreen ready; game remains visible behind keyboard");
             }
         }
-        if (desktop_ready) {
+        if (overlay_ready) {
             ScarletPC::AcknowledgeKeyboardDesktopMode();
         }
     }
@@ -3158,7 +3172,7 @@ void EmuWindow_SDL2::WaitEvent() {
         if (Settings::values.fullscreen_mode.GetValue() == Settings::FullscreenMode::Exclusive &&
             scarlet_exclusive_focus_suspended) {
             LOG_INFO(Frontend,
-                     "[Scarlet.Keyboard] Restoring exclusive fullscreen after virtual keyboard");
+                     "[Scarlet.Keyboard] Restoring exclusive fullscreen from borderless keyboard mode");
             Fullscreen();
             fullscreen_ready =
                 (SDL_GetWindowFlags(render_window) & SDL_WINDOW_FULLSCREEN) != 0;
