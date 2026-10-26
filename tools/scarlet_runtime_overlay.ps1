@@ -3687,6 +3687,26 @@ if ($scarletTextureCacheUpdated -ne $scarletTextureCacheText) {
 # idempotent Replace-Literal path that can legitimately skip already-transformed
 # texture-cache code from earlier Scarlet builds.
 $scarletTextureCacheText = [IO.File]::ReadAllText($scarletTextureCachePath)
+
+# Repair the first forced-probe revision in preserved trees: ImageViewId is a
+# strong ID type and cannot be static_cast directly to u32.
+$scarletBadDepthProbe = @'
+        LOG_WARNING(Render_Vulkan,
+                    "[Scarlet.FSR3.Probe] state depth={} active_mask={:#x}",
+                    static_cast<u32>(depth_buffer_id), rt_active_mask);
+'@
+$scarletGoodDepthProbe = @'
+        LOG_WARNING(Render_Vulkan,
+                    "[Scarlet.FSR3.Probe] state depth_present={} active_mask={:#x}",
+                    depth_buffer_id ? 1 : 0, rt_active_mask);
+'@
+if ($scarletTextureCacheText.Contains($scarletBadDepthProbe.Trim())) {
+    $scarletTextureCacheText =
+        $scarletTextureCacheText.Replace($scarletBadDepthProbe.Trim(), $scarletGoodDepthProbe.Trim())
+    [IO.File]::WriteAllText($scarletTextureCachePath, $scarletTextureCacheText, $utf8)
+    Write-Host '[Scarlet PC] Repaired preserved FSR3 temporal probe ImageViewId logging.' -ForegroundColor DarkGray
+}
+
 $scarletForcedProbeMarker = '[Scarlet.FSR3.Probe.Force]'
 if (-not $scarletTextureCacheText.Contains($scarletForcedProbeMarker)) {
     $scarletForcedProbeAnchor = '    render_targets.is_rescaled = is_rescaling;'
