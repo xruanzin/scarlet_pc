@@ -61,6 +61,7 @@ static _Atomic uint64_t stat_translate_ns, stat_spirv_ns, stat_pipe_ns;  // CPU 
 static uint64_t stat_shader_wait_ns;  // draws waiting for their program / pipeline (wait_built)
 static _Atomic int new_pipes;  // pipelines created since the pipeline cache was last saved
 static uint64_t op_counts[CMD_COUNT];
+static int op_counts_enabled = -1;
 bool g_debug_frame;
 static char stats_text[768];
 void vk_collect_dead(void);
@@ -1247,7 +1248,7 @@ const char *renderer_stats(void) {
     }
     last_new = np;
     static int dumps;
-    if (dumps++ < 3) {
+    if (op_counts_enabled > 0 && dumps++ < 3) {
         LOG("[vk] command counts:");
         for (int i = 0; i < CMD_COUNT; i++) if (op_counts[i]) LOG(" %d:%llu", i, (unsigned long long)op_counts[i]);
         LOG("\n");
@@ -4866,7 +4867,9 @@ static void exec_list(uint64_t handle, int depth) {
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
         void *x = r->extra;
-        if (r->op < CMD_COUNT) op_counts[r->op]++;
+        if (__builtin_expect(op_counts_enabled > 0, 0) && r->op < CMD_COUNT) {
+            op_counts[r->op]++;
+        }
         if (ip_replaying && ip_skip_op(r->op)) { p += r->size; continue; }
         // TF writes can remain inside one rendering instance across state-only
         // commands and independent TF draws. Operations that can observe memory
@@ -5276,21 +5279,43 @@ void vk_big_lock(void) {
 }
 void vk_big_unlock(void) { pthread_mutex_unlock(&g_vk_big); }
 
-void backend_execute(uint64_t handle) {
+void backend_execute_batch(const uint64_t *handles, int n) {
+    if (!handles || n <= 0) return;
+
     vk_big_lock();
-    bool thread_diag = vk_exec_diag_enter(handle);
+    bool thread_diag = vk_exec_diag_enter(handles[0]);
     PROF_T0();
-    if (ip_enabled()) ip_note_list(handle);
-    guest_copy_flush(); // snapshot version is independent of the GPU retirement timeline
-    exec_list(handle, 0);
+
+    if (__builtin_expect(op_counts_enabled < 0, 0)) {
+        op_counts_enabled = getenv("LARECOMP_COMMAND_COUNTS") ? 1 : 0;
+    }
+
+    // One QueueSubmitCommands is one ordered batch. Snapshot guest-written
+    // resources once, execute every already-pinned top-level list in order, and
+    // close/queue the Vulkan command buffer once at the end. The old path did
+    // all three operations once per list, multiplying recursive mutex traffic,
+    // guest-copy scans and command-buffer end/begin work.
+    guest_copy_flush();
+    const bool interp = ip_enabled();
+    for (int i = 0; i < n; i++) {
+        if (interp) ip_note_list(handles[i]);
+        exec_list(handles[i], 0);
+    }
+
     PROF_ADD(prof_exec);
     if (prof) cum_exec += SDL_GetTicksNS() - prof_t0_;
+
     static int sync_submit = -1;
     if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
     if (sync_submit) renderer_flush();
     else renderer_submit_list();
+
     vk_exec_diag_leave(thread_diag);
     vk_big_unlock();
+}
+
+void backend_execute(uint64_t handle) {
+    backend_execute_batch(&handle, 1);
 }
 
 // ================================================================== frame interpolation (prototype)
