@@ -245,6 +245,79 @@ $new = $old + [Environment]::NewLine +
 Replace-Literal 'src\video_core\CMakeLists.txt' $old $new
 
 
+# SpartanPort 2.1.7-style FSR 3.1 path: build FireBurn/FSR-Vulkan's portable
+# native Vulkan backend into the runtime instead of loading amd_fidelityfx_vk.dll.
+# Keep it in its own target so AMD SDK compile definitions do not leak into suyu.
+$videoCoreCmakeText = [IO.File]::ReadAllText($videoCoreCmake)
+if (-not $videoCoreCmakeText.Contains('add_library(scarlet_fsr3_portable STATIC')) {
+    $portableCmake = @'
+set(SCARLET_FSR_VULKAN_DIR "__FSR_VULKAN_DIR__")
+set(SCARLET_FSR114_ROOT "${SCARLET_FSR_VULKAN_DIR}/upstream/ffx-1.1.4/sdk")
+set(SCARLET_FSR114_GEN_UPSCALE
+    "${SCARLET_FSR_VULKAN_DIR}/generated/ffx-1.1.4/vk/fsr3upscaler")
+set(SCARLET_FSR114_GEN_FRAMEGEN
+    "${SCARLET_FSR_VULKAN_DIR}/generated/ffx-1.1.4/vk/fsr3framegeneration")
+
+add_library(scarlet_fsr3_portable STATIC
+    "${SCARLET_FSR_VULKAN_DIR}/src/ffx_vk_portable.c"
+    "${SCARLET_FSR_VULKAN_DIR}/src/ffx_vk_fsr3_3_1_5_reflection.c"
+    "${SCARLET_FSR_VULKAN_DIR}/src/ffx_vk_fsr3_3_1_5_catalog.c"
+    "${SCARLET_FSR_VULKAN_DIR}/src/ffx_vk_fsr3_3_1_5_pipeline.c"
+    "${SCARLET_FSR_VULKAN_DIR}/src/ffx_vk_fsr3_3_1_5_bundle.c"
+    "${SCARLET_FSR_VULKAN_DIR}/src/ffx_vk_fsr3_3_1_5_descriptor.c"
+    "${SCARLET_FSR_VULKAN_DIR}/src/ffx_vk_fsr3_portable.cpp"
+    "${SCARLET_FSR114_ROOT}/src/shared/ffx_assert.cpp"
+    "${SCARLET_FSR114_ROOT}/src/shared/ffx_message.cpp"
+    "${SCARLET_FSR114_ROOT}/src/shared/ffx_object_management.cpp"
+    "${SCARLET_FSR114_ROOT}/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp"
+    "${SCARLET_FSR114_ROOT}/src/components/opticalflow/ffx_opticalflow.cpp"
+    "${SCARLET_FSR114_ROOT}/src/components/frameinterpolation/ffx_frameinterpolation.cpp"
+    "${SCARLET_FSR114_ROOT}/src/components/fsr3/ffx_fsr3.cpp"
+    "${SCARLET_FSR114_ROOT}/src/backends/vk/ffx_vk.cpp"
+    "${SCARLET_FSR114_ROOT}/src/backends/shared/ffx_shader_blobs.cpp"
+    "${SCARLET_FSR114_ROOT}/src/backends/shared/blob_accessors/ffx_fsr3upscaler_shaderblobs.cpp"
+    "${SCARLET_FSR114_ROOT}/src/backends/shared/blob_accessors/ffx_frameinterpolation_shaderblobs.cpp"
+    "${SCARLET_FSR114_ROOT}/src/backends/shared/blob_accessors/ffx_opticalflow_shaderblobs.cpp"
+    "${SCARLET_FSR114_ROOT}/src/shared/ffx_breadcrumbs_list.cpp"
+)
+set_target_properties(scarlet_fsr3_portable PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+)
+target_compile_definitions(scarlet_fsr3_portable PRIVATE
+    FFX_VK_PORTABLE_HAS_FSR3_UPSCALER=1
+    FFX_FSR3UPSCALER=1
+    FFX_FI=1
+    FFX_OF=1
+)
+target_include_directories(scarlet_fsr3_portable
+    PUBLIC "${SCARLET_FSR_VULKAN_DIR}/include"
+    PRIVATE
+        "${SCARLET_FSR114_ROOT}/include"
+        "${SCARLET_FSR114_ROOT}/src/shared"
+        "${SCARLET_FSR114_ROOT}/src/components"
+        "${SCARLET_FSR114_ROOT}/src/backends/shared"
+        "${SCARLET_FSR114_ROOT}/src/backends/shared/blob_accessors"
+        "${SCARLET_FSR114_GEN_UPSCALE}"
+        "${SCARLET_FSR114_GEN_FRAMEGEN}"
+)
+target_link_libraries(scarlet_fsr3_portable
+    PUBLIC Vulkan::Headers
+    PRIVATE "__VULKAN_IMPORT_LIB__"
+)
+target_link_libraries(video_core PRIVATE scarlet_fsr3_portable)
+'@
+    $portableCmake = $portableCmake.Replace('__FSR_VULKAN_DIR__', $fsrVulkanCmake).
+        Replace('__VULKAN_IMPORT_LIB__', $vulkanImportCmake)
+    [IO.File]::AppendAllText(
+        $videoCoreCmake,
+        [Environment]::NewLine + $portableCmake.Trim() + [Environment]::NewLine,
+        $utf8
+    )
+}
+
+
 # Register the Scarlet software keyboard before Core initializes default applets.
 $old = @'
 #include "__PRODUCT___cmd/native_status.h"
