@@ -5088,4 +5088,52 @@ if ($scarletTextureCacheText.Contains($scarletGcAnchor.Trim()) -and
     [IO.File]::WriteAllText($scarletTextureCachePath, $scarletTextureCacheText, $utf8)
 }
 
+
+# Vulkan scheduler CPU batching for Scarlet. The desktop path used to wake the
+# single Vulkan worker every 8 draws. Larger chunks keep the same ordering and
+# auto-dispatch when full, but cut queue mutex/condition-variable traffic.
+$scarletRasterizerPath = Join-Path $SourceDir 'src\video_core\renderer_vulkan\vk_rasterizer.cpp'
+$scarletRasterizerText = [IO.File]::ReadAllText($scarletRasterizerPath)
+$scarletRasterizerText = $scarletRasterizerText.Replace(
+@'
+#else
+    static constexpr u32 DRAWS_TO_DISPATCH = 4096;
+    static constexpr u32 CHECK_MASK = 7;
+#endif // __ANDROID__
+'@.Trim(),
+@'
+#else
+    static constexpr u32 DRAWS_TO_DISPATCH = 4096;
+    // Scarlet PC: batch worker hand-offs. CommandChunk::Record still dispatches
+    // immediately if a chunk fills before this draw cadence is reached.
+    static constexpr u32 CHECK_MASK = 31;
+#endif // __ANDROID__
+'@.Trim()
+)
+[IO.File]::WriteAllText($scarletRasterizerPath, $scarletRasterizerText, $utf8)
+
+$scarletSchedulerHeaderPath = Join-Path $SourceDir 'src\video_core\renderer_vulkan\vk_scheduler.h'
+$scarletSchedulerHeaderText = [IO.File]::ReadAllText($scarletSchedulerHeaderPath)
+$scarletSchedulerHeaderText = $scarletSchedulerHeaderText.Replace(
+    'alignas(std::max_align_t) std::array<u8, 0x8000> data{};',
+    'alignas(std::max_align_t) std::array<u8, 0x10000> data{};'
+)
+[IO.File]::WriteAllText($scarletSchedulerHeaderPath, $scarletSchedulerHeaderText, $utf8)
+
+$scarletSchedulerPath = Join-Path $SourceDir 'src\video_core\renderer_vulkan\vk_scheduler.cpp'
+$scarletSchedulerText = [IO.File]::ReadAllText($scarletSchedulerPath)
+$scarletSchedulerText = $scarletSchedulerText.Replace(
+@'
+        event_cv.notify_all();
+        AcquireNewChunk();
+'@.Trim(),
+@'
+        event_cv.notify_one();
+        AcquireNewChunk();
+'@.Trim()
+)
+[IO.File]::WriteAllText($scarletSchedulerPath, $scarletSchedulerText, $utf8)
+
+Write-Host '[Scarlet PC] Vulkan CPU batching: 32-draw dispatch cadence, 64 KiB chunks.' -ForegroundColor DarkGray
+
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
