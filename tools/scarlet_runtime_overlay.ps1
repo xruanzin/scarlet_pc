@@ -249,6 +249,32 @@ Replace-Literal 'src\video_core\CMakeLists.txt' $old $new
 # native Vulkan backend into the runtime instead of loading amd_fidelityfx_vk.dll.
 # Keep it in its own target so AMD SDK compile definitions do not leak into suyu.
 $videoCoreCmakeText = [IO.File]::ReadAllText($videoCoreCmake)
+if ($videoCoreCmakeText.Contains('add_library(scarlet_fsr3_portable STATIC') -and
+    -not $videoCoreCmakeText.Contains('SCARLET_FSR230_GEN_UPSCALE')) {
+    $old = @'
+set(SCARLET_FSR114_GEN_FRAMEGEN
+    "${SCARLET_FSR_VULKAN_DIR}/generated/ffx-1.1.4/vk/fsr3framegeneration")
+'@
+    $new = @'
+set(SCARLET_FSR114_GEN_FRAMEGEN
+    "${SCARLET_FSR_VULKAN_DIR}/generated/ffx-1.1.4/vk/fsr3framegeneration")
+set(SCARLET_FSR230_GEN_UPSCALE
+    "${SCARLET_FSR_VULKAN_DIR}/generated/ffx-2.3.0/vk/fsr3upscaler-q2-v2")
+'@
+    Replace-Literal 'src\video_core\CMakeLists.txt' $old.Trim() $new.Trim()
+
+    $old = @'
+        "${SCARLET_FSR114_GEN_UPSCALE}"
+        "${SCARLET_FSR114_GEN_FRAMEGEN}"
+'@
+    $new = @'
+        "${SCARLET_FSR114_GEN_UPSCALE}"
+        "${SCARLET_FSR114_GEN_FRAMEGEN}"
+        "${SCARLET_FSR230_GEN_UPSCALE}"
+'@
+    Replace-Literal 'src\video_core\CMakeLists.txt' $old.Trim() $new.Trim()
+    $videoCoreCmakeText = [IO.File]::ReadAllText($videoCoreCmake)
+}
 if (-not $videoCoreCmakeText.Contains('add_library(scarlet_fsr3_portable STATIC')) {
     $portableCmake = @'
 set(SCARLET_FSR_VULKAN_DIR "__FSR_VULKAN_DIR__")
@@ -257,6 +283,8 @@ set(SCARLET_FSR114_GEN_UPSCALE
     "${SCARLET_FSR_VULKAN_DIR}/generated/ffx-1.1.4/vk/fsr3upscaler")
 set(SCARLET_FSR114_GEN_FRAMEGEN
     "${SCARLET_FSR_VULKAN_DIR}/generated/ffx-1.1.4/vk/fsr3framegeneration")
+set(SCARLET_FSR230_GEN_UPSCALE
+    "${SCARLET_FSR_VULKAN_DIR}/generated/ffx-2.3.0/vk/fsr3upscaler-q2-v2")
 
 add_library(scarlet_fsr3_portable STATIC
     "${SCARLET_FSR_VULKAN_DIR}/src/ffx_vk_portable.c"
@@ -301,6 +329,7 @@ target_include_directories(scarlet_fsr3_portable
         "${SCARLET_FSR114_ROOT}/src/backends/shared/blob_accessors"
         "${SCARLET_FSR114_GEN_UPSCALE}"
         "${SCARLET_FSR114_GEN_FRAMEGEN}"
+        "${SCARLET_FSR230_GEN_UPSCALE}"
 )
 target_link_libraries(scarlet_fsr3_portable
     PUBLIC Vulkan::Headers
