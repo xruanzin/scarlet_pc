@@ -123,23 +123,19 @@ NVN(nvnQueueSubmitCommands) {
     const uint64_t *handles = AP(2);
     if (n <= 0 || !handles) return;
 
-    // Pin the complete submit batch before handing any list to another host
-    // thread. Scarlet reuses command-memory slots aggressively; the render
-    // worker owns these references until it has consumed every list.
+    // Normal path: renderthread_submit_batch pins the whole batch under one
+    // host-segment lock and transfers ownership directly to the render worker.
+    if (renderthread_active() && renderthread_submit_batch(handles, n)) return;
+
+    // Allocation/thread failure and explicitly synchronous mode keep the same
+    // ordering, but still use batched refcounting and one backend batch call.
+    if (renderthread_active()) renderthread_drain();
     uint64_t stack_resolved[256];
     uint64_t *resolved = n <= 256 ? stack_resolved : malloc((size_t)n * sizeof *resolved);
     if (!resolved) FATAL("nvn: failed to pin %d submitted command lists\n", n);
-    for (int i = 0; i < n; i++) resolved[i] = nvn_cmdstream_pin(handles[i]);
-
-    bool queued = renderthread_active() && renderthread_submit_batch(resolved, n);
-    if (!queued) {
-        // Thread creation/allocation failure falls back to the old path rather
-        // than losing GPU work. Drain first so ordering stays deterministic.
-        if (renderthread_active()) renderthread_drain();
-        for (int i = 0; i < n; i++) backend_execute(resolved[i]);
-        for (int i = n - 1; i >= 0; i--) nvn_cmdstream_unpin(resolved[i]);
-    }
-    // On success ownership of every pin moved to renderthread.c.
+    nvn_cmdstream_pin_batch(handles, resolved, n);
+    backend_execute_batch(resolved, n);
+    nvn_cmdstream_unpin_batch(resolved, n);
     if (resolved != stack_resolved) free(resolved);
 }
 NVN(nvnQueueFlush) { (void)c; }
