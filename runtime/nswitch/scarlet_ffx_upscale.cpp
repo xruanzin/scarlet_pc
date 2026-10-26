@@ -72,16 +72,14 @@ bool RealTemporalInputsEnabled() {
     return value == nullptr || *value == '\0' || *value != '0';
 }
 
-float MotionVectorScale(std::uint32_t extent, const char* env_name) {
+float MotionVectorScale(float default_scale, const char* env_name) {
     if (const char* value = std::getenv(env_name); value && *value) {
         const float parsed = std::strtof(value, nullptr);
         if (parsed != 0.0f) {
             return parsed;
         }
     }
-    // Scarlet motion-vector MRTs are expected to be UV-space deltas; convert
-    // them to the render-pixel convention consumed by FSR.
-    return static_cast<float>(extent);
+    return default_scale;
 }
 
 float FrameTimeMs() {
@@ -637,11 +635,34 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
             sizeof(dispatch.transparencyAndCompositionMask);
 
         dispatch.jitterOffset = {0.0f, 0.0f};
-        dispatch.motionVectorScale = real_temporal
-            ? FfxVkPortableFloat2{
-                  MotionVectorScale(input_extent.width, "SCARLET_FSR_MOTION_SCALE_X"),
-                  MotionVectorScale(input_extent.height, "SCARLET_FSR_MOTION_SCALE_Y")}
-            : FfxVkPortableFloat2{1.0f, 1.0f};
+        if (real_temporal) {
+            // Scarlet's selected temporal MRT is RGBA16F. Treat that captured
+            // buffer conservatively as already being in render-pixel units by
+            // default. Multiplying it by 960x540 caused excessive reprojection
+            // and visible ghost trails. Other motion formats keep the UV-space
+            // fallback until their convention is identified.
+            const bool scarlet_rgba16_motion =
+                temporal_inputs.motion_format == VK_FORMAT_R16G16B16A16_SFLOAT;
+            const float default_motion_scale_x =
+                scarlet_rgba16_motion ? 1.0f : static_cast<float>(input_extent.width);
+            const float default_motion_scale_y =
+                scarlet_rgba16_motion ? 1.0f : static_cast<float>(input_extent.height);
+            dispatch.motionVectorScale = FfxVkPortableFloat2{
+                MotionVectorScale(default_motion_scale_x, "SCARLET_FSR_MOTION_SCALE_X"),
+                MotionVectorScale(default_motion_scale_y, "SCARLET_FSR_MOTION_SCALE_Y")};
+
+            static std::atomic_bool scarlet_motion_scale_logged{false};
+            if (!scarlet_motion_scale_logged.exchange(true, std::memory_order_relaxed)) {
+                LOG_INFO(Render_Vulkan,
+                         "[Scarlet.FSR3] Motion vector scale: {}x{} motion_format={} source={}",
+                         dispatch.motionVectorScale.x, dispatch.motionVectorScale.y,
+                         static_cast<int>(temporal_inputs.motion_format),
+                         scarlet_rgba16_motion ? "scarlet-rgba16-pixel-default"
+                                               : "generic-uv-default");
+            }
+        } else {
+            dispatch.motionVectorScale = FfxVkPortableFloat2{1.0f, 1.0f};
+        }
         dispatch.renderSize = {input_extent.width, input_extent.height};
         dispatch.outputSize = {output_extent.width, output_extent.height};
         dispatch.frameTimeMilliseconds = frame_time_ms;
