@@ -439,7 +439,7 @@ Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 # the user explicitly opts in with SCARLET_PRELOAD_SHADER_CACHE=1.
 $old = @'
     if (Settings::values.use_disk_shader_cache.GetValue()) {
-        LOG_INFO(Frontend, "[Scarlet.Shaders] Loading Vulkan disk shader cache");
+        // Build the cached shaders on their own thread, as the Qt frontend does from its
 '@
 $new = @'
     const char* scarlet_preload_shader_cache = std::getenv("SCARLET_PRELOAD_SHADER_CACHE");
@@ -448,6 +448,29 @@ $new = @'
 
     if (Settings::values.use_disk_shader_cache.GetValue() && scarlet_should_preload_shader_cache) {
         LOG_INFO(Frontend, "[Scarlet.Shaders] Loading Vulkan disk shader cache");
+        // Build the cached shaders on their own thread, as the Qt frontend does from its
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+# Migration for a runtime source that already received the earlier diagnostic-only patch.
+$old = @'
+    if (Settings::values.use_disk_shader_cache.GetValue()) {
+        LOG_INFO(Frontend, "[Scarlet.Shaders] Loading Vulkan disk shader cache");
+        // Build the cached shaders on their own thread, as the Qt frontend does from its
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+        loader.join();
+        emu_window->HideBuildProgress();
+        try {
+'@
+$new = @'
+        loader.join();
+        emu_window->HideBuildProgress();
+        LOG_INFO(Frontend, "[Scarlet.Shaders] Vulkan disk shader cache complete: {}/{}",
+                 built.load(std::memory_order_relaxed), total.load(std::memory_order_relaxed));
+        try {
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
@@ -478,32 +501,6 @@ $new = @'
     LOG_INFO(Frontend, "[Scarlet.Runtime] Starting game execution");
     void(system.Run());
     LOG_INFO(Frontend, "[Scarlet.Runtime] Game execution started");
-'@
-Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
-
-# Make the otherwise-silent Vulkan disk-cache phase visible in Scarlet logs.
-$old = @'
-    if (Settings::values.use_disk_shader_cache.GetValue()) {
-        // Build the cached shaders on their own thread, as the Qt frontend does from its
-'@
-$new = @'
-    if (Settings::values.use_disk_shader_cache.GetValue()) {
-        LOG_INFO(Frontend, "[Scarlet.Shaders] Loading Vulkan disk shader cache");
-        // Build the cached shaders on their own thread, as the Qt frontend does from its
-'@
-Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
-
-$old = @'
-        loader.join();
-        emu_window->HideBuildProgress();
-        try {
-'@
-$new = @'
-        loader.join();
-        emu_window->HideBuildProgress();
-        LOG_INFO(Frontend, "[Scarlet.Shaders] Vulkan disk shader cache complete: {}/{}",
-                 built.load(std::memory_order_relaxed), total.load(std::memory_order_relaxed));
-        try {
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
