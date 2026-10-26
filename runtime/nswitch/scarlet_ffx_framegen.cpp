@@ -486,7 +486,14 @@ bool FidelityFxFrameGeneration::CreateSwapchain(
     impl->swapchain_desc.createInfo.oldSwapchain = impl->swapchain_storage;
     impl->swapchain_desc.gameQueue =
         ToFfxQueue(impl->graphics_queue, impl->graphics_family);
-    impl->swapchain_desc.asyncComputeQueue = impl->swapchain_desc.gameQueue;
+
+    // AMD documents asyncComputeQueue as optional. Reusing the engine's graphics queue
+    // here defeats the purpose of the async path and can conflict with the swapchain
+    // replacement. Leave it empty unless Scarlet owns a genuinely separate compute queue.
+    impl->swapchain_desc.asyncComputeQueue = {};
+
+    // This queue is reserved by the Vulkan device specifically for FidelityFX FG and is
+    // not used by Scarlet's renderer/present path.
     impl->swapchain_desc.presentQueue =
         ToFfxQueue(impl->present_queue, impl->present_family);
     impl->swapchain_desc.imageAcquireQueue = impl->swapchain_desc.presentQueue;
