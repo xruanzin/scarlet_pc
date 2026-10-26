@@ -306,6 +306,18 @@ target_link_libraries(scarlet_fsr3_portable
     PUBLIC Vulkan::Headers
     PRIVATE "__VULKAN_IMPORT_LIB__"
 )
+if(MSVC)
+    # suyu promotes these diagnostics to errors for its own code. FSR-Vulkan is
+    # third-party code and SpartanPort builds it without that warnings-as-errors
+    # policy, so neutralize only those promoted diagnostics on this target.
+    target_compile_options(scarlet_fsr3_portable PRIVATE
+        /WX-
+        /wd4062 /wd4189 /wd4265 /wd4388 /wd4389
+        /wd4456 /wd4457 /wd4458 /wd4459
+        /wd4505 /wd4547 /wd4549 /wd4555
+        /wd4826 /wd5038 /wd5233 /wd5245 /wd5287
+    )
+endif()
 target_link_libraries(video_core PRIVATE scarlet_fsr3_portable)
 '@
     $portableCmake = $portableCmake.Replace('__FSR_VULKAN_DIR__', $fsrVulkanCmake).
@@ -316,6 +328,33 @@ target_link_libraries(video_core PRIVATE scarlet_fsr3_portable)
         $utf8
     )
 }
+
+$old = @'
+target_link_libraries(scarlet_fsr3_portable
+    PUBLIC Vulkan::Headers
+    PRIVATE "__VULKAN_IMPORT_LIB__"
+)
+target_link_libraries(video_core PRIVATE scarlet_fsr3_portable)
+'@
+$new = @'
+target_link_libraries(scarlet_fsr3_portable
+    PUBLIC Vulkan::Headers
+    PRIVATE "__VULKAN_IMPORT_LIB__"
+)
+if(MSVC)
+    target_compile_options(scarlet_fsr3_portable PRIVATE
+        /WX-
+        /wd4062 /wd4189 /wd4265 /wd4388 /wd4389
+        /wd4456 /wd4457 /wd4458 /wd4459
+        /wd4505 /wd4547 /wd4549 /wd4555
+        /wd4826 /wd5038 /wd5233 /wd5245 /wd5287
+    )
+endif()
+target_link_libraries(video_core PRIVATE scarlet_fsr3_portable)
+'@
+$old = $old.Replace('__VULKAN_IMPORT_LIB__', $vulkanImportCmake)
+$new = $new.Replace('__VULKAN_IMPORT_LIB__', $vulkanImportCmake)
+Replace-Literal 'src\video_core\CMakeLists.txt' $old.Trim() $new.Trim()
 
 
 # Register the Scarlet software keyboard before Core initializes default applets.
