@@ -868,6 +868,45 @@ $new = @'
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
+# Scarlet PC audio resilience: the stock Cubeb minimum is commonly 480 frames at
+# 48 kHz (~10 ms), which is too small to survive short shader/CPU stalls. Give output
+# streams a larger floor while keeping an environment override for A/B testing.
+$old = @'
+#include <span>
+#include <vector>
+'@
+$new = @'
+#include <cstdlib>
+#include <span>
+#include <vector>
+'@
+Replace-Literal 'src\audio_core\sink\cubeb_sink.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+        minimum_latency = (std::max)(minimum_latency, TargetSampleCount * 2);
+
+        LOG_INFO(Service_Audio,
+'@
+$new = @'
+        minimum_latency = (std::max)(minimum_latency, TargetSampleCount * 2);
+
+        if (type_ != StreamType::In) {
+            u32 scarlet_latency_floor = 2048;
+            if (const char* value = std::getenv("SCARLET_AUDIO_LATENCY_FRAMES");
+                value && *value) {
+                char* end{};
+                const unsigned long parsed = std::strtoul(value, &end, 10);
+                if (end != value && parsed >= 480 && parsed <= 8192) {
+                    scarlet_latency_floor = static_cast<u32>(parsed);
+                }
+            }
+            minimum_latency = (std::max)(minimum_latency, scarlet_latency_floor);
+        }
+
+        LOG_INFO(Service_Audio,
+'@
+Replace-Literal 'src\audio_core\sink\cubeb_sink.cpp' $old.Trim() $new.Trim()
+
 # Public nswitch fallback contract; the old variable remains a developer compatibility alias.
 $old = @'
 bool StrictNoFallback() {
