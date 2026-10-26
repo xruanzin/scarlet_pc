@@ -26,6 +26,8 @@ public:
 
 private:
     struct ImageSet {
+        vk::Image input;
+        vk::ImageView input_view;
         vk::Image output;
         vk::ImageView output_view;
         vk::Image depth;
