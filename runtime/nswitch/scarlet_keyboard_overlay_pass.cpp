@@ -65,7 +65,7 @@ bool ScarletKeyboardOverlayPass::RefreshImage(const Device& device, std::uint32_
     std::uint64_t next_version{};
     if (!ScarletPC::KeyboardOverlay::BuildBgraFrame(
             width, height, extent_changed ? 0 : uploaded_version, next_version, pixels)) {
-        return static_cast<bool>(image_view);
+        return *image_view != VK_NULL_HANDLE;
     }
 
     // Uploads only happen when the keyboard state changes (selection/text/etc.) or
@@ -85,7 +85,7 @@ bool ScarletKeyboardOverlayPass::RefreshImage(const Device& device, std::uint32_
 }
 
 void ScarletKeyboardOverlayPass::UpdateDescriptor(const Device& device) {
-    if (!image_view) {
+    if (*image_view == VK_NULL_HANDLE) {
         return;
     }
     const VkDescriptorImageInfo info{
@@ -112,7 +112,7 @@ void ScarletKeyboardOverlayPass::Draw(const Device& device, Frame* frame) {
     if (!frame || !ScarletPC::KeyboardOverlay::Visible()) {
         return;
     }
-    if (!RefreshImage(device, frame->width, frame->height) || !image_view) {
+    if (!RefreshImage(device, frame->width, frame->height) || *image_view == VK_NULL_HANDLE) {
         return;
     }
 
