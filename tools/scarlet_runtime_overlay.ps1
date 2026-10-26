@@ -1594,7 +1594,44 @@ inline bool AddExplicitDlc(Core::System& system, ExplicitUpdateProvider& provide
 
 } // namespace SuyuCli
 '@
-Replace-Literal 'src\__PRODUCT___cmd\explicit_update.h' $old.Trim() $new.Trim()
+
+# Older quick-overlay runs could insert AddExplicitDlc repeatedly because its replacement
+# keeps the original namespace-close anchor. Collapse any accumulated identical copies in
+# the preserved runtime checkout before validating/applying the patch.
+$explicitUpdatePath = Join-Path $SourceDir ('src\' + [string]$provenance.legacy.command_dir + '\explicit_update.h')
+$explicitUpdateText = [IO.File]::ReadAllText($explicitUpdatePath)
+$expandedExplicitDlcPatch = Expand-Legacy $new
+$explicitDlcStart = $expandedExplicitDlcPatch.IndexOf('inline bool AddExplicitDlc(')
+$explicitDlcEndMarker = '} // namespace SuyuCli'
+$explicitDlcEnd = $expandedExplicitDlcPatch.IndexOf($explicitDlcEndMarker, $explicitDlcStart)
+if ($explicitDlcStart -ge 0 -and $explicitDlcEnd -gt $explicitDlcStart) {
+    $explicitDlcMethod = $expandedExplicitDlcPatch.Substring(
+        $explicitDlcStart,
+        $explicitDlcEnd - $explicitDlcStart
+    ).TrimEnd()
+
+    $hadCrLf = $explicitUpdateText.Contains("`r`n")
+    $explicitUpdateLf = $explicitUpdateText.Replace("`r`n", "`n")
+    $explicitDlcMethodLf = $explicitDlcMethod.Replace("`r`n", "`n")
+    $duplicatePair = $explicitDlcMethodLf + "`n`n" + $explicitDlcMethodLf
+    $changed = $false
+    while ($explicitUpdateLf.Contains($duplicatePair)) {
+        $explicitUpdateLf = $explicitUpdateLf.Replace($duplicatePair, $explicitDlcMethodLf)
+        $changed = $true
+    }
+    if ($changed) {
+        if ($hadCrLf) {
+            $explicitUpdateLf = $explicitUpdateLf.Replace("`n", "`r`n")
+        }
+        [IO.File]::WriteAllText($explicitUpdatePath, $explicitUpdateLf, $utf8)
+        Write-Host '[Scarlet PC] Quick overlay: collapsed duplicate AddExplicitDlc methods.' -ForegroundColor DarkGray
+    }
+}
+
+$explicitUpdateText = [IO.File]::ReadAllText($explicitUpdatePath)
+if (-not $explicitUpdateText.Contains('inline bool AddExplicitDlc(')) {
+    Replace-Literal 'src\__PRODUCT___cmd\explicit_update.h' $old.Trim() $new.Trim()
+}
 
 $old = @'
         if (!SuyuCli::ConfigureExplicitUpdate(system, explicit_provider,
