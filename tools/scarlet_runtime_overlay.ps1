@@ -109,17 +109,27 @@ function Replace-Literal([string]$RelativePath, [string]$Old, [string]$New) {
     $Old = Expand-Legacy $Old
     $New = Expand-Legacy $New
     $text = [IO.File]::ReadAllText($path)
-    if ($text.Contains($Old)) {
-        $text = $text.Replace($Old, $New)
-        [IO.File]::WriteAllText($path, $text, $utf8)
-        return
-    }
 
     # Match multiline patches independently of Git/Windows LF vs CRLF conversion.
     $hadCrLf = $text.Contains("`r`n")
     $textLf = $text.Replace("`r`n", "`n")
     $oldLf = $Old.Replace("`r`n", "`n")
     $newLf = $New.Replace("`r`n", "`n")
+
+    # Additive patches often keep the original anchor inside the replacement. If the
+    # replacement is already present, checking/replacing $Old first would apply the same
+    # patch again on every quick update and duplicate declarations/functions.
+    $replacementContainsAnchor = $newLf.Contains($oldLf)
+    if ($replacementContainsAnchor -and $textLf.Contains($newLf)) {
+        return
+    }
+
+    if ($text.Contains($Old)) {
+        $text = $text.Replace($Old, $New)
+        [IO.File]::WriteAllText($path, $text, $utf8)
+        return
+    }
+
     if ($textLf.Contains($oldLf)) {
         $textLf = $textLf.Replace($oldLf, $newLf)
         if ($hadCrLf) {
