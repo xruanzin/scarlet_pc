@@ -856,14 +856,41 @@ $new = @'
         Settings::values.sync_memory_operations.SetValue(false);
         Settings::values.frame_pacing_mode.SetValue(Settings::FramePacingMode::Target_Auto);
 
+        // CPU-first Scarlet profile. High GPU accuracy keeps extra synchronization
+        // and cache-coherency work intended for broad emulator compatibility. This
+        // title now runs through a fixed AOT/native profile, so prefer the low-cost
+        // path and move eligible texture unswizzle work onto the GPU. Set
+        // SCARLET_GPU_SAFE=1 to restore conservative behavior for debugging.
+        const char* scarlet_gpu_safe_env = std::getenv("SCARLET_GPU_SAFE");
+        const bool scarlet_gpu_safe =
+            scarlet_gpu_safe_env && *scarlet_gpu_safe_env &&
+            *scarlet_gpu_safe_env != '0';
+        Settings::values.gpu_accuracy.SetValue(
+            scarlet_gpu_safe ? Settings::GpuAccuracy::High
+                             : Settings::GpuAccuracy::Low);
+        Settings::values.vram_usage_mode.SetValue(
+            scarlet_gpu_safe ? Settings::VramUsageMode::Conservative
+                             : Settings::VramUsageMode::Aggressive);
+        Settings::values.gpu_unswizzle_enabled.SetValue(!scarlet_gpu_safe);
+        Settings::values.gpu_unswizzle_texture_size.SetValue(
+            Settings::GpuUnswizzleSize::VerySmall);
+        Settings::values.gpu_unswizzle_stream_size.SetValue(
+            Settings::GpuUnswizzle::High);
+        Settings::values.gpu_unswizzle_chunk_size.SetValue(
+            Settings::GpuUnswizzleChunk::High);
+
         const char* async_shader_env = std::getenv("SCARLET_ASYNC_SHADERS");
         const bool async_shaders =
             async_shader_env == nullptr || *async_shader_env == '\0' || *async_shader_env != '0';
         Settings::values.use_asynchronous_shaders.SetValue(async_shaders);
 
-        LOG_INFO(Frontend,
-                 "[Scarlet.Perf] Async GPU/presentation enabled; async shaders={}; game speed=100%",
-                 async_shaders ? "on" : "off");
+        LOG_INFO(
+            Frontend,
+            "[Scarlet.Perf] CPU-first profile: async GPU/presentation=on "
+            "async shaders={} gpu_accuracy={} gpu_unswizzle={} game speed=100%",
+            async_shaders ? "on" : "off",
+            scarlet_gpu_safe ? "high-safe" : "low-fast",
+            scarlet_gpu_safe ? "off" : "on");
 
         // Decode video on the CPU unless the user has chosen otherwise.
 '@
