@@ -4914,6 +4914,33 @@ if ($scarletArmRecompText.Contains($scarletSvcReportOld.Trim())) {
         $scarletArmRecompText.Replace($scarletSvcReportOld.Trim(), $scarletSvcReportNew.Trim())
 }
 
+
+# The preserved runtime can already contain earlier edits around this report,
+# making the literal block above fail even though the obsolete TopN(array)
+# call is still present. Repair it structurally so partially transformed trees
+# remain buildable.
+if ($scarletArmRecompText.Contains('TopN(g_counters.svc_numbers, 40)')) {
+    $scarletSvcReportPattern =
+        '(?s)    if \(!g_counters\.svc_numbers\.empty\(\)\) \{.*?\r?\n    \}\r?\n\r?\n    if \(!g_counters\.modules\.empty\(\)\) \{'
+    $scarletSvcReportRegex = [regex]::new(
+        $scarletSvcReportPattern,
+        [Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    $scarletSvcReportMatch = $scarletSvcReportRegex.Match($scarletArmRecompText)
+    if (-not $scarletSvcReportMatch.Success) {
+        throw 'Scarlet runtime overlay: obsolete SVC TopN report found but structural migration failed'
+    }
+    $scarletSvcStructuralReplacement =
+        $scarletSvcReportNew.Trim() + [Environment]::NewLine + [Environment]::NewLine +
+        '    if (!g_counters.modules.empty()) {'
+    $scarletArmRecompText = $scarletSvcReportRegex.Replace(
+        $scarletArmRecompText,
+        $scarletSvcStructuralReplacement,
+        1
+    )
+    Write-Host '[Scarlet PC] Repaired preserved lock-free SVC report migration.' -ForegroundColor DarkGray
+}
+
 $scarletDispatchDiagOld = @'
         impl->SampleDiagnostics(thread);
         if (impl->core_index < g_current_pcs.size()) {
