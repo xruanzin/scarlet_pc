@@ -70,7 +70,7 @@ bool renderthread_active(void) {
 
 static void release_exec(RenderJob *j) {
     if (!j->handles) return;
-    for (int i = j->nhandles - 1; i >= 0; i--) nvn_cmdstream_unpin(j->handles[i]);
+    nvn_cmdstream_unpin_batch(j->handles, j->nhandles);
     free(j->handles);
     j->handles = NULL;
 }
@@ -79,7 +79,7 @@ static void run_job(RenderJob *j) {
     switch (j->kind) {
     case RJ_EXEC:
         backend_set_dirty_limit(j->dirty);
-        for (int i = 0; i < j->nhandles; i++) backend_execute(j->handles[i]);
+        backend_execute_batch(j->handles, j->nhandles);
         backend_set_dirty_limit(0);
         release_exec(j);
         break;
@@ -174,11 +174,17 @@ static uint64_t push(RenderJob j) {
     return ticket;
 }
 
-bool renderthread_submit_batch(const uint64_t *resolved, int n) {
-    if (!renderthread_active() || n <= 0) return false;
+bool renderthread_submit_batch(const uint64_t *handles, int n) {
+    if (!renderthread_active() || !handles || n <= 0) return false;
+
+    // Pin directly into the render job's owned array while still on the guest
+    // thread. This removes the old stack-resolve + second memcpy path and,
+    // together with nvn_cmdstream_pin_batch(), takes the host-segment mutex once
+    // for the whole NVN submit instead of once per list.
     uint64_t *copy = malloc((size_t)n * sizeof *copy);
     if (!copy) return false;
-    for (int i = 0; i < n; i++) copy[i] = resolved[i];
+    nvn_cmdstream_pin_batch(handles, copy, n);
+
     RenderJob j = {
         .kind = RJ_EXEC,
         .handles = copy,
@@ -187,7 +193,7 @@ bool renderthread_submit_batch(const uint64_t *resolved, int n) {
     };
     uint64_t ticket = push(j);
     if (!ticket) {
-        // Ownership of the pins never moved if the job was not queued.
+        nvn_cmdstream_unpin_batch(copy, n);
         free(copy);
         return false;
     }
