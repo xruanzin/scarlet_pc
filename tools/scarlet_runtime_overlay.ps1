@@ -895,6 +895,37 @@ $new = @'
 
     /// Base address of the module containing `pc`, so an address can be turned
 '@
+
+# The insertion anchor below remains present after the method is added, so older quick
+# overlay runs could prepend TryScarletFastGap again on every update. Derive the exact
+# method text from the patch above and collapse any repeated copies in the preserved tree
+# before applying/validating the transformation.
+$fastGapPath = Join-Path $SourceDir 'src\core\arm\recomp\arm_recomp.cpp'
+$fastGapText = [IO.File]::ReadAllText($fastGapPath)
+$expandedFastGapPatch = Expand-Legacy $new
+$fastGapStart = $expandedFastGapPatch.IndexOf('    bool TryScarletFastGap(u32 opcode) {')
+$fastGapEndMarker = '    /// Base address of the module containing `pc`, so an address can be turned'
+$fastGapEnd = $expandedFastGapPatch.IndexOf($fastGapEndMarker, $fastGapStart)
+if ($fastGapStart -ge 0 -and $fastGapEnd -gt $fastGapStart) {
+    $fastGapMethod = $expandedFastGapPatch.Substring($fastGapStart, $fastGapEnd - $fastGapStart).TrimEnd()
+    $hadCrLf = $fastGapText.Contains("`r`n")
+    $fastGapTextLf = $fastGapText.Replace("`r`n", "`n")
+    $fastGapMethodLf = $fastGapMethod.Replace("`r`n", "`n")
+    $duplicatePair = $fastGapMethodLf + "`n`n" + $fastGapMethodLf
+    $changed = $false
+    while ($fastGapTextLf.Contains($duplicatePair)) {
+        $fastGapTextLf = $fastGapTextLf.Replace($duplicatePair, $fastGapMethodLf)
+        $changed = $true
+    }
+    if ($changed) {
+        if ($hadCrLf) {
+            $fastGapTextLf = $fastGapTextLf.Replace("`n", "`r`n")
+        }
+        [IO.File]::WriteAllText($fastGapPath, $fastGapTextLf, $utf8)
+        Write-Host '[Scarlet PC] Quick overlay: collapsed duplicate TryScarletFastGap methods.' -ForegroundColor DarkGray
+    }
+}
+
 Replace-Literal 'src\core\arm\recomp\arm_recomp.cpp' $old.Trim() $new.Trim()
 
 $old = @'
