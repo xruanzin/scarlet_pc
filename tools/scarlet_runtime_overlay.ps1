@@ -432,6 +432,33 @@ void(system.Run());
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
+
+# Make the otherwise-silent Vulkan disk-cache phase visible in Scarlet logs.
+$old = @'
+    if (Settings::values.use_disk_shader_cache.GetValue()) {
+        // Build the cached shaders on their own thread, as the Qt frontend does from its
+'@
+$new = @'
+    if (Settings::values.use_disk_shader_cache.GetValue()) {
+        LOG_INFO(Frontend, "[Scarlet.Shaders] Loading Vulkan disk shader cache");
+        // Build the cached shaders on their own thread, as the Qt frontend does from its
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+        loader.join();
+        emu_window->HideBuildProgress();
+        try {
+'@
+$new = @'
+        loader.join();
+        emu_window->HideBuildProgress();
+        LOG_INFO(Frontend, "[Scarlet.Shaders] Vulkan disk shader cache complete: {}/{}",
+                 built.load(std::memory_order_relaxed), total.load(std::memory_order_relaxed));
+        try {
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
 # Remove legacy product wording from player-facing setup/errors.
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' '"Ignoring a recorded __PRODUCT__ inside this package; keys and firmware "' '"Ignoring a recorded external runtime inside this package; keys and firmware "'
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' '"in __PRODUCT__ (Tools > Install Decryption Keys), then start the game "' '"for Scarlet PC, then start the game "'
