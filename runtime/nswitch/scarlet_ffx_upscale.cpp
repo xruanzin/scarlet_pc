@@ -72,6 +72,11 @@ bool RealTemporalInputsEnabled() {
     return value == nullptr || *value == '\0' || *value != '0';
 }
 
+bool FsrDiagnosticsEnabled() {
+    const char* value = std::getenv("SCARLET_FSR_DIAGNOSTICS");
+    return value && *value && *value != '0';
+}
+
 float MotionVectorScale(float default_scale, const char* env_name) {
     if (const char* value = std::getenv(env_name); value && *value) {
         const float parsed = std::strtof(value, nullptr);
@@ -422,7 +427,8 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
         RealTemporalInputsEnabled() && depth_matches && motion_matches;
 
     static std::atomic_uint scarlet_temporal_input_logs{0};
-    if (scarlet_temporal_input_logs.fetch_add(1, std::memory_order_relaxed) < 16) {
+    if (FsrDiagnosticsEnabled() &&
+        scarlet_temporal_input_logs.fetch_add(1, std::memory_order_relaxed) < 16) {
         LOG_WARNING(Render_Vulkan,
                     "[Scarlet.FSR3.Input] depth={} format={} extent={}x{} motion={} format={} extent={}x{} expected={}x{} repaired={}",
                     depth_present ? 1 : 0,
