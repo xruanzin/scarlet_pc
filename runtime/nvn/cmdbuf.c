@@ -362,10 +362,9 @@ static uint64_t hostseg_take(NvnCmdBuf *cb, uint32_t need, uint32_t *actual_size
     return (uint64_t)(uintptr_t)mem;
 }
 
-uint64_t nvn_cmdstream_pin(uint64_t handle) {
+static uint64_t nvn_cmdstream_pin_locked(uint64_t handle) {
     if (!handle) return 0;
     uint64_t resolved = handle;
-    pthread_mutex_lock(&g_hostseg_lock);
 
     int head = -1;
     if (handle >= GUEST_LO && handle + sizeof(CmdRec) <= GUEST_HI) {
@@ -406,13 +405,26 @@ uint64_t nvn_cmdstream_pin(uint64_t handle) {
         }
     }
 
+    return resolved;
+}
+
+uint64_t nvn_cmdstream_pin(uint64_t handle) {
+    if (!handle) return 0;
+    pthread_mutex_lock(&g_hostseg_lock);
+    uint64_t resolved = nvn_cmdstream_pin_locked(handle);
     pthread_mutex_unlock(&g_hostseg_lock);
     return resolved;
 }
 
-void nvn_cmdstream_unpin(uint64_t resolved) {
-    if (!resolved) return;
+void nvn_cmdstream_pin_batch(const uint64_t *handles, uint64_t *resolved, int n) {
+    if (!handles || !resolved || n <= 0) return;
     pthread_mutex_lock(&g_hostseg_lock);
+    for (int i = 0; i < n; i++) resolved[i] = nvn_cmdstream_pin_locked(handles[i]);
+    pthread_mutex_unlock(&g_hostseg_lock);
+}
+
+static void nvn_cmdstream_unpin_locked(uint64_t resolved) {
+    if (!resolved) return;
 
     int head = hostseg_index_from_mem(resolved);
     if (head >= 0) {
@@ -435,6 +447,19 @@ void nvn_cmdstream_unpin(uint64_t resolved) {
         }
     }
 
+}
+
+void nvn_cmdstream_unpin(uint64_t resolved) {
+    if (!resolved) return;
+    pthread_mutex_lock(&g_hostseg_lock);
+    nvn_cmdstream_unpin_locked(resolved);
+    pthread_mutex_unlock(&g_hostseg_lock);
+}
+
+void nvn_cmdstream_unpin_batch(const uint64_t *resolved, int n) {
+    if (!resolved || n <= 0) return;
+    pthread_mutex_lock(&g_hostseg_lock);
+    for (int i = n - 1; i >= 0; i--) nvn_cmdstream_unpin_locked(resolved[i]);
     pthread_mutex_unlock(&g_hostseg_lock);
 }
 
@@ -658,7 +683,9 @@ NVN(nvnCommandBufferBeginRecording) {
                 (unsigned long long)fallbacks,
                 (unsigned long long)(cb->guest_size > cb->used ? cb->guest_size - cb->used : 0));
     }
-    rec(c, cb, CMD_BARRIER, 0);
+    // No synthetic CMD_BARRIER here. A zero-flag barrier has no Vulkan
+    // synchronization effect in the executor and only adds one record/switch
+    // dispatch to every command list Scarlet records.
 }
 NVN(nvnCommandBufferEndRecording) {
     NvnCmdBuf *cb = cb_of(A(0));
