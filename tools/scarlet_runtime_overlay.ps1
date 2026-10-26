@@ -3963,6 +3963,115 @@ if (-not $scarletTextureCacheText.Contains('rule=scarlet-rgba16-pair')) {
     }
 }
 
+
+# Diagnose where the selected temporal pair disappears between texture-cache
+# selection and the presentation FramebufferTextureInfo.
+$scarletTextureCacheText = [IO.File]::ReadAllText($scarletTextureCachePath)
+$scarletGetterOld = @'
+TextureCache<P>::TryFindScarletTemporalImageViews() {
+    if (!scarlet_temporal_depth_view_id || !scarlet_temporal_motion_view_id) {
+        return {};
+    }
+    return {
+        &slot_image_views[scarlet_temporal_depth_view_id],
+        &slot_image_views[scarlet_temporal_motion_view_id],
+    };
+}
+'@
+$scarletGetterNew = @'
+TextureCache<P>::TryFindScarletTemporalImageViews() {
+    static u32 scarlet_temporal_bridge_logs = 0;
+    if (!scarlet_temporal_depth_view_id || !scarlet_temporal_motion_view_id) {
+        if (scarlet_temporal_bridge_logs < 32) {
+            LOG_WARNING(Render_Vulkan,
+                        "[Scarlet.FSR3.Bridge] retained pair unavailable depth={} motion={}",
+                        scarlet_temporal_depth_view_id ? 1 : 0,
+                        scarlet_temporal_motion_view_id ? 1 : 0);
+            ++scarlet_temporal_bridge_logs;
+        }
+        return {};
+    }
+    auto& scarlet_depth_view = slot_image_views[scarlet_temporal_depth_view_id];
+    auto& scarlet_motion_view = slot_image_views[scarlet_temporal_motion_view_id];
+    if (scarlet_temporal_bridge_logs < 32) {
+        LOG_WARNING(Render_Vulkan,
+                    "[Scarlet.FSR3.Bridge] retained pair ready depth_format={} motion_format={} depth={}x{} motion={}x{}",
+                    static_cast<u32>(scarlet_depth_view.format),
+                    static_cast<u32>(scarlet_motion_view.format),
+                    scarlet_depth_view.size.width, scarlet_depth_view.size.height,
+                    scarlet_motion_view.size.width, scarlet_motion_view.size.height);
+        ++scarlet_temporal_bridge_logs;
+    }
+    return {&scarlet_depth_view, &scarlet_motion_view};
+}
+'@
+if ($scarletTextureCacheText.Contains($scarletGetterOld.Trim()) -and
+    -not $scarletTextureCacheText.Contains('[Scarlet.FSR3.Bridge] retained pair')) {
+    $scarletTextureCacheText =
+        $scarletTextureCacheText.Replace($scarletGetterOld.Trim(), $scarletGetterNew.Trim())
+}
+
+$scarletInvalidateOld = @'
+        if (scarlet_temporal_depth_view_id == image_view_id) {
+            scarlet_temporal_depth_view_id = ImageViewId{};
+        }
+        if (scarlet_temporal_motion_view_id == image_view_id) {
+            scarlet_temporal_motion_view_id = ImageViewId{};
+        }
+'@
+$scarletInvalidateNew = @'
+        if (scarlet_temporal_depth_view_id == image_view_id) {
+            static u32 scarlet_depth_invalidation_logs = 0;
+            if (scarlet_depth_invalidation_logs < 16) {
+                LOG_WARNING(Render_Vulkan,
+                            "[Scarlet.FSR3.Bridge] retained depth view invalidated before presentation");
+                ++scarlet_depth_invalidation_logs;
+            }
+            scarlet_temporal_depth_view_id = ImageViewId{};
+        }
+        if (scarlet_temporal_motion_view_id == image_view_id) {
+            static u32 scarlet_motion_invalidation_logs = 0;
+            if (scarlet_motion_invalidation_logs < 16) {
+                LOG_WARNING(Render_Vulkan,
+                            "[Scarlet.FSR3.Bridge] retained motion view invalidated before presentation");
+                ++scarlet_motion_invalidation_logs;
+            }
+            scarlet_temporal_motion_view_id = ImageViewId{};
+        }
+'@
+if ($scarletTextureCacheText.Contains($scarletInvalidateOld.Trim())) {
+    $scarletTextureCacheText =
+        $scarletTextureCacheText.Replace($scarletInvalidateOld.Trim(), $scarletInvalidateNew.Trim())
+}
+[IO.File]::WriteAllText($scarletTextureCachePath, $scarletTextureCacheText, $utf8)
+
+$scarletRasterizerPath = Join-Path $SourceDir 'src\video_core\renderer_vulkan\vk_rasterizer.cpp'
+$scarletRasterizerText = [IO.File]::ReadAllText($scarletRasterizerPath)
+$scarletRasterizerOld = @'
+    const auto [depth_view, motion_view] =
+        texture_cache.TryFindScarletTemporalImageViews();
+    if (depth_view && motion_view) {
+'@
+$scarletRasterizerNew = @'
+    const auto [depth_view, motion_view] =
+        texture_cache.TryFindScarletTemporalImageViews();
+    static u32 scarlet_rasterizer_bridge_logs = 0;
+    if (scarlet_rasterizer_bridge_logs < 32) {
+        LOG_WARNING(Render_Vulkan,
+                    "[Scarlet.FSR3.Bridge] framebuffer attach depth={} motion={}",
+                    depth_view ? 1 : 0, motion_view ? 1 : 0);
+        ++scarlet_rasterizer_bridge_logs;
+    }
+    if (depth_view && motion_view) {
+'@
+if ($scarletRasterizerText.Contains($scarletRasterizerOld.Trim()) -and
+    -not $scarletRasterizerText.Contains('[Scarlet.FSR3.Bridge] framebuffer attach')) {
+    $scarletRasterizerText =
+        $scarletRasterizerText.Replace($scarletRasterizerOld.Trim(), $scarletRasterizerNew.Trim())
+    [IO.File]::WriteAllText($scarletRasterizerPath, $scarletRasterizerText, $utf8)
+}
+Write-Host '[Scarlet PC] Temporal bridge diagnostics applied.' -ForegroundColor DarkGray
+
 $scarletForcedProbeMarker = '[Scarlet.FSR3.Probe.Force]'
 if (-not $scarletTextureCacheText.Contains($scarletForcedProbeMarker)) {
     $scarletForcedProbeAnchor = '    render_targets.is_rescaled = is_rescaling;'
@@ -4030,13 +4139,29 @@ $new = @'
 template <class P>
 std::pair<typename P::ImageView*, typename P::ImageView*>
 TextureCache<P>::TryFindScarletTemporalImageViews() {
+    static u32 scarlet_temporal_bridge_logs = 0;
     if (!scarlet_temporal_depth_view_id || !scarlet_temporal_motion_view_id) {
+        if (scarlet_temporal_bridge_logs < 32) {
+            LOG_WARNING(Render_Vulkan,
+                        "[Scarlet.FSR3.Bridge] retained pair unavailable depth={} motion={}",
+                        scarlet_temporal_depth_view_id ? 1 : 0,
+                        scarlet_temporal_motion_view_id ? 1 : 0);
+            ++scarlet_temporal_bridge_logs;
+        }
         return {};
     }
-    return {
-        &slot_image_views[scarlet_temporal_depth_view_id],
-        &slot_image_views[scarlet_temporal_motion_view_id],
-    };
+    auto& scarlet_depth_view = slot_image_views[scarlet_temporal_depth_view_id];
+    auto& scarlet_motion_view = slot_image_views[scarlet_temporal_motion_view_id];
+    if (scarlet_temporal_bridge_logs < 32) {
+        LOG_WARNING(Render_Vulkan,
+                    "[Scarlet.FSR3.Bridge] retained pair ready depth_format={} motion_format={} depth={}x{} motion={}x{}",
+                    static_cast<u32>(scarlet_depth_view.format),
+                    static_cast<u32>(scarlet_motion_view.format),
+                    scarlet_depth_view.size.width, scarlet_depth_view.size.height,
+                    scarlet_motion_view.size.width, scarlet_motion_view.size.height);
+        ++scarlet_temporal_bridge_logs;
+    }
+    return {&scarlet_depth_view, &scarlet_motion_view};
 }
 
 template <class P>
@@ -4055,9 +4180,21 @@ $new = @'
             render_targets.depth_buffer_id = ImageViewId{};
         }
         if (scarlet_temporal_depth_view_id == image_view_id) {
+            static u32 scarlet_depth_invalidation_logs = 0;
+            if (scarlet_depth_invalidation_logs < 16) {
+                LOG_WARNING(Render_Vulkan,
+                            "[Scarlet.FSR3.Bridge] retained depth view invalidated before presentation");
+                ++scarlet_depth_invalidation_logs;
+            }
             scarlet_temporal_depth_view_id = ImageViewId{};
         }
         if (scarlet_temporal_motion_view_id == image_view_id) {
+            static u32 scarlet_motion_invalidation_logs = 0;
+            if (scarlet_motion_invalidation_logs < 16) {
+                LOG_WARNING(Render_Vulkan,
+                            "[Scarlet.FSR3.Bridge] retained motion view invalidated before presentation");
+                ++scarlet_motion_invalidation_logs;
+            }
             scarlet_temporal_motion_view_id = ImageViewId{};
         }
 '@
@@ -4075,6 +4212,13 @@ $new = @'
 
     const auto [depth_view, motion_view] =
         texture_cache.TryFindScarletTemporalImageViews();
+    static u32 scarlet_rasterizer_bridge_logs = 0;
+    if (scarlet_rasterizer_bridge_logs < 32) {
+        LOG_WARNING(Render_Vulkan,
+                    "[Scarlet.FSR3.Bridge] framebuffer attach depth={} motion={}",
+                    depth_view ? 1 : 0, motion_view ? 1 : 0);
+        ++scarlet_rasterizer_bridge_logs;
+    }
     if (depth_view && motion_view) {
         const bool depth_scaled = depth_view->IsRescaled();
         const bool motion_scaled = motion_view->IsRescaled();
