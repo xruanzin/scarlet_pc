@@ -3137,29 +3137,62 @@ void EmuWindow_SDL2::WaitEvent() {
             LOG_INFO(Frontend,
                      "[Scarlet.Keyboard] Switching exclusive fullscreen to borderless keyboard mode");
 
-            // A null fullscreen display mode is SDL3's desktop/borderless fullscreen
-            // mode. Stay fullscreen the entire time so the game remains behind the
-            // keyboard instead of exposing the Windows desktop.
-            if (!SDL_SetWindowFullscreenMode(render_window, nullptr)) {
+            // SDL3 can apply fullscreen-mode changes asynchronously. On Windows,
+            // changing an already-active exclusive mode directly to nullptr can leave
+            // the native HWND temporarily windowed. Perform an explicit, synchronized
+            // transition: exclusive -> windowed -> borderless mode -> fullscreen.
+            if (!SDL_SetWindowFullscreen(render_window, false)) {
                 overlay_ready = false;
                 LOG_ERROR(Frontend,
-                          "[Scarlet.Keyboard] Failed to select borderless keyboard mode: {}",
-                          SDL_GetError());
-            } else if (!SDL_SetWindowFullscreen(render_window, true)) {
-                overlay_ready = false;
-                LOG_ERROR(Frontend,
-                          "[Scarlet.Keyboard] Failed to keep borderless fullscreen active: {}",
+                          "[Scarlet.Keyboard] Failed to leave exclusive mode for keyboard transition: {}",
                           SDL_GetError());
             } else {
                 if (!SDL_SyncWindow(render_window)) {
                     LOG_WARNING(Frontend,
-                                "[Scarlet.Keyboard] Borderless keyboard-mode synchronization timed out: {}",
+                                "[Scarlet.Keyboard] Exclusive-exit synchronization timed out: {}",
                                 SDL_GetError());
                 }
-                OnResize();
-                is_shown = true;
-                LOG_INFO(Frontend,
-                         "[Scarlet.Keyboard] Borderless fullscreen ready; game remains visible behind keyboard");
+
+                if (!SDL_SetWindowFullscreenMode(render_window, nullptr)) {
+                    overlay_ready = false;
+                    LOG_ERROR(Frontend,
+                              "[Scarlet.Keyboard] Failed to select borderless keyboard mode: {}",
+                              SDL_GetError());
+                } else if (!SDL_SetWindowFullscreen(render_window, true)) {
+                    overlay_ready = false;
+                    LOG_ERROR(Frontend,
+                              "[Scarlet.Keyboard] Failed to enter borderless fullscreen: {}",
+                              SDL_GetError());
+                } else {
+                    if (!SDL_SyncWindow(render_window)) {
+                        LOG_WARNING(Frontend,
+                                    "[Scarlet.Keyboard] Borderless keyboard-mode synchronization timed out: {}",
+                                    SDL_GetError());
+                    }
+
+                    const bool is_fullscreen =
+                        (SDL_GetWindowFlags(render_window) & SDL_WINDOW_FULLSCREEN) != 0;
+                    const bool is_borderless_mode =
+                        SDL_GetWindowFullscreenMode(render_window) == nullptr;
+
+                    if (!is_fullscreen || !is_borderless_mode) {
+                        overlay_ready = false;
+                        LOG_ERROR(Frontend,
+                                  "[Scarlet.Keyboard] Borderless verification failed "
+                                  "(fullscreen={} borderless_mode={}); restoring exclusive mode",
+                                  is_fullscreen, is_borderless_mode);
+                        Fullscreen();
+                        SDL_SyncWindow(render_window);
+                        OnResize();
+                        scarlet_exclusive_focus_suspended = false;
+                    } else {
+                        OnResize();
+                        is_shown = true;
+                        LOG_INFO(Frontend,
+                                 "[Scarlet.Keyboard] Verified borderless fullscreen ready; "
+                                 "game remains full-screen behind keyboard");
+                    }
+                }
             }
         }
         if (overlay_ready) {
