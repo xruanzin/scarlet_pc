@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -182,6 +183,19 @@ struct ScarletFfxUpscalePass::Impl {
     FfxVkPortableUpscaleContext* context{};
     FfxVkPortableUpscaleCreateInfo create_info{};
     std::uint64_t frame_id{};
+    std::chrono::steady_clock::time_point last_dispatch_time{};
+
+    float NextFrameTimeMs() {
+        const auto now = std::chrono::steady_clock::now();
+        if (last_dispatch_time.time_since_epoch().count() == 0) {
+            last_dispatch_time = now;
+            return FrameTimeMs();
+        }
+        const float elapsed =
+            std::chrono::duration<float, std::milli>(now - last_dispatch_time).count();
+        last_dispatch_time = now;
+        return std::clamp(elapsed, 1.0f, 100.0f);
+    }
 
     void DestroyContext() {
         if (context) {
@@ -190,6 +204,7 @@ struct ScarletFfxUpscalePass::Impl {
         }
         create_info = {};
         frame_id = 0;
+        last_dispatch_time = {};
     }
 
     ~Impl() {
@@ -394,6 +409,7 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
     reset_pending = false;
     temporal_history_valid = real_temporal;
     const std::uint64_t frame_id = impl->frame_id++;
+    const float frame_time_ms = impl->NextFrameTimeMs();
 
     static std::atomic_bool logged_real_temporal{false};
     static std::atomic_bool logged_missing_temporal{false};
@@ -413,8 +429,8 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
     }
 
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([this, source_image, image_index, reset, frame_id, real_temporal,
-                      temporal_inputs](vk::CommandBuffer cmdbuf) {
+    scheduler.Record([this, source_image, image_index, reset, frame_id, frame_time_ms,
+                      real_temporal, temporal_inputs](vk::CommandBuffer cmdbuf) {
         auto& local = images[image_index];
 
         VkImage fsr_input_image = source_image;
@@ -591,7 +607,7 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
             : FfxVkPortableFloat2{1.0f, 1.0f};
         dispatch.renderSize = {input_extent.width, input_extent.height};
         dispatch.outputSize = {output_extent.width, output_extent.height};
-        dispatch.frameTimeMilliseconds = FrameTimeMs();
+        dispatch.frameTimeMilliseconds = frame_time_ms;
         dispatch.preExposure = 1.0f;
         dispatch.cameraNear = 0.1f;
         dispatch.cameraFar = 1000.0f;
