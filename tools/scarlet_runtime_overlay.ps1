@@ -4977,4 +4977,88 @@ if ($scarletArmRecompText.Contains($scarletCoverageIoOld.Trim())) {
 [IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
 Write-Host '[Scarlet PC] AOT CPU fast path: 4096-block slices + lock-free SVC telemetry.' -ForegroundColor DarkGray
 
+
+# Scarlet iGPU/CPU profile. The Ryzen APU exposes a tiny dedicated-local heap but
+# can use shared system memory. Upstream reserves 8 GiB before allowing shared
+# memory, which collapses this machine to ~0.5 GiB and makes the texture cache
+# churn. Keep 4 GiB reserved for Windows/CPU and allow up to 3 GiB to Vulkan.
+$scarletVkDevicePath = Join-Path $SourceDir 'src\video_core\vulkan_common\vulkan_device.cpp'
+$scarletVkDeviceText = [IO.File]::ReadAllText($scarletVkDevicePath)
+$scarletIgpBudgetOld = @'
+    if (is_integrated) {
+        const s64 available_memory = static_cast<s64>(device_access_memory - device_initial_usage);
+        const u64 memory_size = Settings::values.vram_usage_mode.GetValue() == Settings::VramUsageMode::Aggressive ? 6_GiB : 4_GiB;
+        device_access_memory = static_cast<u64>(std::max<s64>(std::min<s64>(available_memory - 8_GiB, memory_size), std::min<s64>(local_memory, memory_size)));
+    } else {
+'@
+$scarletIgpBudgetNew = @'
+    if (is_integrated) {
+        const s64 available_memory =
+            static_cast<s64>(device_access_memory - device_initial_usage);
+        const u64 memory_size =
+            Settings::values.vram_usage_mode.GetValue() ==
+                    Settings::VramUsageMode::Aggressive
+                ? 3_GiB
+                : 2_GiB;
+        constexpr s64 scarlet_system_reserve = 4_GiB;
+        const s64 shared_budget =
+            std::max<s64>(available_memory - scarlet_system_reserve, 0);
+        device_access_memory = static_cast<u64>(
+            std::max<s64>(
+                std::min<s64>(shared_budget, static_cast<s64>(memory_size)),
+                std::min<s64>(static_cast<s64>(local_memory),
+                              static_cast<s64>(memory_size))));
+        LOG_INFO(Render_Vulkan,
+                 "[Scarlet.Perf] Integrated GPU memory budget: {:.2f} GiB "
+                 "(shared available {:.2f} GiB)",
+                 static_cast<double>(device_access_memory) /
+                     static_cast<double>(1_GiB),
+                 static_cast<double>(available_memory) /
+                     static_cast<double>(1_GiB));
+    } else {
+'@
+if ($scarletVkDeviceText.Contains($scarletIgpBudgetOld.Trim())) {
+    $scarletVkDeviceText =
+        $scarletVkDeviceText.Replace($scarletIgpBudgetOld.Trim(), $scarletIgpBudgetNew.Trim())
+    [IO.File]::WriteAllText($scarletVkDevicePath, $scarletVkDeviceText, $utf8)
+}
+
+# On small/iGPU budgets upstream computes minimum_memory=0, causing GC traversal
+# every frame. Keep cached images until actual expected-memory pressure begins.
+$scarletTextureCachePath = Join-Path $SourceDir 'src\video_core\texture_cache\texture_cache.h'
+$scarletTextureCacheText = [IO.File]::ReadAllText($scarletTextureCachePath)
+$scarletGcAnchor = @'
+    } else {
+        expected_memory = DEFAULT_EXPECTED_MEMORY + 512_MiB;
+        critical_memory = DEFAULT_CRITICAL_MEMORY + 1_GiB;
+        minimum_memory = 0;
+    }
+
+    const bool gpu_unswizzle_enabled = Settings::values.gpu_unswizzle_enabled.GetValue();
+'@
+$scarletGcReplacement = @'
+    } else {
+        expected_memory = DEFAULT_EXPECTED_MEMORY + 512_MiB;
+        critical_memory = DEFAULT_CRITICAL_MEMORY + 1_GiB;
+        minimum_memory = 0;
+    }
+
+    // Scarlet PC: do not continuously walk/evict the image LRU while the cache
+    // is below real pressure. This is particularly important on AMD APUs where
+    // the dedicated-local heap is tiny but shared memory is plentiful.
+    minimum_memory = (std::max)(minimum_memory, expected_memory);
+    LOG_INFO(HW_GPU,
+             "[Scarlet.Perf] Texture cache GC thresholds: start={} MiB expected={} MiB critical={} MiB",
+             minimum_memory / 1_MiB, expected_memory / 1_MiB,
+             critical_memory / 1_MiB);
+
+    const bool gpu_unswizzle_enabled = Settings::values.gpu_unswizzle_enabled.GetValue();
+'@
+if ($scarletTextureCacheText.Contains($scarletGcAnchor.Trim()) -and
+    -not $scarletTextureCacheText.Contains('[Scarlet.Perf] Texture cache GC thresholds')) {
+    $scarletTextureCacheText =
+        $scarletTextureCacheText.Replace($scarletGcAnchor.Trim(), $scarletGcReplacement.Trim())
+    [IO.File]::WriteAllText($scarletTextureCachePath, $scarletTextureCacheText, $utf8)
+}
+
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
