@@ -433,6 +433,54 @@ void(system.Run());
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
 
+
+# Scarlet PC prioritizes reaching gameplay over blocking at startup while Vulkan pipelines
+# are precompiled. Keep disk cache storage enabled, but skip the synchronous preload unless
+# the user explicitly opts in with SCARLET_PRELOAD_SHADER_CACHE=1.
+$old = @'
+    if (Settings::values.use_disk_shader_cache.GetValue()) {
+        LOG_INFO(Frontend, "[Scarlet.Shaders] Loading Vulkan disk shader cache");
+'@
+$new = @'
+    const char* scarlet_preload_shader_cache = std::getenv("SCARLET_PRELOAD_SHADER_CACHE");
+    const bool scarlet_should_preload_shader_cache =
+        scarlet_preload_shader_cache && *scarlet_preload_shader_cache != '0';
+
+    if (Settings::values.use_disk_shader_cache.GetValue() && scarlet_should_preload_shader_cache) {
+        LOG_INFO(Frontend, "[Scarlet.Shaders] Loading Vulkan disk shader cache");
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    system.RegisterExitCallback([&] {
+        // Just exit right away.
+        exit(0);
+    });
+'@
+$new = @'
+    if (Settings::values.use_disk_shader_cache.GetValue() && !scarlet_should_preload_shader_cache) {
+        LOG_INFO(Frontend,
+                 "[Scarlet.Shaders] Startup shader-cache preload skipped; pipelines will compile on demand");
+    }
+
+    system.RegisterExitCallback([&] {
+        // Just exit right away.
+        exit(0);
+    });
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    void(system.Run());
+    LOG_INFO(Frontend, "[Scarlet.Runtime] Game execution started");
+'@
+$new = @'
+    LOG_INFO(Frontend, "[Scarlet.Runtime] Starting game execution");
+    void(system.Run());
+    LOG_INFO(Frontend, "[Scarlet.Runtime] Game execution started");
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
 # Make the otherwise-silent Vulkan disk-cache phase visible in Scarlet logs.
 $old = @'
     if (Settings::values.use_disk_shader_cache.GetValue()) {
