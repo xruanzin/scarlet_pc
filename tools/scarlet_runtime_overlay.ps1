@@ -3768,4 +3768,28 @@ $new = @'
 '@
 Replace-Literal 'src\video_core\renderer_vulkan\vk_blit_screen.cpp' $old.Trim() $new.Trim()
 
+
+# Native in-frame keyboard no longer steals OS focus, so regular Win/Alt+Tab
+# focus handling must remain active even while the keyboard overlay is visible.
+$old = @'
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+        if (!ScarletPC::KeyboardOverlayActive() &&
+            Settings::values.fullscreen_mode.GetValue() == Settings::FullscreenMode::Exclusive &&
+'@
+$new = @'
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+        if (Settings::values.fullscreen_mode.GetValue() == Settings::FullscreenMode::Exclusive &&
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+        if (scarlet_exclusive_focus_suspended && !ScarletPC::KeyboardOverlayActive()) {
+'@
+$new = @'
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+        if (scarlet_exclusive_focus_suspended) {
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
+
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
