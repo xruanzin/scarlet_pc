@@ -926,7 +926,10 @@ if ($fastGapStart -ge 0 -and $fastGapEnd -gt $fastGapStart) {
     }
 }
 
-Replace-Literal 'src\core\arm\recomp\arm_recomp.cpp' $old.Trim() $new.Trim()
+$fastGapText = [IO.File]::ReadAllText($fastGapPath)
+if (-not $fastGapText.Contains('    bool TryScarletFastGap(u32 opcode) {')) {
+    Replace-Literal 'src\core\arm\recomp\arm_recomp.cpp' $old.Trim() $new.Trim()
+}
 
 $old = @'
             g_counters.fallback_from_unhandled.fetch_add(1, std::memory_order_relaxed);
