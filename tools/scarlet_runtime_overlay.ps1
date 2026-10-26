@@ -5187,4 +5187,147 @@ if ($scarletSchedulerText.Contains($scarletSchedulerPriorityOld.Trim()) -and
                                       $scarletSchedulerPriorityNew.Trim())
     [IO.File]::WriteAllText($scarletSchedulerPath, $scarletSchedulerText, $utf8)
 }
+
+# Force the CPU-first renderer profile into already-patched incremental runtime
+# trees. Earlier literal migrations could miss once the runtime_cmd source had
+# been transformed by a previous quick update.
+$scarletRuntimeCmdPath = Join-Path $SourceDir (Expand-Legacy 'src\__PRODUCT___cmd\__PRODUCT__.cpp')
+$scarletRuntimeCmdText = [IO.File]::ReadAllText($scarletRuntimeCmdPath)
+if (-not $scarletRuntimeCmdText.Contains('[Scarlet.Perf] CPU-first profile:')) {
+    $scarletAsyncAnchor =
+        '        const char* async_shader_env = std::getenv("SCARLET_ASYNC_SHADERS");'
+    if (-not $scarletRuntimeCmdText.Contains($scarletAsyncAnchor)) {
+        throw 'Scarlet runtime overlay: async shader anchor missing for CPU-first migration'
+    }
+
+    $scarletCpuFirstSettings = @'
+        // Scarlet PC CPU-first runtime profile.
+        const char* scarlet_gpu_safe_env = std::getenv("SCARLET_GPU_SAFE");
+        const bool scarlet_gpu_safe =
+            scarlet_gpu_safe_env && *scarlet_gpu_safe_env &&
+            *scarlet_gpu_safe_env != '0';
+
+        Settings::values.gpu_accuracy.SetValue(
+            scarlet_gpu_safe ? Settings::GpuAccuracy::High
+                             : Settings::GpuAccuracy::Low);
+        Settings::UpdateGPUAccuracy();
+        Settings::values.vram_usage_mode.SetValue(
+            scarlet_gpu_safe ? Settings::VramUsageMode::Conservative
+                             : Settings::VramUsageMode::Aggressive);
+        Settings::values.nvdec_emulation.SetValue(Settings::NvdecEmulation::Gpu);
+        Settings::values.accelerate_astc.SetValue(Settings::AstcDecodeMode::Gpu);
+        Settings::values.gpu_unswizzle_enabled.SetValue(!scarlet_gpu_safe);
+        Settings::values.gpu_unswizzle_texture_size.SetValue(
+            Settings::GpuUnswizzleSize::VerySmall);
+        Settings::values.gpu_unswizzle_stream_size.SetValue(
+            Settings::GpuUnswizzle::High);
+        Settings::values.gpu_unswizzle_chunk_size.SetValue(
+            Settings::GpuUnswizzleChunk::High);
+
+'@
+    $scarletRuntimeCmdText =
+        $scarletRuntimeCmdText.Replace(
+            $scarletAsyncAnchor,
+            $scarletCpuFirstSettings + $scarletAsyncAnchor)
+
+    $scarletOldPerfLogPattern =
+        '(?s)\s*LOG_INFO\(\s*Frontend,\s*"\[Scarlet\.Perf\] Async GPU/presentation enabled; async shaders=\{\}; game speed=100%"\s*,\s*async_shaders \? "on" : "off"\s*\);'
+    $scarletNewPerfLog = @'
+
+        LOG_INFO(
+            Frontend,
+            "[Scarlet.Perf] CPU-first profile: async GPU/presentation=on "
+            "async shaders={} gpu_accuracy={} gpu_unswizzle={} game speed=100%",
+            async_shaders ? "on" : "off",
+            scarlet_gpu_safe ? "high-safe" : "low-fast",
+            scarlet_gpu_safe ? "off" : "on");
+'@
+    $scarletRuntimeCmdUpdated = [regex]::Replace(
+        $scarletRuntimeCmdText,
+        $scarletOldPerfLogPattern,
+        $scarletNewPerfLog,
+        1)
+    if ($scarletRuntimeCmdUpdated -eq $scarletRuntimeCmdText) {
+        throw 'Scarlet runtime overlay: old Scarlet.Perf log not found for CPU-first migration'
+    }
+    $scarletRuntimeCmdText = $scarletRuntimeCmdUpdated
+    [IO.File]::WriteAllText($scarletRuntimeCmdPath, $scarletRuntimeCmdText, $utf8)
+    Write-Host '[Scarlet PC] Forced CPU-first renderer profile into preserved runtime.' -ForegroundColor DarkGray
+}
+
+# Force the integrated-memory budget migration structurally. The preserved
+# vulkan_device.cpp may have formatting differences from the pristine revision.
+$scarletVkDevicePath = Join-Path $SourceDir 'src\video_core\vulkan_common\vulkan_device.cpp'
+$scarletVkDeviceText = [IO.File]::ReadAllText($scarletVkDevicePath)
+if (-not $scarletVkDeviceText.Contains('[Scarlet.Perf] Integrated GPU memory budget:')) {
+    $scarletIgpBudgetPattern =
+        '(?s)    if \(is_integrated\) \{\s*' +
+        'const s64 available_memory\s*=\s*static_cast<s64>\(device_access_memory - device_initial_usage\);\s*' +
+        'const u64 memory_size\s*=.*?;\s*' +
+        'device_access_memory\s*=\s*static_cast<u64>\(.*?\);\s*' +
+        '\} else \{'
+    $scarletIgpBudgetReplacement = @'
+    if (is_integrated) {
+        const s64 available_memory =
+            static_cast<s64>(device_access_memory - device_initial_usage);
+        const u64 memory_size =
+            Settings::values.vram_usage_mode.GetValue() ==
+                    Settings::VramUsageMode::Aggressive
+                ? 3_GiB
+                : 2_GiB;
+        constexpr s64 scarlet_system_reserve = 4_GiB;
+        const s64 shared_budget =
+            std::max<s64>(available_memory - scarlet_system_reserve, 0);
+        device_access_memory = static_cast<u64>(
+            std::max<s64>(
+                std::min<s64>(shared_budget, static_cast<s64>(memory_size)),
+                std::min<s64>(static_cast<s64>(local_memory),
+                              static_cast<s64>(memory_size))));
+        LOG_INFO(Render_Vulkan,
+                 "[Scarlet.Perf] Integrated GPU memory budget: {:.2f} GiB "
+                 "(shared available {:.2f} GiB)",
+                 static_cast<double>(device_access_memory) /
+                     static_cast<double>(1_GiB),
+                 static_cast<double>(available_memory) /
+                     static_cast<double>(1_GiB));
+    } else {
+'@
+    $scarletVkDeviceUpdated = [regex]::Replace(
+        $scarletVkDeviceText,
+        $scarletIgpBudgetPattern,
+        $scarletIgpBudgetReplacement,
+        1)
+    if ($scarletVkDeviceUpdated -eq $scarletVkDeviceText) {
+        throw 'Scarlet runtime overlay: integrated GPU memory-budget block not found'
+    }
+    [IO.File]::WriteAllText($scarletVkDevicePath, $scarletVkDeviceUpdated, $utf8)
+    Write-Host '[Scarlet PC] Forced shared-memory budget for integrated GPU.' -ForegroundColor DarkGray
+}
+
+# Force the AOT chain budget independently of source formatting and print its
+# effective value on the first RunThread entry so performance tests can verify
+# that the fast path is actually live.
+$scarletArmRecompPath = Join-Path $SourceDir 'src\core\arm\recomp\arm_recomp.cpp'
+$scarletArmRecompText = [IO.File]::ReadAllText($scarletArmRecompPath)
+$scarletArmRecompText = [regex]::Replace(
+    $scarletArmRecompText,
+    'std::atomic<int>\s+g_recomp_chain_budget\{\d+\};',
+    'std::atomic<int> g_recomp_chain_budget{1024};',
+    1)
+if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] AOT chain budget=')) {
+    $scarletRunEntryOld =
+        '        LOG_INFO(Core_ARM, "ArmRecomp::RunThread entered, pc={:#x}", impl->ctx.pc);'
+    $scarletRunEntryNew = @'
+        LOG_INFO(Core_ARM, "ArmRecomp::RunThread entered, pc={:#x}", impl->ctx.pc);
+        LOG_INFO(Core_ARM, "[Scarlet.Perf] AOT chain budget={}", RecompChainBudget());
+'@
+    if (-not $scarletArmRecompText.Contains($scarletRunEntryOld)) {
+        throw 'Scarlet runtime overlay: ArmRecomp first-run log anchor missing'
+    }
+    $scarletArmRecompText =
+        $scarletArmRecompText.Replace($scarletRunEntryOld, $scarletRunEntryNew.TrimEnd())
+}
+[IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
+Write-Host '[Scarlet PC] Forced AOT chain budget 1024 in preserved runtime.' -ForegroundColor DarkGray
+
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
