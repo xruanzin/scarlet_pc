@@ -63,7 +63,7 @@ foreach ($name in @(
     if (-not (Test-Path $src -PathType Leaf)) {
         throw "Missing Scarlet graphics source: $src"
     }
-    Copy-Item $src $dst -Force
+    Copy-IfDifferent $src $dst
 }
 
 $dlssBridgeHeader = Join-Path $repoRoot 'runtime\nvidia\scarlet_dlss_bridge.h'
