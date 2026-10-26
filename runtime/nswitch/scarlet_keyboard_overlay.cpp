@@ -6,6 +6,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <cwchar>
+#include <cwctype>
 #include <mutex>
 #include <string>
 #include <thread>
