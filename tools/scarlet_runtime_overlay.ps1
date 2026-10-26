@@ -4197,7 +4197,8 @@ bool TextureCache<P>::HasUncommittedFlushes() const noexcept {
 
 $scarletRasterizerPath = Join-Path $SourceDir 'src\video_core\renderer_vulkan\vk_rasterizer.cpp'
 $scarletRasterizerText = [IO.File]::ReadAllText($scarletRasterizerPath)
-if (-not $scarletRasterizerText.Contains('[Scarlet.FSR3.Bridge] temporal framebuffer payload')) {
+if (-not $scarletRasterizerText.Contains('[Scarlet.FSR3.Bridge] temporal framebuffer payload') -and
+    -not $scarletRasterizerText.Contains('texture_cache.TryFindScarletTemporalImageViews();')) {
     $scarletRasterizerTailOld = @'
     info.scaled_width = scaled ? resolution.ScaleUp(info.width) : info.width;
     info.scaled_height = scaled ? resolution.ScaleUp(info.height) : info.height;
@@ -4293,12 +4294,17 @@ if (-not $scarletLayerText.Contains('[Scarlet.FSR3.Bridge] layer temporal inputs
                                      source_image_view, GetFormat(framebuffer), render_extent,
                                      temporal_inputs);
 '@
-    if (-not $scarletLayerText.Contains($scarletLayerOld.Trim())) {
+    if ($scarletLayerText.Contains($scarletLayerOld.Trim())) {
+        $scarletLayerText =
+            $scarletLayerText.Replace($scarletLayerOld.Trim(), $scarletLayerNew.Trim())
+        [IO.File]::WriteAllText($scarletLayerPath, $scarletLayerText, $utf8)
+    } elseif ($scarletLayerText.Contains('ScarletFfxTemporalInputs temporal_inputs{};')) {
+        # A previous overlay already forwards temporal inputs. Keep it intact;
+        # the runtime log will tell us whether the payload fields are populated.
+        Write-Host '[Scarlet PC] Active FSR presentation path already forwards temporal inputs.' -ForegroundColor DarkGray
+    } else {
         throw 'Scarlet runtime overlay: active FSR presentation call not found for temporal forwarding'
     }
-    $scarletLayerText =
-        $scarletLayerText.Replace($scarletLayerOld.Trim(), $scarletLayerNew.Trim())
-    [IO.File]::WriteAllText($scarletLayerPath, $scarletLayerText, $utf8)
 }
 Write-Host '[Scarlet PC] Forced temporal payload forwarding into active presentation path.' -ForegroundColor DarkGray
 
