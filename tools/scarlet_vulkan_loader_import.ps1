@@ -77,6 +77,8 @@ EXPORTS
     vkFreeMemory
     vkGetBufferMemoryRequirements
     vkGetImageMemoryRequirements
+    vkGetDeviceProcAddr
+    vkGetPhysicalDeviceFeatures
     vkGetPhysicalDeviceFeatures2
     vkGetPhysicalDeviceFormatProperties
     vkGetPhysicalDeviceMemoryProperties
