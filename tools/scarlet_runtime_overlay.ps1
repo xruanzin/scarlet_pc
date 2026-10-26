@@ -1203,6 +1203,26 @@ $new = @'
 '@
 Replace-Literal 'src\video_core\shader_notify.h' $old.Trim() $new.Trim()
 
+# Older quick-overlay runs could append shaders_compiled repeatedly because the
+# replacement retains the shaders_building anchor. Normalize the preserved header first.
+$nativeStatusPath = Join-Path $SourceDir ('src\' + [string]$provenance.legacy.command_dir + '\native_status.h')
+$nativeStatusText = [IO.File]::ReadAllText($nativeStatusPath)
+$nativeStatusLf = $nativeStatusText.Replace("`r`n", "`n")
+$compiledFieldPattern = '(?m)^(\s*int shaders_compiled\{\};\s*\n){2,}'
+$compiledFieldRegex = New-Object System.Text.RegularExpressions.Regex($compiledFieldPattern)
+if ($compiledFieldRegex.IsMatch($nativeStatusLf)) {
+    $nativeStatusLf = $compiledFieldRegex.Replace(
+        $nativeStatusLf,
+        "    int shaders_compiled{};`n",
+        1
+    )
+    if ($nativeStatusText.Contains("`r`n")) {
+        $nativeStatusLf = $nativeStatusLf.Replace("`n", "`r`n")
+    }
+    [IO.File]::WriteAllText($nativeStatusPath, $nativeStatusLf, $utf8)
+    Write-Host '[Scarlet PC] Quick overlay: collapsed duplicate native-status shader counter fields.' -ForegroundColor DarkGray
+}
+
 $old = @'
     int shaders_building{};
 '@
