@@ -232,6 +232,20 @@ if (-not $videoCoreCmakeText.Contains('renderer_vulkan/scarlet_ffx_framegen.cpp'
     Replace-Literal 'src\video_core\CMakeLists.txt' $old.Trim() $new.Trim()
 }
 
+# Fast-incremental migration: ensure the native keyboard Vulkan sources enter an
+# already-configured video_core target even when the original source-list patch was applied earlier.
+$old = @'
+    renderer_vulkan/scarlet_ffx_upscale.h
+'@
+$new = @'
+    renderer_vulkan/scarlet_ffx_upscale.h
+    renderer_vulkan/scarlet_keyboard_overlay.cpp
+    renderer_vulkan/scarlet_keyboard_overlay.h
+    renderer_vulkan/scarlet_keyboard_overlay_pass.cpp
+    renderer_vulkan/scarlet_keyboard_overlay_pass.h
+'@
+Replace-Literal 'src\video_core\CMakeLists.txt' $old.Trim() $new.Trim()
+
 $old = '    renderer_vulkan/scarlet_fsr4_pass.h'
 $new = $old + [Environment]::NewLine +
     '    "' + $fsrVulkanCmake + '/src/ffx_vk_fsr4_v07.c"' + [Environment]::NewLine +
