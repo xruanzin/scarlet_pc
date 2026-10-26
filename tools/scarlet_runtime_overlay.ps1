@@ -4072,6 +4072,237 @@ if ($scarletRasterizerText.Contains($scarletRasterizerOld.Trim()) -and
 }
 Write-Host '[Scarlet PC] Temporal bridge diagnostics applied.' -ForegroundColor DarkGray
 
+# Robust temporal bridge migration for preserved fast-incremental runtime trees.
+# Earlier overlay revisions could leave the active presentation path on the old
+# FSR call that did not forward FramebufferTextureInfo temporal resources.
+$scarletBlitHeaderPath = Join-Path $SourceDir 'src\video_core\renderer_vulkan\vk_blit_screen.h'
+$scarletBlitHeaderText = [IO.File]::ReadAllText($scarletBlitHeaderPath)
+if (-not $scarletBlitHeaderText.Contains('VkImage depth_image{};')) {
+    $scarletFramebufferInfoOld = @'
+struct FramebufferTextureInfo {
+    VkImage image{};
+    VkImageView image_view{};
+    u32 width{};
+    u32 height{};
+    u32 scaled_width{};
+    u32 scaled_height{};
+};
+'@
+    $scarletFramebufferInfoNew = @'
+struct FramebufferTextureInfo {
+    VkImage image{};
+    VkImageView image_view{};
+    u32 width{};
+    u32 height{};
+    u32 scaled_width{};
+    u32 scaled_height{};
+
+    VkImage depth_image{};
+    VkFormat depth_format{VK_FORMAT_UNDEFINED};
+    VkImageAspectFlags depth_aspect{VK_IMAGE_ASPECT_DEPTH_BIT};
+    u32 depth_width{};
+    u32 depth_height{};
+
+    VkImage motion_image{};
+    VkFormat motion_format{VK_FORMAT_UNDEFINED};
+    u32 motion_width{};
+    u32 motion_height{};
+};
+'@
+    if (-not $scarletBlitHeaderText.Contains($scarletFramebufferInfoOld.Trim())) {
+        throw 'Scarlet runtime overlay: FramebufferTextureInfo base block not found'
+    }
+    $scarletBlitHeaderText =
+        $scarletBlitHeaderText.Replace($scarletFramebufferInfoOld.Trim(), $scarletFramebufferInfoNew.Trim())
+    [IO.File]::WriteAllText($scarletBlitHeaderPath, $scarletBlitHeaderText, $utf8)
+}
+
+$scarletTextureBasePath = Join-Path $SourceDir 'src\video_core\texture_cache\texture_cache_base.h'
+$scarletTextureBaseText = [IO.File]::ReadAllText($scarletTextureBasePath)
+if (-not $scarletTextureBaseText.Contains('TryFindScarletTemporalImageViews')) {
+    $scarletDeclOld = @'
+    [[nodiscard]] std::pair<ImageView*, bool> TryFindFramebufferImageView(
+        const Tegra::FramebufferConfig& config, DAddr cpu_addr);
+
+    /// Return true when there are uncommitted images to be downloaded
+'@
+    $scarletDeclNew = @'
+    [[nodiscard]] std::pair<ImageView*, bool> TryFindFramebufferImageView(
+        const Tegra::FramebufferConfig& config, DAddr cpu_addr);
+
+    [[nodiscard]] std::pair<ImageView*, ImageView*> TryFindScarletTemporalImageViews();
+
+    /// Return true when there are uncommitted images to be downloaded
+'@
+    if (-not $scarletTextureBaseText.Contains($scarletDeclOld.Trim())) {
+        throw 'Scarlet runtime overlay: temporal getter declaration anchor not found'
+    }
+    $scarletTextureBaseText =
+        $scarletTextureBaseText.Replace($scarletDeclOld.Trim(), $scarletDeclNew.Trim())
+}
+if (-not $scarletTextureBaseText.Contains('scarlet_temporal_depth_view_id')) {
+    $scarletMembersOld = @'
+    RenderTargets render_targets;
+    u64 render_targets_serial = 0;
+'@
+    $scarletMembersNew = @'
+    RenderTargets render_targets;
+    ImageViewId scarlet_temporal_depth_view_id{};
+    ImageViewId scarlet_temporal_motion_view_id{};
+    u64 render_targets_serial = 0;
+'@
+    if (-not $scarletTextureBaseText.Contains($scarletMembersOld.Trim())) {
+        throw 'Scarlet runtime overlay: temporal member anchor not found'
+    }
+    $scarletTextureBaseText =
+        $scarletTextureBaseText.Replace($scarletMembersOld.Trim(), $scarletMembersNew.Trim())
+}
+[IO.File]::WriteAllText($scarletTextureBasePath, $scarletTextureBaseText, $utf8)
+
+$scarletTextureCacheText = [IO.File]::ReadAllText($scarletTextureCachePath)
+if (-not $scarletTextureCacheText.Contains('TextureCache<P>::TryFindScarletTemporalImageViews()')) {
+    $scarletGetterAnchor = @'
+    return {};
+}
+
+template <class P>
+bool TextureCache<P>::HasUncommittedFlushes() const noexcept {
+'@
+    $scarletGetterInsert = @'
+    return {};
+}
+
+template <class P>
+std::pair<typename P::ImageView*, typename P::ImageView*>
+TextureCache<P>::TryFindScarletTemporalImageViews() {
+    if (!scarlet_temporal_depth_view_id || !scarlet_temporal_motion_view_id) {
+        return {};
+    }
+    return {
+        &slot_image_views[scarlet_temporal_depth_view_id],
+        &slot_image_views[scarlet_temporal_motion_view_id],
+    };
+}
+
+template <class P>
+bool TextureCache<P>::HasUncommittedFlushes() const noexcept {
+'@
+    if (-not $scarletTextureCacheText.Contains($scarletGetterAnchor.Trim())) {
+        throw 'Scarlet runtime overlay: temporal getter implementation anchor not found'
+    }
+    $scarletTextureCacheText =
+        $scarletTextureCacheText.Replace($scarletGetterAnchor.Trim(), $scarletGetterInsert.Trim())
+    [IO.File]::WriteAllText($scarletTextureCachePath, $scarletTextureCacheText, $utf8)
+}
+
+$scarletRasterizerPath = Join-Path $SourceDir 'src\video_core\renderer_vulkan\vk_rasterizer.cpp'
+$scarletRasterizerText = [IO.File]::ReadAllText($scarletRasterizerPath)
+if (-not $scarletRasterizerText.Contains('[Scarlet.FSR3.Bridge] temporal framebuffer payload')) {
+    $scarletRasterizerTailOld = @'
+    info.scaled_width = scaled ? resolution.ScaleUp(info.width) : info.width;
+    info.scaled_height = scaled ? resolution.ScaleUp(info.height) : info.height;
+    return info;
+}
+'@
+    $scarletRasterizerTailNew = @'
+    info.scaled_width = scaled ? resolution.ScaleUp(info.width) : info.width;
+    info.scaled_height = scaled ? resolution.ScaleUp(info.height) : info.height;
+
+    const auto [depth_view, motion_view] =
+        texture_cache.TryFindScarletTemporalImageViews();
+    if (depth_view && motion_view) {
+        const bool depth_scaled = depth_view->IsRescaled();
+        const bool motion_scaled = motion_view->IsRescaled();
+        const auto depth_format =
+            MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, depth_view->format).format;
+        const auto motion_format =
+            MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, motion_view->format).format;
+
+        info.depth_image = depth_view->ImageHandle();
+        info.depth_format = depth_format;
+        info.depth_aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+        info.depth_width =
+            depth_scaled ? resolution.ScaleUp(depth_view->size.width) : depth_view->size.width;
+        info.depth_height =
+            depth_scaled ? resolution.ScaleUp(depth_view->size.height) : depth_view->size.height;
+
+        info.motion_image = motion_view->ImageHandle();
+        info.motion_format = motion_format;
+        info.motion_width =
+            motion_scaled ? resolution.ScaleUp(motion_view->size.width) : motion_view->size.width;
+        info.motion_height =
+            motion_scaled ? resolution.ScaleUp(motion_view->size.height) : motion_view->size.height;
+
+        static u32 scarlet_temporal_payload_logs = 0;
+        if (scarlet_temporal_payload_logs < 16) {
+            LOG_WARNING(Render_Vulkan,
+                        "[Scarlet.FSR3.Bridge] temporal framebuffer payload depth_format={} motion_format={} depth={}x{} motion={}x{}",
+                        static_cast<u32>(info.depth_format), static_cast<u32>(info.motion_format),
+                        info.depth_width, info.depth_height,
+                        info.motion_width, info.motion_height);
+            ++scarlet_temporal_payload_logs;
+        }
+    }
+    return info;
+}
+'@
+    if (-not $scarletRasterizerText.Contains($scarletRasterizerTailOld.Trim())) {
+        throw 'Scarlet runtime overlay: AccelerateDisplay tail not found for temporal payload migration'
+    }
+    $scarletRasterizerText =
+        $scarletRasterizerText.Replace($scarletRasterizerTailOld.Trim(), $scarletRasterizerTailNew.Trim())
+    [IO.File]::WriteAllText($scarletRasterizerPath, $scarletRasterizerText, $utf8)
+}
+
+$scarletLayerPath = Join-Path $SourceDir 'src\video_core\renderer_vulkan\present\layer.cpp'
+$scarletLayerText = [IO.File]::ReadAllText($scarletLayerPath)
+if (-not $scarletLayerText.Contains('[Scarlet.FSR3.Bridge] layer temporal inputs')) {
+    $scarletLayerOld = @'
+        const VkImageView ffx_view =
+            ffx_upscale_filter->Draw(device, scheduler, image_index, source_image,
+                                     source_image_view, GetFormat(framebuffer), render_extent);
+'@
+    $scarletLayerNew = @'
+        ScarletFfxTemporalInputs temporal_inputs{};
+        if (texture_info) {
+            temporal_inputs.depth_image = texture_info->depth_image;
+            temporal_inputs.depth_format = texture_info->depth_format;
+            temporal_inputs.depth_aspect = texture_info->depth_aspect;
+            temporal_inputs.depth_extent =
+                VkExtent2D{texture_info->depth_width, texture_info->depth_height};
+            temporal_inputs.motion_image = texture_info->motion_image;
+            temporal_inputs.motion_format = texture_info->motion_format;
+            temporal_inputs.motion_extent =
+                VkExtent2D{texture_info->motion_width, texture_info->motion_height};
+        }
+        static u32 scarlet_layer_temporal_logs = 0;
+        if (scarlet_layer_temporal_logs < 16) {
+            LOG_WARNING(Render_Vulkan,
+                        "[Scarlet.FSR3.Bridge] layer temporal inputs texture_info={} depth={} motion={} depth_format={} motion_format={} depth_extent={}x{} motion_extent={}x{}",
+                        texture_info ? 1 : 0,
+                        temporal_inputs.depth_image != VK_NULL_HANDLE ? 1 : 0,
+                        temporal_inputs.motion_image != VK_NULL_HANDLE ? 1 : 0,
+                        static_cast<u32>(temporal_inputs.depth_format),
+                        static_cast<u32>(temporal_inputs.motion_format),
+                        temporal_inputs.depth_extent.width, temporal_inputs.depth_extent.height,
+                        temporal_inputs.motion_extent.width, temporal_inputs.motion_extent.height);
+            ++scarlet_layer_temporal_logs;
+        }
+        const VkImageView ffx_view =
+            ffx_upscale_filter->Draw(device, scheduler, image_index, source_image,
+                                     source_image_view, GetFormat(framebuffer), render_extent,
+                                     temporal_inputs);
+'@
+    if (-not $scarletLayerText.Contains($scarletLayerOld.Trim())) {
+        throw 'Scarlet runtime overlay: active FSR presentation call not found for temporal forwarding'
+    }
+    $scarletLayerText =
+        $scarletLayerText.Replace($scarletLayerOld.Trim(), $scarletLayerNew.Trim())
+    [IO.File]::WriteAllText($scarletLayerPath, $scarletLayerText, $utf8)
+}
+Write-Host '[Scarlet PC] Forced temporal payload forwarding into active presentation path.' -ForegroundColor DarkGray
+
+
 $scarletForcedProbeMarker = '[Scarlet.FSR3.Probe.Force]'
 if (-not $scarletTextureCacheText.Contains($scarletForcedProbeMarker)) {
     $scarletForcedProbeAnchor = '    render_targets.is_rescaled = is_rescaling;'
