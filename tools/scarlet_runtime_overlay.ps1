@@ -620,7 +620,8 @@ $old = @'
 $new = @'
     const char* scarlet_preload_shader_cache = std::getenv("SCARLET_PRELOAD_SHADER_CACHE");
     const bool scarlet_should_preload_shader_cache =
-        scarlet_preload_shader_cache && *scarlet_preload_shader_cache != '0';
+        scarlet_preload_shader_cache == nullptr || *scarlet_preload_shader_cache == '\0' ||
+        *scarlet_preload_shader_cache != '0';
 
     if (Settings::values.use_disk_shader_cache.GetValue() && scarlet_should_preload_shader_cache) {
         LOG_INFO(Frontend, "[Scarlet.Shaders] Loading Vulkan disk shader cache");
@@ -4691,5 +4692,104 @@ $new = @'
         if (scarlet_exclusive_focus_suspended) {
 '@
 Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
+
+
+# Production cleanup after the temporal bridge has been validated.
+# Keep diagnostics available in source at Trace level, but remove Warning/Info I/O
+# from hot render-target and presentation paths.
+$scarletHotLogFiles = @(
+    (Join-Path $SourceDir 'src\video_core\texture_cache\texture_cache.h'),
+    (Join-Path $SourceDir 'src\video_core\renderer_vulkan\vk_rasterizer.cpp'),
+    (Join-Path $SourceDir 'src\video_core\renderer_vulkan\present\layer.cpp')
+)
+foreach ($scarletHotLogPath in $scarletHotLogFiles) {
+    if (-not (Test-Path -LiteralPath $scarletHotLogPath)) {
+        continue
+    }
+    $scarletHotLogText = [IO.File]::ReadAllText($scarletHotLogPath)
+    $scarletHotLogUpdated = [regex]::Replace(
+        $scarletHotLogText,
+        'LOG_WARNING\(Render_Vulkan,\s*(?="\[Scarlet\.FSR3\.(?:Probe|Bridge)\])',
+        'LOG_TRACE(Render_Vulkan, '
+    )
+    if ($scarletHotLogUpdated -ne $scarletHotLogText) {
+        [IO.File]::WriteAllText($scarletHotLogPath, $scarletHotLogUpdated, $utf8)
+    }
+}
+
+# The retained Scarlet depth/motion views already report the physical FSR render
+# extent. Repair older preserved runtime trees that still scale this metadata twice.
+$scarletRasterizerPath = Join-Path $SourceDir 'src\video_core\renderer_vulkan\vk_rasterizer.cpp'
+$scarletRasterizerText = [IO.File]::ReadAllText($scarletRasterizerPath)
+$scarletRasterizerOriginal = $scarletRasterizerText
+$scarletRasterizerText = [regex]::Replace(
+    $scarletRasterizerText,
+    'info\.depth_width\s*=\s*\r?\n\s*depth_scaled\s*\?\s*resolution\.ScaleUp\(depth_view->size\.width\)\s*:\s*depth_view->size\.width;',
+    'info.depth_width = depth_view->size.width;'
+)
+$scarletRasterizerText = [regex]::Replace(
+    $scarletRasterizerText,
+    'info\.depth_height\s*=\s*\r?\n\s*depth_scaled\s*\?\s*resolution\.ScaleUp\(depth_view->size\.height\)\s*:\s*depth_view->size\.height;',
+    'info.depth_height = depth_view->size.height;'
+)
+$scarletRasterizerText = [regex]::Replace(
+    $scarletRasterizerText,
+    'info\.motion_width\s*=\s*\r?\n\s*motion_scaled\s*\?\s*resolution\.ScaleUp\(motion_view->size\.width\)\s*:\s*motion_view->size\.width;',
+    'info.motion_width = motion_view->size.width;'
+)
+$scarletRasterizerText = [regex]::Replace(
+    $scarletRasterizerText,
+    'info\.motion_height\s*=\s*\r?\n\s*motion_scaled\s*\?\s*resolution\.ScaleUp\(motion_view->size\.height\)\s*:\s*motion_view->size\.height;',
+    'info.motion_height = motion_view->size.height;'
+)
+$scarletRasterizerText = [regex]::Replace(
+    $scarletRasterizerText,
+    '(?m)^\s*const bool depth_scaled = depth_view->IsRescaled\(\);\r?\n',
+    ''
+)
+$scarletRasterizerText = [regex]::Replace(
+    $scarletRasterizerText,
+    '(?m)^\s*const bool motion_scaled = motion_view->IsRescaled\(\);\r?\n',
+    ''
+)
+if ($scarletRasterizerText -ne $scarletRasterizerOriginal) {
+    [IO.File]::WriteAllText($scarletRasterizerPath, $scarletRasterizerText, $utf8)
+    Write-Host '[Scarlet PC] Temporal extent metadata normalized at the rasterizer source.' -ForegroundColor DarkGray
+}
+
+# Pipeline hashes are useful for targeted debugging, but Info-level output for every
+# newly discovered pipeline adds avoidable console/file I/O during gameplay.
+$scarletPipelinePath = Join-Path $SourceDir 'src\video_core\renderer_vulkan\vk_pipeline_cache.cpp'
+$scarletPipelineText = [IO.File]::ReadAllText($scarletPipelinePath)
+$scarletPipelineUpdated =
+    $scarletPipelineText.Replace('LOG_INFO(Render_Vulkan, "0x{:016x}", hash);',
+                                 'LOG_DEBUG(Render_Vulkan, "0x{:016x}", hash);')
+if ($scarletPipelineUpdated -ne $scarletPipelineText) {
+    [IO.File]::WriteAllText($scarletPipelinePath, $scarletPipelineUpdated, $utf8)
+    Write-Host '[Scarlet PC] Per-pipeline hash logging lowered to Debug.' -ForegroundColor DarkGray
+}
+
+# Migrate an already-patched incremental runtime to the new default-on preload.
+$scarletRuntimeCmdPath = Join-Path $SourceDir 'src\__PRODUCT___cmd\__PRODUCT__.cpp'
+if (Test-Path -LiteralPath $scarletRuntimeCmdPath) {
+    $scarletRuntimeCmdText = [IO.File]::ReadAllText($scarletRuntimeCmdPath)
+    $scarletPreloadOld = @'
+    const char* scarlet_preload_shader_cache = std::getenv("SCARLET_PRELOAD_SHADER_CACHE");
+    const bool scarlet_should_preload_shader_cache =
+        scarlet_preload_shader_cache && *scarlet_preload_shader_cache != '0';
+'@
+    $scarletPreloadNew = @'
+    const char* scarlet_preload_shader_cache = std::getenv("SCARLET_PRELOAD_SHADER_CACHE");
+    const bool scarlet_should_preload_shader_cache =
+        scarlet_preload_shader_cache == nullptr || *scarlet_preload_shader_cache == '\0' ||
+        *scarlet_preload_shader_cache != '0';
+'@
+    if ($scarletRuntimeCmdText.Contains($scarletPreloadOld.Trim())) {
+        $scarletRuntimeCmdText =
+            $scarletRuntimeCmdText.Replace($scarletPreloadOld.Trim(), $scarletPreloadNew.Trim())
+        [IO.File]::WriteAllText($scarletRuntimeCmdPath, $scarletRuntimeCmdText, $utf8)
+        Write-Host '[Scarlet PC] Shader-cache preload is now default-on.' -ForegroundColor DarkGray
+    }
+}
 
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
