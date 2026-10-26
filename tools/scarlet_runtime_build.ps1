@@ -185,9 +185,10 @@ if (-not (Test-Path $fsrVulkanHeader -PathType Leaf)) {
 # upstream runtime normally uses only Vulkan headers, so generate a tiny import library
 # locally from the system vulkan-1.dll export contract; no Vulkan SDK install is required.
 $vulkanImportLib = Join-Path $repoRoot 'build\tools\vulkan-loader-import\vulkan-1.lib'
-if (-not $FastIncremental -or -not (Test-Path $vulkanImportLib -PathType Leaf)) {
-    & (Join-Path $PSScriptRoot 'scarlet_vulkan_loader_import.ps1')
-}
+# This import library is tiny and its export list evolves with the embedded
+# FidelityFX backend. Regenerate it even in fast-incremental mode so an older
+# cached .lib cannot leave newly-required Vulkan entry points unresolved.
+& (Join-Path $PSScriptRoot 'scarlet_vulkan_loader_import.ps1')
 
 
 if ($RefreshSource -and (Test-Path $SourceDir)) { Remove-Item $SourceDir -Recurse -Force }
