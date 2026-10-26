@@ -3365,3 +3365,224 @@ CollectPhysicalMemoryInfo();
 Replace-Literal 'src\video_core\vulkan_common\vulkan_device.cpp' $old.Trim() $new.Trim()
 
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
+
+
+# --- Scarlet FSR3 real temporal input bridge ---------------------------------
+# Capture a real depth target plus a compatible 2-channel floating-point MRT
+# from the texture cache and forward them to the presentation FSR pass. The
+# adapter only accumulates history when both inputs match the scaled scene size.
+
+$old = @'
+struct FramebufferTextureInfo {
+    VkImage image{};
+    VkImageView image_view{};
+    u32 width{};
+    u32 height{};
+    u32 scaled_width{};
+    u32 scaled_height{};
+};
+'@
+$new = @'
+struct FramebufferTextureInfo {
+    VkImage image{};
+    VkImageView image_view{};
+    u32 width{};
+    u32 height{};
+    u32 scaled_width{};
+    u32 scaled_height{};
+
+    VkImage depth_image{};
+    VkFormat depth_format{VK_FORMAT_UNDEFINED};
+    VkImageAspectFlags depth_aspect{VK_IMAGE_ASPECT_DEPTH_BIT};
+    u32 depth_width{};
+    u32 depth_height{};
+
+    VkImage motion_image{};
+    VkFormat motion_format{VK_FORMAT_UNDEFINED};
+    u32 motion_width{};
+    u32 motion_height{};
+};
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_blit_screen.h' $old.Trim() $new.Trim()
+
+$old = @'
+    [[nodiscard]] std::pair<ImageView*, bool> TryFindFramebufferImageView(
+        const Tegra::FramebufferConfig& config, DAddr cpu_addr);
+
+    /// Return true when there are uncommitted images to be downloaded
+'@
+$new = @'
+    [[nodiscard]] std::pair<ImageView*, bool> TryFindFramebufferImageView(
+        const Tegra::FramebufferConfig& config, DAddr cpu_addr);
+
+    /// Scarlet temporal reconstruction inputs captured from the most recent
+    /// scene MRT set that exposed both depth and a 2-channel float motion target.
+    [[nodiscard]] std::pair<ImageView*, ImageView*> TryFindScarletTemporalImageViews();
+
+    /// Return true when there are uncommitted images to be downloaded
+'@
+Replace-Literal 'src\video_core\texture_cache\texture_cache_base.h' $old.Trim() $new.Trim()
+
+$old = @'
+    RenderTargets render_targets;
+    u64 render_targets_serial = 0;
+'@
+$new = @'
+    RenderTargets render_targets;
+    ImageViewId scarlet_temporal_depth_view_id{};
+    ImageViewId scarlet_temporal_motion_view_id{};
+    u64 render_targets_serial = 0;
+'@
+Replace-Literal 'src\video_core\texture_cache\texture_cache_base.h' $old.Trim() $new.Trim()
+
+# Remember the last scene-like MRT pair. R16G16_FLOAT/R32G32_FLOAT are the
+# portable FSR formats appropriate for motion vectors; keeping the pair across
+# later post-processing/UI passes lets presentation still consume the scene data.
+$old = @'
+    render_targets.is_rescaled = is_rescaling;
+
+    if (render_targets != previous_render_targets) {
+'@
+$new = @'
+    render_targets.is_rescaled = is_rescaling;
+
+    if (depth_buffer_id) {
+        auto& scarlet_depth = slot_image_views[depth_buffer_id];
+        for (const ImageViewId color_id : render_targets.color_buffer_ids) {
+            if (!color_id) {
+                continue;
+            }
+            auto& scarlet_motion = slot_image_views[color_id];
+            const bool motion_format =
+                scarlet_motion.format == PixelFormat::R16G16_FLOAT ||
+                scarlet_motion.format == PixelFormat::R32G32_FLOAT;
+            const bool same_extent =
+                scarlet_motion.size.width == scarlet_depth.size.width &&
+                scarlet_motion.size.height == scarlet_depth.size.height;
+            const bool single_sample =
+                scarlet_motion.Samples() == VK_SAMPLE_COUNT_1_BIT &&
+                scarlet_depth.Samples() == VK_SAMPLE_COUNT_1_BIT;
+            if (motion_format && same_extent && single_sample) {
+                scarlet_temporal_depth_view_id = depth_buffer_id;
+                scarlet_temporal_motion_view_id = color_id;
+                break;
+            }
+        }
+    }
+
+    if (render_targets != previous_render_targets) {
+'@
+Replace-Literal 'src\video_core\texture_cache\texture_cache.h' $old.Trim() $new.Trim()
+
+$old = @'
+    return {};
+}
+
+template <class P>
+bool TextureCache<P>::HasUncommittedFlushes() const noexcept {
+'@
+$new = @'
+    return {};
+}
+
+template <class P>
+std::pair<typename P::ImageView*, typename P::ImageView*>
+TextureCache<P>::TryFindScarletTemporalImageViews() {
+    if (!scarlet_temporal_depth_view_id || !scarlet_temporal_motion_view_id) {
+        return {};
+    }
+    return {
+        &slot_image_views[scarlet_temporal_depth_view_id],
+        &slot_image_views[scarlet_temporal_motion_view_id],
+    };
+}
+
+template <class P>
+bool TextureCache<P>::HasUncommittedFlushes() const noexcept {
+'@
+Replace-Literal 'src\video_core\texture_cache\texture_cache.h' $old.Trim() $new.Trim()
+
+# Any view deletion/invalidation must invalidate the retained temporal pair.
+$old = @'
+        if (render_targets.depth_buffer_id == image_view_id) {
+            render_targets.depth_buffer_id = ImageViewId{};
+        }
+'@
+$new = @'
+        if (render_targets.depth_buffer_id == image_view_id) {
+            render_targets.depth_buffer_id = ImageViewId{};
+        }
+        if (scarlet_temporal_depth_view_id == image_view_id) {
+            scarlet_temporal_depth_view_id = ImageViewId{};
+        }
+        if (scarlet_temporal_motion_view_id == image_view_id) {
+            scarlet_temporal_motion_view_id = ImageViewId{};
+        }
+'@
+Replace-Literal 'src\video_core\texture_cache\texture_cache.h' $old.Trim() $new.Trim()
+
+$old = @'
+    info.scaled_width = scaled ? resolution.ScaleUp(info.width) : info.width;
+    info.scaled_height = scaled ? resolution.ScaleUp(info.height) : info.height;
+    return info;
+}
+'@
+$new = @'
+    info.scaled_width = scaled ? resolution.ScaleUp(info.width) : info.width;
+    info.scaled_height = scaled ? resolution.ScaleUp(info.height) : info.height;
+
+    const auto [depth_view, motion_view] =
+        texture_cache.TryFindScarletTemporalImageViews();
+    if (depth_view && motion_view) {
+        const bool depth_scaled = depth_view->IsRescaled();
+        const bool motion_scaled = motion_view->IsRescaled();
+        const auto depth_format =
+            MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, depth_view->format).format;
+        const auto motion_format =
+            MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, motion_view->format).format;
+
+        info.depth_image = depth_view->ImageHandle();
+        info.depth_format = depth_format;
+        info.depth_aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+        info.depth_width =
+            depth_scaled ? resolution.ScaleUp(depth_view->size.width) : depth_view->size.width;
+        info.depth_height =
+            depth_scaled ? resolution.ScaleUp(depth_view->size.height) : depth_view->size.height;
+
+        info.motion_image = motion_view->ImageHandle();
+        info.motion_format = motion_format;
+        info.motion_width =
+            motion_scaled ? resolution.ScaleUp(motion_view->size.width) : motion_view->size.width;
+        info.motion_height =
+            motion_scaled ? resolution.ScaleUp(motion_view->size.height) : motion_view->size.height;
+    }
+    return info;
+}
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_rasterizer.cpp' $old.Trim() $new.Trim()
+
+# Feed those real Vulkan images into Scarlet's FSR bridge.
+$old = @'
+        const VkImageView ffx_view =
+            ffx_upscale_filter->Draw(device, scheduler, image_index, source_image,
+                                     source_image_view, GetFormat(framebuffer), render_extent);
+'@
+$new = @'
+        ScarletFfxTemporalInputs temporal_inputs{};
+        if (texture_info) {
+            temporal_inputs.depth_image = texture_info->depth_image;
+            temporal_inputs.depth_format = texture_info->depth_format;
+            temporal_inputs.depth_aspect = texture_info->depth_aspect;
+            temporal_inputs.depth_extent =
+                VkExtent2D{texture_info->depth_width, texture_info->depth_height};
+            temporal_inputs.motion_image = texture_info->motion_image;
+            temporal_inputs.motion_format = texture_info->motion_format;
+            temporal_inputs.motion_extent =
+                VkExtent2D{texture_info->motion_width, texture_info->motion_height};
+        }
+        const VkImageView ffx_view =
+            ffx_upscale_filter->Draw(device, scheduler, image_index, source_image,
+                                     source_image_view, GetFormat(framebuffer), render_extent,
+                                     temporal_inputs);
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\present\layer.cpp' $old.Trim() $new.Trim()
