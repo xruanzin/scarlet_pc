@@ -31,7 +31,56 @@ if (-not (Test-Path $runtimeExe -PathType Leaf)) {
     throw "Updated ScarletPC.exe was not staged: $runtimeExe"
 }
 
-Copy-Item $runtimeExe (Join-Path $packageDir 'ScarletPC.exe') -Force
+$packageExe = Join-Path $packageDir 'ScarletPC.exe'
+
+# A running Windows image cannot be overwritten. Find Scarlet specifically by the
+# exact package path, because the process name can differ and an elevated instance
+# may not be returned cleanly by Get-Process -Name alone.
+$packageExeFull = [IO.Path]::GetFullPath($packageExe)
+$lockingProcesses = @(
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ExecutablePath -and
+        [string]::Equals(
+            [IO.Path]::GetFullPath([string]$_.ExecutablePath),
+            $packageExeFull,
+            [StringComparison]::OrdinalIgnoreCase)
+    }
+)
+
+foreach ($process in $lockingProcesses) {
+    Write-Host ("[Scarlet PC] Closing running package process PID {0} ({1}) before update..." -f
+                $process.ProcessId, $process.Name) -ForegroundColor Yellow
+    try {
+        Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
+        Wait-Process -Id ([int]$process.ProcessId) -Timeout 5 -ErrorAction SilentlyContinue
+    } catch {
+        # taskkill /T also closes child processes that can keep the package alive.
+        & taskkill.exe /PID ([string]$process.ProcessId) /T /F 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw ("ScarletPC.exe is still in use by PID {0}. Close that process or rerun " +
+                   "PowerShell as Administrator, then run this quick updater again.") -f
+                  $process.ProcessId
+        }
+    }
+}
+
+# Antivirus/driver hooks can release the image handle a moment after process exit.
+$copySucceeded = $false
+for ($attempt = 1; $attempt -le 10; ++$attempt) {
+    try {
+        Copy-Item $runtimeExe $packageExe -Force -ErrorAction Stop
+        $copySucceeded = $true
+        break
+    } catch [System.IO.IOException] {
+        if ($attempt -eq 10) {
+            throw
+        }
+        Start-Sleep -Milliseconds 300
+    }
+}
+if (-not $copySucceeded) {
+    throw "Could not update package executable: $packageExe"
+}
 
 Get-ChildItem $stageDir -File -Filter '*.dll' -ErrorAction SilentlyContinue | ForEach-Object {
     $target = Join-Path $packageDir $_.Name
