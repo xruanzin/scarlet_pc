@@ -2752,6 +2752,123 @@ $new = @'
 '@
 Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
 
+# Fast-incremental migration: older preserved runtime trees already contain the
+# previous Scarlet graphics block, so the upstream-anchor replacement above cannot
+# update them. Replace that previous transformed block explicitly.
+$old = @'
+        // The launcher resolution is the OUTPUT resolution. Pick a render scale separately.
+        // With an upscaler enabled, reduce the guest render resolution according to the
+        // selected quality preset instead of accidentally supersampling it.
+        float desired_scale = static_cast<float>(scarlet_width) / 1920.0f;
+        const char* resolution_upscaler = std::getenv("SCARLET_UPSCALER");
+        const bool uses_upscaler =
+            resolution_upscaler && *resolution_upscaler &&
+            std::string_view{resolution_upscaler} != "native";
+        const bool temporal_fsr =
+            resolution_upscaler &&
+            (std::string_view{resolution_upscaler} == "fsr3" ||
+             std::string_view{resolution_upscaler} == "fsr31");
+        if (uses_upscaler) {
+            float upscale_ratio = 1.5f; // Quality
+            if (const char* quality = std::getenv("SCARLET_UPSCALER_QUALITY");
+                quality && *quality) {
+                const std::string_view preset{quality};
+                if (preset == "balanced") {
+                    upscale_ratio = 1.7f;
+                } else if (preset == "performance") {
+                    upscale_ratio = 2.0f;
+                } else if (preset == "ultra_performance") {
+                    upscale_ratio = 3.0f;
+                }
+            }
+            desired_scale /= upscale_ratio;
+
+            // The renderer only exposes discrete guest render scales. At 1366x768,
+            // FSR 3 Performance requests ~0.356X; nearest-value rounding selected
+            // the experimental 0.25X path, which effectively asks FSR to upscale
+            // roughly 2.8x and has proven unstable on the AMD Windows path.
+            // Temporal FSR needs at least the 0.5X guest target until arbitrary
+            // render extents are supported.
+            if (temporal_fsr) {
+                desired_scale = std::max(desired_scale, 0.5f);
+            }
+        }
+
+        Settings::ResolutionSetup setup = Settings::ResolutionSetup::Res1X;
+        if (desired_scale < 0.375f) {
+            setup = Settings::ResolutionSetup::Res1_4X;
+        } else if (desired_scale < 0.625f) {
+            setup = Settings::ResolutionSetup::Res1_2X;
+        } else if (desired_scale < 0.875f) {
+            setup = Settings::ResolutionSetup::Res3_4X;
+        } else if (desired_scale < 1.125f) {
+            setup = Settings::ResolutionSetup::Res1X;
+        } else if (desired_scale < 1.375f) {
+            setup = Settings::ResolutionSetup::Res5_4X;
+        } else if (desired_scale < 1.75f) {
+            setup = Settings::ResolutionSetup::Res3_2X;
+        } else if (desired_scale < 2.5f) {
+            setup = Settings::ResolutionSetup::Res2X;
+        } else if (desired_scale < 3.5f) {
+            setup = Settings::ResolutionSetup::Res3X;
+        } else {
+            setup = Settings::ResolutionSetup::Res4X;
+        }
+        Settings::values.resolution_setup.SetValue(setup);
+        Settings::UpdateRescalingInfo();
+        LOG_INFO(Frontend,
+                 "[Scarlet.Graphics] Output={}x{} internal_scale_request={:.3f} upscaler={}",
+                 scarlet_width, scarlet_height, desired_scale,
+                 resolution_upscaler && *resolution_upscaler ? resolution_upscaler : "native");
+'@
+$new = @'
+        // Output/display resolution and temporal render resolution are separate.
+        // Changing the monitor/window size must never act like suyu's user-facing
+        // 0.5x/2x resolution multiplier. Keep native guest resolution unless a
+        // temporal upscaler explicitly needs a lower render target.
+        const char* resolution_upscaler = std::getenv("SCARLET_UPSCALER");
+        const bool temporal_fsr =
+            resolution_upscaler &&
+            (std::string_view{resolution_upscaler} == "fsr3" ||
+             std::string_view{resolution_upscaler} == "fsr31");
+
+        float fsr_render_scale = 1.0f;
+        if (temporal_fsr) {
+            float upscale_ratio = 1.5f; // Quality
+            if (const char* quality = std::getenv("SCARLET_UPSCALER_QUALITY");
+                quality && *quality) {
+                const std::string_view preset{quality};
+                if (preset == "balanced") {
+                    upscale_ratio = 1.7f;
+                } else if (preset == "performance") {
+                    upscale_ratio = 2.0f;
+                } else if (preset == "ultra_performance") {
+                    upscale_ratio = 3.0f;
+                }
+            }
+
+            fsr_render_scale =
+                (static_cast<float>(scarlet_width) / 1920.0f) / upscale_ratio;
+            fsr_render_scale = std::max(fsr_render_scale, 0.5f);
+        }
+
+        Settings::ResolutionSetup setup = Settings::ResolutionSetup::Res1X;
+        if (temporal_fsr) {
+            if (fsr_render_scale < 0.625f) {
+                setup = Settings::ResolutionSetup::Res1_2X;
+            } else if (fsr_render_scale < 0.875f) {
+                setup = Settings::ResolutionSetup::Res3_4X;
+            }
+        }
+        Settings::values.resolution_setup.SetValue(setup);
+        Settings::UpdateRescalingInfo();
+        LOG_INFO(Frontend,
+                 "[Scarlet.Graphics] Output={}x{} fsr_render_scale={:.3f} upscaler={}",
+                 scarlet_width, scarlet_height, fsr_render_scale,
+                 resolution_upscaler && *resolution_upscaler ? resolution_upscaler : "native");
+'@
+Replace-Literal 'src\__PRODUCT___cmd\__PRODUCT__.cpp' $old.Trim() $new.Trim()
+
 
 $old = @'
 #include <cstdlib>
@@ -2935,6 +3052,51 @@ $new = @'
     };
 '@
 Replace-Literal 'src\video_core\texture_cache\texture_cache.h' $old.Trim() $new.Trim()
+
+
+$old = @'
+    Settings::ScalingFilter scaling_filter{};
+    std::unique_ptr<WindowAdaptPass> window_adapt{};
+    std::list<Layer> layers{};
+};
+'@
+$new = @'
+    Settings::ScalingFilter scaling_filter{};
+    std::unique_ptr<WindowAdaptPass> window_adapt{};
+    std::list<Layer> layers{};
+    VkExtent2D layer_output_size{};
+};
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_blit_screen.h' $old.Trim() $new.Trim()
+
+
+$old = @'
+    if (layers.size() != framebuffers.size()) {
+        layers.clear();
+        for (size_t i = 0; i < framebuffers.size(); ++i) {
+            layers.emplace_back(device, memory_allocator, scheduler, device_memory, image_count,
+                                window_size, window_adapt->GetDescriptorSetLayout(), filters);
+        }
+    }
+'@
+$new = @'
+    const bool layer_extent_changed =
+        layer_output_size.width != window_size.width ||
+        layer_output_size.height != window_size.height;
+    if (layers.size() != framebuffers.size() || layer_extent_changed) {
+        WaitIdle(device);
+        layers.clear();
+        layer_output_size = window_size;
+        for (size_t i = 0; i < framebuffers.size(); ++i) {
+            layers.emplace_back(device, memory_allocator, scheduler, device_memory, image_count,
+                                window_size, window_adapt->GetDescriptorSetLayout(), filters);
+        }
+        LOG_INFO(Render_Vulkan,
+                 "[Scarlet.Graphics] Presentation layers rebuilt for {}x{} output",
+                 window_size.width, window_size.height);
+    }
+'@
+Replace-Literal 'src\video_core\renderer_vulkan\vk_blit_screen.cpp' $old.Trim() $new.Trim()
 
 # Scarlet temporal upscalers own their output extent. When active, use the complete
 # host framebuffer as the presentation rectangle instead of MaxRectangle(). This avoids
