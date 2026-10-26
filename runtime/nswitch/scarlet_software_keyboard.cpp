@@ -85,10 +85,10 @@ void RequestDesktopForKeyboard() {
     g_keyboard_desktop_request.store(true, std::memory_order_release);
     if (WaitForWindowHandshake(g_keyboard_desktop_ack)) {
         LOG_INFO(Service_AM,
-                 "[Scarlet.Keyboard] Exclusive fullscreen released before keyboard");
+                 "[Scarlet.Keyboard] Fullscreen keyboard overlay mode ready");
     } else {
         LOG_WARNING(Service_AM,
-                    "[Scarlet.Keyboard] Timed out waiting for desktop-mode handoff; continuing");
+                    "[Scarlet.Keyboard] Timed out waiting for fullscreen keyboard overlay mode; continuing");
     }
 }
 
@@ -970,8 +970,8 @@ KeyboardResponse RunKeyboard(KeyboardInitializeParameters params, std::u16string
     }
 
     // Exclusive Vulkan presentation can cover any owned Win32 popup. Ask the
-    // SDL/main thread to leave exclusive mode first, then size/place the keyboard
-    // against the restored desktop/window geometry.
+    // SDL/main thread to switch to borderless fullscreen first. The game stays
+    // full-screen and visible behind the keyboard; the Windows desktop is not exposed.
     RequestDesktopForKeyboard();
 
     RECT client{};
