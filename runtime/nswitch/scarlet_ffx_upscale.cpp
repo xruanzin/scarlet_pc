@@ -40,6 +40,22 @@ const char* SelectedFsrName() {
     return value && std::strcmp(value, "fsr31") == 0 ? "FSR 3.1" : "FSR 3";
 }
 
+VkExtent2D RequestedOutputExtent() {
+    VkExtent2D extent{};
+    if (const char* value = std::getenv("SCARLET_WINDOW_WIDTH"); value && *value) {
+        extent.width = static_cast<std::uint32_t>(std::max(0, std::atoi(value)));
+    }
+    if (const char* value = std::getenv("SCARLET_WINDOW_HEIGHT"); value && *value) {
+        extent.height = static_cast<std::uint32_t>(std::max(0, std::atoi(value)));
+    }
+    return extent;
+}
+
+bool HasTrueTemporalInputs() {
+    const char* value = std::getenv("SCARLET_FSR_TRUE_TEMPORAL_INPUTS");
+    return value && *value && *value != '0';
+}
+
 float FrameTimeMs() {
     int fps = 60;
     if (const char* value = std::getenv("SCARLET_TARGET_FPS"); value && *value) {
@@ -135,6 +151,18 @@ ScarletFfxUpscalePass::ScarletFfxUpscalePass(const Device&, MemoryAllocator& all
     : allocator{allocator_}, image_count{image_count_}, output_extent{output_extent_},
       impl{std::make_unique<Impl>()} {
     ready = FfxUpscaleRequested();
+    if (ready) {
+        const VkExtent2D requested = RequestedOutputExtent();
+        if (requested.width && requested.height &&
+            (requested.width != output_extent.width ||
+             requested.height != output_extent.height)) {
+            LOG_INFO(Render_Vulkan,
+                     "[Scarlet.FSR3] Deferring FSR layer {}x{} until requested output {}x{} is active",
+                     output_extent.width, output_extent.height,
+                     requested.width, requested.height);
+            ready = false;
+        }
+    }
 }
 
 ScarletFfxUpscalePass::~ScarletFfxUpscalePass() = default;
@@ -326,11 +354,12 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
         dispatch.transparencyAndCompositionMask.structSize =
             sizeof(dispatch.transparencyAndCompositionMask);
 
+        const bool true_temporal_inputs = HasTrueTemporalInputs();
         dispatch.jitterOffset = {0.0f, 0.0f};
-        dispatch.motionVectorScale = {
-            static_cast<float>(input_extent.width),
-            static_cast<float>(input_extent.height),
-        };
+        // The current presentation bridge has no game motion-vector signal yet.
+        // Keep the zero-motion texture in pixel units. Once Scarlet's real scene
+        // depth/motion path is wired, the opt-in true-temporal mode can use history.
+        dispatch.motionVectorScale = {1.0f, 1.0f};
         dispatch.renderSize = {input_extent.width, input_extent.height};
         dispatch.outputSize = {output_extent.width, output_extent.height};
         dispatch.frameTimeMilliseconds = FrameTimeMs();
@@ -341,7 +370,10 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
         dispatch.viewSpaceToMeters = 1.0f;
         dispatch.sharpness = 0.0f;
         dispatch.enableSharpening = VK_FALSE;
-        dispatch.reset = reset ? VK_TRUE : VK_FALSE;
+        // Do not accumulate invalid temporal history from placeholder depth/motion.
+        // Reset every frame until real scene inputs are supplied, which makes the
+        // FSR3 backend behave as a stable per-frame reconstruction/upscale path.
+        dispatch.reset = true_temporal_inputs ? (reset ? VK_TRUE : VK_FALSE) : VK_TRUE;
         dispatch.frameId = frame_id;
 
         const auto issues =
@@ -363,6 +395,13 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
                         "temporal upscaler disabled globally for this run",
                         SelectedFsrName(), static_cast<int>(rc));
             return;
+        }
+
+        static std::atomic_bool logged_first_dispatch{false};
+        if (!logged_first_dispatch.exchange(true, std::memory_order_relaxed)) {
+            LOG_INFO(Render_Vulkan,
+                     "[Scarlet.FSR3] First portable dispatch recorded successfully; mode={}",
+                     true_temporal_inputs ? "true-temporal" : "safe-reset-every-frame");
         }
 
         GeneralBarrier(cmdbuf, *local.output, VK_ACCESS_SHADER_WRITE_BIT,
