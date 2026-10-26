@@ -3459,10 +3459,7 @@ $new = @'
             const bool same_extent =
                 scarlet_motion.size.width == scarlet_depth.size.width &&
                 scarlet_motion.size.height == scarlet_depth.size.height;
-            const bool single_sample =
-                scarlet_motion.Samples() == VK_SAMPLE_COUNT_1_BIT &&
-                scarlet_depth.Samples() == VK_SAMPLE_COUNT_1_BIT;
-            if (motion_format && same_extent && single_sample) {
+            if (motion_format && same_extent) {
                 scarlet_temporal_depth_view_id = depth_buffer_id;
                 scarlet_temporal_motion_view_id = color_id;
                 break;
