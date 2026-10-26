@@ -66,9 +66,21 @@ VkExtent2D RequestedOutputExtent() {
     return extent;
 }
 
-bool HasTrueTemporalInputs() {
+bool RealTemporalInputsEnabled() {
     const char* value = std::getenv("SCARLET_FSR_TRUE_TEMPORAL_INPUTS");
-    return value && *value && *value != '0';
+    return value == nullptr || *value == '\0' || *value != '0';
+}
+
+float MotionVectorScale(std::uint32_t extent, const char* env_name) {
+    if (const char* value = std::getenv(env_name); value && *value) {
+        const float parsed = std::strtof(value, nullptr);
+        if (parsed != 0.0f) {
+            return parsed;
+        }
+    }
+    // Scarlet motion-vector MRTs are expected to be UV-space deltas; convert
+    // them to the render-pixel convention consumed by FSR.
+    return static_cast<float>(extent);
 }
 
 float FrameTimeMs() {
@@ -139,6 +151,31 @@ void GeneralBarrier(vk::CommandBuffer cmdbuf, VkImage image, VkAccessFlags src_a
     cmdbuf.PipelineBarrier(src_stage, dst_stage, 0, barrier);
 }
 
+void GeneralBarrierAspect(vk::CommandBuffer cmdbuf, VkImage image,
+                          VkImageAspectFlags aspect, VkAccessFlags src_access,
+                          VkAccessFlags dst_access, VkPipelineStageFlags src_stage,
+                          VkPipelineStageFlags dst_stage) {
+    const VkImageMemoryBarrier barrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = src_access,
+        .dstAccessMask = dst_access,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange{
+            .aspectMask = aspect,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    cmdbuf.PipelineBarrier(src_stage, dst_stage, 0, barrier);
+}
+
 } // namespace
 
 struct ScarletFfxUpscalePass::Impl {
@@ -194,6 +231,7 @@ void ScarletFfxUpscalePass::ReleaseResources(Scheduler& scheduler) {
     input_extent = {};
     source_format = VK_FORMAT_UNDEFINED;
     reset_pending = true;
+    temporal_history_valid = false;
 }
 
 bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& scheduler,
@@ -327,19 +365,56 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
 VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& scheduler,
                                         std::size_t image_index, VkImage source_image,
                                         VkImageView source_view, VkFormat format,
-                                        VkExtent2D wanted_input) {
+                                        VkExtent2D wanted_input,
+                                        const ScarletFfxTemporalInputs& temporal_inputs) {
     if (!EnsureResources(device, scheduler, wanted_input, format) ||
         image_index >= images.size()) {
         return source_view;
     }
 
     auto& set = images[image_index];
-    const bool reset = reset_pending;
+
+    const bool depth_matches =
+        temporal_inputs.depth_image != VK_NULL_HANDLE &&
+        temporal_inputs.depth_format != VK_FORMAT_UNDEFINED &&
+        temporal_inputs.depth_extent.width == input_extent.width &&
+        temporal_inputs.depth_extent.height == input_extent.height;
+    const bool motion_matches =
+        temporal_inputs.motion_image != VK_NULL_HANDLE &&
+        temporal_inputs.motion_format != VK_FORMAT_UNDEFINED &&
+        temporal_inputs.motion_extent.width == input_extent.width &&
+        temporal_inputs.motion_extent.height == input_extent.height;
+    const bool real_temporal =
+        RealTemporalInputsEnabled() && depth_matches && motion_matches;
+
+    // Start/restart history only when a complete real temporal pair exists.
+    // Missing inputs for even one frame invalidate the history so the next
+    // complete frame begins cleanly instead of reusing stale motion/depth.
+    const bool reset = reset_pending || !temporal_history_valid;
     reset_pending = false;
+    temporal_history_valid = real_temporal;
     const std::uint64_t frame_id = impl->frame_id++;
 
+    static std::atomic_bool logged_real_temporal{false};
+    static std::atomic_bool logged_missing_temporal{false};
+    if (real_temporal &&
+        !logged_real_temporal.exchange(true, std::memory_order_relaxed)) {
+        LOG_INFO(Render_Vulkan,
+                 "[Scarlet.FSR3] Real temporal inputs active: depth_format={} motion_format={} extent={}x{}",
+                 static_cast<int>(temporal_inputs.depth_format),
+                 static_cast<int>(temporal_inputs.motion_format),
+                 input_extent.width, input_extent.height);
+    } else if (!real_temporal &&
+               !logged_missing_temporal.exchange(true, std::memory_order_relaxed)) {
+        LOG_INFO(Render_Vulkan,
+                 "[Scarlet.FSR3] Waiting for real temporal pair (depth={} motion={}); "
+                 "resetting history on fallback frames",
+                 depth_matches, motion_matches);
+    }
+
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([this, source_image, image_index, reset, frame_id](vk::CommandBuffer cmdbuf) {
+    scheduler.Record([this, source_image, image_index, reset, frame_id, real_temporal,
+                      temporal_inputs](vk::CommandBuffer cmdbuf) {
         auto& local = images[image_index];
 
         VkImage fsr_input_image = source_image;
@@ -463,14 +538,40 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT, FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
-        dispatch.depth = PortableImage(
-            *local.depth, VK_FORMAT_R32_SFLOAT, input_extent.width, input_extent.height,
-            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT, FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
-        dispatch.motionVectors = PortableImage(
-            *local.motion, VK_FORMAT_R16G16_SFLOAT, input_extent.width, input_extent.height,
-            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT, FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
+        if (real_temporal) {
+            GeneralBarrierAspect(
+                cmdbuf, temporal_inputs.depth_image, temporal_inputs.depth_aspect,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            GeneralBarrierAspect(
+                cmdbuf, temporal_inputs.motion_image, VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+            dispatch.depth = PortableImage(
+                temporal_inputs.depth_image, temporal_inputs.depth_format,
+                input_extent.width, input_extent.height,
+                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                temporal_inputs.depth_aspect, FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
+            dispatch.motionVectors = PortableImage(
+                temporal_inputs.motion_image, temporal_inputs.motion_format,
+                input_extent.width, input_extent.height,
+                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT, FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
+        } else {
+            dispatch.depth = PortableImage(
+                *local.depth, VK_FORMAT_R32_SFLOAT, input_extent.width, input_extent.height,
+                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT, FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
+            dispatch.motionVectors = PortableImage(
+                *local.motion, VK_FORMAT_R16G16_SFLOAT, input_extent.width, input_extent.height,
+                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT, FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
+        }
         dispatch.output = PortableImage(
             *local.output, kFfxOutputFormat, output_extent.width, output_extent.height,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -482,12 +583,12 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
         dispatch.transparencyAndCompositionMask.structSize =
             sizeof(dispatch.transparencyAndCompositionMask);
 
-        const bool true_temporal_inputs = HasTrueTemporalInputs();
         dispatch.jitterOffset = {0.0f, 0.0f};
-        // The current presentation bridge has no game motion-vector signal yet.
-        // Keep the zero-motion texture in pixel units. Once Scarlet's real scene
-        // depth/motion path is wired, the opt-in true-temporal mode can use history.
-        dispatch.motionVectorScale = {1.0f, 1.0f};
+        dispatch.motionVectorScale = real_temporal
+            ? FfxFloatCoords2D{
+                  MotionVectorScale(input_extent.width, "SCARLET_FSR_MOTION_SCALE_X"),
+                  MotionVectorScale(input_extent.height, "SCARLET_FSR_MOTION_SCALE_Y")}
+            : FfxFloatCoords2D{1.0f, 1.0f};
         dispatch.renderSize = {input_extent.width, input_extent.height};
         dispatch.outputSize = {output_extent.width, output_extent.height};
         dispatch.frameTimeMilliseconds = FrameTimeMs();
@@ -498,10 +599,7 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
         dispatch.viewSpaceToMeters = 1.0f;
         dispatch.sharpness = 0.0f;
         dispatch.enableSharpening = VK_FALSE;
-        // Do not accumulate invalid temporal history from placeholder depth/motion.
-        // Reset every frame until real scene inputs are supplied, which makes the
-        // FSR3 backend behave as a stable per-frame reconstruction/upscale path.
-        dispatch.reset = true_temporal_inputs ? (reset ? VK_TRUE : VK_FALSE) : VK_TRUE;
+        dispatch.reset = real_temporal ? (reset ? VK_TRUE : VK_FALSE) : VK_TRUE;
         dispatch.frameId = frame_id;
 
         const auto issues =
@@ -529,7 +627,7 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
         if (!logged_first_dispatch.exchange(true, std::memory_order_relaxed)) {
             LOG_INFO(Render_Vulkan,
                      "[Scarlet.FSR3] First portable dispatch recorded successfully; mode={}",
-                     true_temporal_inputs ? "true-temporal" : "safe-reset-every-frame");
+                     real_temporal ? "true-temporal-auto" : "safe-reset-fallback");
         }
 
         GeneralBarrier(cmdbuf, *local.output, VK_ACCESS_SHADER_WRITE_BIT,
