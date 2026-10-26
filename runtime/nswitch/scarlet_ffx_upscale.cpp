@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -31,6 +32,8 @@ namespace Vulkan {
 namespace {
 
 constexpr VkFormat kFfxOutputFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+
+std::atomic_bool g_temporal_disabled_for_run{false};
 
 using CreateFn = PfnFfxCreateContext;
 using DestroyFn = PfnFfxDestroyContext;
@@ -189,7 +192,8 @@ ScarletFfxUpscalePass::ScarletFfxUpscalePass(const Device&, MemoryAllocator& all
 ScarletFfxUpscalePass::~ScarletFfxUpscalePass() = default;
 
 bool ScarletFfxUpscalePass::Ready() const {
-    return ready && !dispatch_failed;
+    return ready && !dispatch_failed &&
+           !g_temporal_disabled_for_run.load(std::memory_order_relaxed);
 }
 
 void ScarletFfxUpscalePass::ReleaseResources(Scheduler& scheduler) {
@@ -214,14 +218,22 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
     // downscaling configuration and crashed inside ffxCreateContext on the
     // proprietary Windows driver. Fail closed and keep normal presentation
     // instead of ever entering the FidelityFX DLL with invalid extents.
-    if (wanted_input.width > output_extent.width ||
-        wanted_input.height > output_extent.height) {
+    // Temporal super resolution is only meaningful when the render size is
+    // strictly smaller than the presentation size in both dimensions. If Scarlet is
+    // still rendering at native/full resolution, fail closed for the whole process.
+    // Multiple presentation layers can own separate pass instances; disabling only one
+    // instance allowed another layer to re-enter ffxCreateContext with a 1:1 extent and
+    // crash the AMD Vulkan runtime.
+    if (wanted_input.width >= output_extent.width ||
+        wanted_input.height >= output_extent.height) {
         LOG_ERROR(Render_Vulkan,
                   "[Scarlet.FSR3] Invalid temporal extent {}x{} -> {}x{}; "
-                  "render scale was not applied, disabling temporal pass safely",
+                  "render scale was not applied, disabling FidelityFX temporal "
+                  "upscaling globally for this run",
                   wanted_input.width, wanted_input.height,
                   output_extent.width, output_extent.height);
         dispatch_failed = true;
+        g_temporal_disabled_for_run.store(true, std::memory_order_relaxed);
         return false;
     }
     if (impl->context && !images.empty() &&
@@ -299,6 +311,7 @@ bool ScarletFfxUpscalePass::EnsureResources(const Device& device, Scheduler& sch
                     "[Scarlet.FSR3] {} context creation failed (rc={})",
                     SelectedFsrName(), create_rc);
         dispatch_failed = true;
+        g_temporal_disabled_for_run.store(true, std::memory_order_relaxed);
         return false;
     }
     impl->context = context;
@@ -366,8 +379,10 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
         ffxContext context = impl->context;
         if (impl->dispatch(&context, &dispatch.header) != FFX_API_RETURN_OK) {
             dispatch_failed = true;
+            g_temporal_disabled_for_run.store(true, std::memory_order_relaxed);
             LOG_WARNING(Render_Vulkan,
-                        "[Scarlet.FSR3] {} dispatch failed; temporal upscaler disabled",
+                        "[Scarlet.FSR3] {} dispatch failed; temporal upscaler disabled "
+                        "globally for this run",
                         SelectedFsrName());
             return;
         }
