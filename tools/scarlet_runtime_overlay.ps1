@@ -3865,6 +3865,104 @@ if ($scarletTextureCacheText.Contains($scarletCandidateOld.Trim())) {
     Write-Host '[Scarlet PC] Upgraded Scarlet FSR3 temporal candidate selector for RGBA16F velocity pair.' -ForegroundColor DarkGray
 }
 
+$scarletTextureCacheText = [IO.File]::ReadAllText($scarletTextureCachePath)
+if (-not $scarletTextureCacheText.Contains('rule=scarlet-rgba16-pair')) {
+    $scarletSelectorPattern = '(?s)    if \(depth_buffer_id\) \{\r?\n        auto& scarlet_depth = slot_image_views\[depth_buffer_id\];\r?\n        for \(size_t scarlet_rt = 0; scarlet_rt < render_targets\.color_buffer_ids\.size\(\);\r?\n             \+\+scarlet_rt\) \{.*?\r?\n    \}\r?\n\r?\n    if \(render_targets != previous_render_targets\) \{'
+    $scarletSelectorReplacement = @'
+    if (depth_buffer_id) {
+        auto& scarlet_depth = slot_image_views[depth_buffer_id];
+        bool scarlet_temporal_selected = false;
+
+        // Pokemon Scarlet's 960x540 scene pass exposes a unique pair of RGBA16F
+        // render targets alongside S8_UINT_D24_UNORM depth. The captured runtime
+        // layout shows rt1 is the temporal/velocity candidate; use it before the
+        // generic RG16F/RG32F fallback.
+        if ((rt_active_mask & 0x3u) == 0x3u) {
+            const ImageViewId scarlet_rt0_id = render_targets.color_buffer_ids[0];
+            const ImageViewId scarlet_rt1_id = render_targets.color_buffer_ids[1];
+            if (scarlet_rt0_id && scarlet_rt1_id) {
+                auto& scarlet_rt0 = slot_image_views[scarlet_rt0_id];
+                auto& scarlet_rt1 = slot_image_views[scarlet_rt1_id];
+                const bool scarlet_velocity_pair =
+                    scarlet_depth.format == PixelFormat::S8_UINT_D24_UNORM &&
+                    scarlet_rt0.format == PixelFormat::R16G16B16A16_FLOAT &&
+                    scarlet_rt1.format == PixelFormat::R16G16B16A16_FLOAT &&
+                    scarlet_rt0.size.width == scarlet_depth.size.width &&
+                    scarlet_rt0.size.height == scarlet_depth.size.height &&
+                    scarlet_rt1.size.width == scarlet_depth.size.width &&
+                    scarlet_rt1.size.height == scarlet_depth.size.height;
+                if (scarlet_velocity_pair) {
+                    scarlet_temporal_depth_view_id = depth_buffer_id;
+                    scarlet_temporal_motion_view_id = scarlet_rt1_id;
+                    scarlet_temporal_selected = true;
+                    static bool scarlet_logged_rgba16_temporal_candidate = false;
+                    if (!scarlet_logged_rgba16_temporal_candidate) {
+                        scarlet_logged_rgba16_temporal_candidate = true;
+                        LOG_WARNING(Render_Vulkan,
+                                    "[Scarlet.FSR3.Probe] selected temporal candidate rt1 format={} depth_format={} extent={}x{} rule=scarlet-rgba16-pair",
+                                    static_cast<u32>(scarlet_rt1.format),
+                                    static_cast<u32>(scarlet_depth.format),
+                                    scarlet_rt1.size.width, scarlet_rt1.size.height);
+                    }
+                }
+            }
+        }
+
+        if (!scarlet_temporal_selected) {
+            for (size_t scarlet_rt = 0; scarlet_rt < render_targets.color_buffer_ids.size();
+                 ++scarlet_rt) {
+                if ((rt_active_mask & (1u << scarlet_rt)) == 0) {
+                    continue;
+                }
+                const ImageViewId color_id = render_targets.color_buffer_ids[scarlet_rt];
+                if (!color_id) {
+                    continue;
+                }
+                auto& scarlet_motion = slot_image_views[color_id];
+                const bool motion_format =
+                    scarlet_motion.format == PixelFormat::R16G16_FLOAT ||
+                    scarlet_motion.format == PixelFormat::R32G32_FLOAT;
+                const bool same_extent =
+                    scarlet_motion.size.width == scarlet_depth.size.width &&
+                    scarlet_motion.size.height == scarlet_depth.size.height;
+                if (motion_format && same_extent) {
+                    scarlet_temporal_depth_view_id = depth_buffer_id;
+                    scarlet_temporal_motion_view_id = color_id;
+                    static bool scarlet_logged_temporal_candidate = false;
+                    if (!scarlet_logged_temporal_candidate) {
+                        scarlet_logged_temporal_candidate = true;
+                        LOG_WARNING(Render_Vulkan,
+                                    "[Scarlet.FSR3.Probe] selected temporal candidate rt{} format={} depth_format={} extent={}x{} rule=generic-rg",
+                                    scarlet_rt, static_cast<u32>(scarlet_motion.format),
+                                    static_cast<u32>(scarlet_depth.format),
+                                    scarlet_motion.size.width, scarlet_motion.size.height);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    if (render_targets != previous_render_targets) {
+'@
+    $scarletSelectorRegex = [regex]::new(
+        $scarletSelectorPattern,
+        [Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    $scarletSelectorMatch = $scarletSelectorRegex.Match($scarletTextureCacheText)
+    if ($scarletSelectorMatch.Success) {
+        $scarletTextureCacheText = $scarletSelectorRegex.Replace(
+            $scarletTextureCacheText,
+            $scarletSelectorReplacement.Trim(),
+            1
+        )
+        [IO.File]::WriteAllText($scarletTextureCachePath, $scarletTextureCacheText, $utf8)
+        Write-Host '[Scarlet PC] Structurally upgraded preserved FSR3 selector for Scarlet RGBA16F velocity pair.' -ForegroundColor DarkGray
+    } else {
+        throw 'Scarlet runtime overlay: preserved FSR3 selector block not found for structural migration'
+    }
+}
+
 $scarletForcedProbeMarker = '[Scarlet.FSR3.Probe.Force]'
 if (-not $scarletTextureCacheText.Contains($scarletForcedProbeMarker)) {
     $scarletForcedProbeAnchor = '    render_targets.is_rescaled = is_rescaling;'
