@@ -35,15 +35,22 @@ enum {
     RJ_GPU_WAIT,
 };
 
+#define RJ_INLINE_HANDLES 32
+
 typedef struct {
     int kind;
-    uint64_t *handles;
+    uint64_t *heap_handles;
+    uint64_t inline_handles[RJ_INLINE_HANDLES];
     int nhandles;
     uint64_t dirty;
     uint64_t seq;
     NvnTexture *tex;
     NvnSync *sync;
 } RenderJob;
+
+static uint64_t *job_handles(RenderJob *j) {
+    return j->heap_handles ? j->heap_handles : j->inline_handles;
+}
 
 #define RQ_CAP 256
 static RenderJob rq[RQ_CAP];
@@ -69,17 +76,19 @@ bool renderthread_active(void) {
 }
 
 static void release_exec(RenderJob *j) {
-    if (!j->handles) return;
-    nvn_cmdstream_unpin_batch(j->handles, j->nhandles);
-    free(j->handles);
-    j->handles = NULL;
+    if (j->nhandles <= 0) return;
+    uint64_t *handles = job_handles(j);
+    nvn_cmdstream_unpin_batch(handles, j->nhandles);
+    free(j->heap_handles);
+    j->heap_handles = NULL;
+    j->nhandles = 0;
 }
 
 static void run_job(RenderJob *j) {
     switch (j->kind) {
     case RJ_EXEC:
         backend_set_dirty_limit(j->dirty);
-        backend_execute_batch(j->handles, j->nhandles);
+        backend_execute_batch(job_handles(j), j->nhandles);
         backend_set_dirty_limit(0);
         release_exec(j);
         break;
@@ -177,24 +186,27 @@ static uint64_t push(RenderJob j) {
 bool renderthread_submit_batch(const uint64_t *handles, int n) {
     if (!renderthread_active() || !handles || n <= 0) return false;
 
-    // Pin directly into the render job's owned array while still on the guest
-    // thread. This removes the old stack-resolve + second memcpy path and,
-    // together with nvn_cmdstream_pin_batch(), takes the host-segment mutex once
-    // for the whole NVN submit instead of once per list.
-    uint64_t *copy = malloc((size_t)n * sizeof *copy);
-    if (!copy) return false;
-    nvn_cmdstream_pin_batch(handles, copy, n);
-
     RenderJob j = {
         .kind = RJ_EXEC,
-        .handles = copy,
         .nhandles = n,
         .dirty = backend_dirty_seq(),
     };
+
+    // Most Scarlet submits contain only a handful of lists. Keep those handles
+    // inside the queue job itself so the normal path does no malloc/free at all.
+    // Large batches retain the heap fallback.
+    uint64_t *dst = j.inline_handles;
+    if (n > RJ_INLINE_HANDLES) {
+        j.heap_handles = malloc((size_t)n * sizeof *j.heap_handles);
+        if (!j.heap_handles) return false;
+        dst = j.heap_handles;
+    }
+    nvn_cmdstream_pin_batch(handles, dst, n);
+
     uint64_t ticket = push(j);
     if (!ticket) {
-        nvn_cmdstream_unpin_batch(copy, n);
-        free(copy);
+        nvn_cmdstream_unpin_batch(dst, n);
+        free(j.heap_handles);
         return false;
     }
     return true;
