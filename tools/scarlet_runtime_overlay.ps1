@@ -3682,6 +3682,63 @@ if ($scarletTextureCacheUpdated -ne $scarletTextureCacheText) {
     [IO.File]::WriteAllText($scarletTextureCachePath, $scarletTextureCacheUpdated, $utf8)
 }
 
+# If an older incremental tree never received the probe at all, inject a bounded
+# diagnostic block directly after render_targets.is_rescaled. This bypasses the
+# idempotent Replace-Literal path that can legitimately skip already-transformed
+# texture-cache code from earlier Scarlet builds.
+$scarletTextureCacheText = [IO.File]::ReadAllText($scarletTextureCachePath)
+$scarletForcedProbeMarker = '[Scarlet.FSR3.Probe.Force]'
+if (-not $scarletTextureCacheText.Contains($scarletForcedProbeMarker)) {
+    $scarletForcedProbeAnchor = '    render_targets.is_rescaled = is_rescaling;'
+    $scarletForcedProbeIndex = $scarletTextureCacheText.IndexOf($scarletForcedProbeAnchor)
+    if ($scarletForcedProbeIndex -lt 0) {
+        throw 'Scarlet runtime overlay: could not locate render_targets.is_rescaled for forced FSR3 probe'
+    }
+
+    $scarletForcedProbeCode = @'
+
+    // [Scarlet.FSR3.Probe.Force] Bounded diagnostic for preserved incremental trees.
+    static u32 scarlet_temporal_force_probe_logs = 0;
+    if (scarlet_temporal_force_probe_logs < 256 &&
+        (depth_buffer_id || rt_active_mask != 0)) {
+        LOG_WARNING(Render_Vulkan,
+                    "[Scarlet.FSR3.Probe] state depth={} active_mask={:#x}",
+                    static_cast<u32>(depth_buffer_id), rt_active_mask);
+        if (depth_buffer_id) {
+            const auto& scarlet_probe_depth = slot_image_views[depth_buffer_id];
+            LOG_WARNING(Render_Vulkan,
+                        "[Scarlet.FSR3.Probe] depth format={} extent={}x{}",
+                        static_cast<u32>(scarlet_probe_depth.format),
+                        scarlet_probe_depth.size.width, scarlet_probe_depth.size.height);
+        }
+        for (size_t scarlet_probe_rt = 0;
+             scarlet_probe_rt < render_targets.color_buffer_ids.size();
+             ++scarlet_probe_rt) {
+            if ((rt_active_mask & (1u << scarlet_probe_rt)) == 0) {
+                continue;
+            }
+            const ImageViewId scarlet_probe_id =
+                render_targets.color_buffer_ids[scarlet_probe_rt];
+            if (!scarlet_probe_id) {
+                continue;
+            }
+            const auto& scarlet_probe_view = slot_image_views[scarlet_probe_id];
+            LOG_WARNING(Render_Vulkan,
+                        "[Scarlet.FSR3.Probe] rt{} format={} extent={}x{}",
+                        scarlet_probe_rt, static_cast<u32>(scarlet_probe_view.format),
+                        scarlet_probe_view.size.width, scarlet_probe_view.size.height);
+        }
+        ++scarlet_temporal_force_probe_logs;
+    }
+'@
+    $scarletForcedProbeInsertAt =
+        $scarletForcedProbeIndex + $scarletForcedProbeAnchor.Length
+    $scarletTextureCacheText =
+        $scarletTextureCacheText.Insert($scarletForcedProbeInsertAt, $scarletForcedProbeCode)
+    [IO.File]::WriteAllText($scarletTextureCachePath, $scarletTextureCacheText, $utf8)
+    Write-Host '[Scarlet PC] Forced FSR3 temporal MRT probe injected into preserved texture cache.' -ForegroundColor DarkGray
+}
+
 
 $old = @'
     return {};
