@@ -2137,15 +2137,31 @@ Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $n
 
 # Turn on transfer-source usage when FG is requested, then let the official FidelityFX
 # runtime replace the normal Vulkan swapchain. Failure leaves the normal swapchain intact.
-$old = @'
-    VkSwapchainCreateInfoKHR swapchain_ci{
-'@
-$new = @'
+# Keep the Frame Generation request declaration idempotent. Older quick-overlay runs
+# could prepend the same declaration repeatedly because the insertion anchor remained in
+# the transformed source. Normalize any duplicates in the preserved checkout first.
+$swapchainPath = Join-Path $SourceDir 'src\video_core\renderer_vulkan\vk_swapchain.cpp'
+$swapchainText = [IO.File]::ReadAllText($swapchainPath)
+$fgRequestDecl = @'
     const bool frame_generation_requested =
         ScarletPC::Graphics::FidelityFxFrameGeneration::Get().Requested();
-    VkSwapchainCreateInfoKHR swapchain_ci{
-'@
-Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old.Trim() $new.Trim()
+'@.TrimEnd()
+$fgDeclPattern = '(?:(?:[ \t]*const bool frame_generation_requested\s*=\s*\r?\n[ \t]*ScarletPC::Graphics::FidelityFxFrameGeneration::Get\(\)\.Requested\(\);\s*\r?\n)){2,}'
+$fgDeclRegex = New-Object System.Text.RegularExpressions.Regex(
+    $fgDeclPattern,
+    [System.Text.RegularExpressions.RegexOptions]::Multiline
+)
+if ($fgDeclRegex.IsMatch($swapchainText)) {
+    $swapchainText = $fgDeclRegex.Replace($swapchainText, $fgRequestDecl + [Environment]::NewLine, 1)
+    [IO.File]::WriteAllText($swapchainPath, $swapchainText, $utf8)
+}
+
+$swapchainText = [IO.File]::ReadAllText($swapchainPath)
+if (-not $swapchainText.Contains($fgRequestDecl)) {
+    $old = '    VkSwapchainCreateInfoKHR swapchain_ci{'
+    $new = $fgRequestDecl + [Environment]::NewLine + $old
+    Replace-Literal 'src\video_core\renderer_vulkan\vk_swapchain.cpp' $old $new
+}
 
 $old = @'
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
