@@ -3099,6 +3099,98 @@ $new = @'
 '@
 Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
 
+# Coordinate the Win32 Scarlet keyboard with the SDL/main thread. Vulkan exclusive
+# fullscreen transitions must not run on the keyboard's detached UI thread.
+$old = @'
+#include "suyu_cmd/emu_window/emu_window_sdl2.h"
+#include "suyu_cmd/native_status.h"
+'@
+$new = @'
+#include "suyu_cmd/emu_window/emu_window_sdl2.h"
+#include "suyu_cmd/native_status.h"
+#include "suyu_cmd/scarlet_software_keyboard.h"
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
+
+$old = @'
+void EmuWindow_SDL2::WaitEvent() {
+    // Called on main thread
+    SDL_Event event;
+
+    // Wait with a deadline rather than forever: with no input there is no event
+'@
+$new = @'
+void EmuWindow_SDL2::WaitEvent() {
+    // Called on main thread
+    SDL_Event event;
+
+    // The virtual keyboard is a Win32 UI hosted on a worker thread, but SDL/Vulkan
+    // window-mode changes belong here. Release exclusive presentation before the
+    // popup is created, and restore it only after the keyboard has closed.
+    if (ScarletPC::ConsumeKeyboardDesktopModeRequest()) {
+        bool desktop_ready = true;
+        if (Settings::values.fullscreen_mode.GetValue() == Settings::FullscreenMode::Exclusive &&
+            (SDL_GetWindowFlags(render_window) & SDL_WINDOW_FULLSCREEN) != 0) {
+            scarlet_exclusive_focus_suspended = true;
+            LOG_INFO(Frontend,
+                     "[Scarlet.Keyboard] Releasing exclusive fullscreen for virtual keyboard");
+            if (!SDL_SetWindowFullscreen(render_window, false)) {
+                desktop_ready = false;
+                LOG_ERROR(Frontend,
+                          "[Scarlet.Keyboard] Failed to release exclusive fullscreen: {}",
+                          SDL_GetError());
+            } else {
+                if (!SDL_SyncWindow(render_window)) {
+                    LOG_WARNING(Frontend,
+                                "[Scarlet.Keyboard] Desktop transition synchronization timed out: {}",
+                                SDL_GetError());
+                }
+                OnResize();
+            }
+        }
+        if (desktop_ready) {
+            ScarletPC::AcknowledgeKeyboardDesktopMode();
+        }
+    }
+
+    if (ScarletPC::ConsumeKeyboardFullscreenRestoreRequest()) {
+        bool fullscreen_ready = true;
+        if (Settings::values.fullscreen_mode.GetValue() == Settings::FullscreenMode::Exclusive &&
+            scarlet_exclusive_focus_suspended) {
+            LOG_INFO(Frontend,
+                     "[Scarlet.Keyboard] Restoring exclusive fullscreen after virtual keyboard");
+            Fullscreen();
+            fullscreen_ready =
+                (SDL_GetWindowFlags(render_window) & SDL_WINDOW_FULLSCREEN) != 0;
+            if (fullscreen_ready) {
+                scarlet_exclusive_focus_suspended = false;
+                OnResize();
+            } else {
+                LOG_ERROR(Frontend,
+                          "[Scarlet.Keyboard] Exclusive fullscreen restore did not complete");
+            }
+        }
+        if (fullscreen_ready) {
+            ScarletPC::AcknowledgeKeyboardFullscreenRestore();
+        }
+    }
+
+    // Wait with a deadline rather than forever: with no input there is no event
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
+
+# Do not let a transient owner-focus event restore exclusive mode while the
+# keyboard popup is still active.
+$old = @'
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+        if (scarlet_exclusive_focus_suspended) {
+'@
+$new = @'
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+        if (scarlet_exclusive_focus_suspended && !ScarletPC::KeyboardOverlayActive()) {
+'@
+Replace-Literal 'src\__PRODUCT___cmd\emu_window\emu_window_sdl2.cpp' $old.Trim() $new.Trim()
+
 # SDL may not emit a resize event before Vulkan constructs the first presentation
 # layer. Seed the framebuffer layout from the actual pixel size immediately so
 # FSR's output extent matches the real exclusive mode instead of 1280x720.
