@@ -389,18 +389,55 @@ VkImageView ScarletFfxUpscalePass::Draw(const Device& device, Scheduler& schedul
 
     auto& set = images[image_index];
 
-    const bool depth_matches =
+    const bool depth_present =
         temporal_inputs.depth_image != VK_NULL_HANDLE &&
-        temporal_inputs.depth_format != VK_FORMAT_UNDEFINED &&
+        temporal_inputs.depth_format != VK_FORMAT_UNDEFINED;
+    const bool motion_present =
+        temporal_inputs.motion_image != VK_NULL_HANDLE &&
+        temporal_inputs.motion_format != VK_FORMAT_UNDEFINED;
+
+    const bool depth_extent_matches =
         temporal_inputs.depth_extent.width == input_extent.width &&
         temporal_inputs.depth_extent.height == input_extent.height;
-    const bool motion_matches =
-        temporal_inputs.motion_image != VK_NULL_HANDLE &&
-        temporal_inputs.motion_format != VK_FORMAT_UNDEFINED &&
+    const bool motion_extent_matches =
         temporal_inputs.motion_extent.width == input_extent.width &&
         temporal_inputs.motion_extent.height == input_extent.height;
+
+    // The texture-cache bridge already captures Scarlet's temporal MRTs at the
+    // physical render extent. Older incremental trees may still forward metadata
+    // after applying the global resolution scale a second time (for example,
+    // 480x270 metadata for a real 960x540 image). If both resources are present
+    // and originate from the retained Scarlet pair, trust the physical input
+    // extent used by the current presentation pass instead of discarding them
+    // solely because of stale extent metadata.
+    const bool temporal_extent_metadata_repair =
+        depth_present && motion_present &&
+        (!depth_extent_matches || !motion_extent_matches) &&
+        temporal_inputs.depth_extent.width == temporal_inputs.motion_extent.width &&
+        temporal_inputs.depth_extent.height == temporal_inputs.motion_extent.height;
+
+    const bool depth_matches =
+        depth_present && (depth_extent_matches || temporal_extent_metadata_repair);
+    const bool motion_matches =
+        motion_present && (motion_extent_matches || temporal_extent_metadata_repair);
     const bool real_temporal =
         RealTemporalInputsEnabled() && depth_matches && motion_matches;
+
+    static std::atomic_uint scarlet_temporal_input_logs{0};
+    if (scarlet_temporal_input_logs.fetch_add(1, std::memory_order_relaxed) < 16) {
+        LOG_WARNING(Render_Vulkan,
+                    "[Scarlet.FSR3.Input] depth={} format={} extent={}x{} motion={} format={} extent={}x{} expected={}x{} repaired={}",
+                    depth_present ? 1 : 0,
+                    static_cast<int>(temporal_inputs.depth_format),
+                    temporal_inputs.depth_extent.width,
+                    temporal_inputs.depth_extent.height,
+                    motion_present ? 1 : 0,
+                    static_cast<int>(temporal_inputs.motion_format),
+                    temporal_inputs.motion_extent.width,
+                    temporal_inputs.motion_extent.height,
+                    input_extent.width, input_extent.height,
+                    temporal_extent_metadata_repair ? 1 : 0);
+    }
 
     // Start/restart history only when a complete real temporal pair exists.
     // Missing inputs for even one frame invalidate the history so the next
