@@ -4804,7 +4804,7 @@ $scarletArmRecompText = [IO.File]::ReadAllText($scarletArmRecompPath)
 $scarletArmRecompText = $scarletArmRecompText.Replace(
     'std::atomic<int> g_recomp_chain_budget{32};',
     @'
-std::atomic<int> g_recomp_chain_budget{4096};
+std::atomic<int> g_recomp_chain_budget{1024};
 
 const bool kScarletAotDiagnostics = [] {
     const char* value = std::getenv("SCARLET_AOT_DIAGNOSTICS");
@@ -4975,7 +4975,7 @@ if ($scarletArmRecompText.Contains($scarletCoverageIoOld.Trim())) {
 }
 
 [IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
-Write-Host '[Scarlet PC] AOT CPU fast path: 4096-block slices + lock-free SVC telemetry.' -ForegroundColor DarkGray
+Write-Host '[Scarlet PC] AOT CPU fast path: 1024-block slices + lock-free SVC telemetry.' -ForegroundColor DarkGray
 
 
 # Scarlet iGPU/CPU profile. The Ryzen APU exposes a tiny dedicated-local heap but
