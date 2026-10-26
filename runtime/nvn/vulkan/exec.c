@@ -2343,16 +2343,24 @@ static uint64_t fragment_code_hash(uint64_t fs) {
 }
 
 static bool sharp_dof_variant(uint64_t hash) {
-    const char *e = getenv("LARECOMP_NO_DOF");
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("LARECOMP_NO_DOF");
+        enabled = e && atoi(e) != 0;
+    }
     // Same composite fingerprint in the academy, classroom and statue captures.
-    return e && atoi(e) != 0 && hash == 0xfbff97881854688eull;
+    return enabled && hash == 0xfbff97881854688eull;
 }
 static bool hair_lighting_variant(uint64_t hash) {
     // The G-buffer capture proved this compatibility path restores Scarlet's
     // material-3 hair colour. Keep it on by default for the exact deferred
     // lighting shader; LARECOMP_NO_HAIR_FIX=1 is a diagnostic opt-out.
-    const char *off = getenv("LARECOMP_NO_HAIR_FIX");
-    return !(off && atoi(off) != 0) && hash == 0xaa68a5939321c84aull;
+    static int disabled = -1;
+    if (disabled < 0) {
+        const char *off = getenv("LARECOMP_NO_HAIR_FIX");
+        disabled = off && atoi(off) != 0;
+    }
+    return !disabled && hash == 0xaa68a5939321c84aull;
 }
 
 static uint64_t schoolyard_grade_frame = ~0ull;
@@ -2384,8 +2392,12 @@ static void scarlet_scene_markers(uint64_t fs_addr) {
     }
 }
 static bool schoolyard_grade_variant(uint64_t fs_addr) {
-    const char *off = getenv("LARECOMP_NO_RING_GRADE_FIX");
-    if (off && atoi(off) != 0) return false;
+    static int disabled = -1;
+    if (disabled < 0) {
+        const char *off = getenv("LARECOMP_NO_RING_GRADE_FIX");
+        disabled = off && atoi(off) != 0;
+    }
+    if (disabled) return false;
     if (schoolyard_grade_frame != renderer_present_count()) return false;
     // Tone-map variants observed in the two opening captures.
     return fs_addr == 0x7273317200ull || fs_addr == 0x7273318200ull;
@@ -3346,22 +3358,32 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed);
 
 // Quads / fans / polygons as a 32-bit triangle index list.
-static uint32_t *expand_indices(uint32_t mode, uint32_t count, const void *indices, int itype, uint32_t first, uint32_t *out_count) {
+// Write directly into the mapped transient ring: the old path malloc'ed a CPU
+// array, filled it, copied it into Vulkan staging, then freed it for every such
+// draw.
+static VkSpan expand_indices(uint32_t mode, uint32_t count, const void *indices, int itype,
+                             uint32_t first, uint32_t *out_count, uint32_t *out_max) {
     uint32_t tris = mode == 7 ? count / 4 * 2 : count >= 3 ? count - 2 : 0;
-    uint32_t *out = malloc(tris * 3 * 4 + 4);
-    uint32_t n = 0;
+    VkSpan span = vk_transient((uint64_t)tris * 3 * 4 + 4, 4);
+    uint32_t *out = span.ptr;
+    uint32_t n = 0, mx = 0;
 #define IDX(i) (indices ? (itype == 0 ? ((const uint8_t *)indices)[i] : itype == 1 ? ((const uint16_t *)indices)[i] : ((const uint32_t *)indices)[i]) : first + (i))
+#define EMIT(v) do { uint32_t _v = (v); out[n++] = _v; if (_v > mx) mx = _v; } while (0)
     if (mode == 7) {
         for (uint32_t q = 0; q + 3 < count; q += 4) {
-            out[n++] = IDX(q); out[n++] = IDX(q + 1); out[n++] = IDX(q + 2);
-            out[n++] = IDX(q); out[n++] = IDX(q + 2); out[n++] = IDX(q + 3);
+            EMIT(IDX(q)); EMIT(IDX(q + 1)); EMIT(IDX(q + 2));
+            EMIT(IDX(q)); EMIT(IDX(q + 2)); EMIT(IDX(q + 3));
         }
     } else {
-        for (uint32_t i = 1; i + 1 < count; i++) { out[n++] = IDX(0); out[n++] = IDX(i); out[n++] = IDX(i + 1); }
+        for (uint32_t i = 1; i + 1 < count; i++) {
+            EMIT(IDX(0)); EMIT(IDX(i)); EMIT(IDX(i + 1));
+        }
     }
+#undef EMIT
 #undef IDX
     *out_count = n;
-    return out;
+    if (out_max) *out_max = mx;
+    return span;
 }
 
 static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
@@ -3567,7 +3589,9 @@ static void draw_(CmdRec *r, bool indexed) {
     // program and the first words of the actually-used fragment constant
     // buffers to locate a bad tint/material parameter rather than changing
     // texture formats globally.
-    if (getenv("LARECOMP_LOG_MATERIAL_DRAWS")) {
+    static int log_material_draws = -1;
+    if (log_material_draws < 0) log_material_draws = getenv("LARECOMP_LOG_MATERIAL_DRAWS") != NULL;
+    if (log_material_draws) {
         NvnTexture *albedo = NULL;
         int albedo_slot = -1;
         for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
@@ -3623,8 +3647,12 @@ static void draw_(CmdRec *r, bool indexed) {
         if (dump_frame >= 0 && renderer_present_count() >= (uint64_t)dump_frame) {
             debug_draw(pr, r, indexed);  // (debug_draw writes build/skin/ once)
             dump_frame = -1;
-        } else if (getenv("LARECOMP_LOG_SKIN") && n++ % 50 == 0 && n < 1000) {
-            debug_draw(pr, r, indexed);
+        } else {
+            static int log_skin = -1;
+            if (log_skin < 0) log_skin = getenv("LARECOMP_LOG_SKIN") != NULL;
+            if (log_skin && n++ % 50 == 0 && n < 1000) {
+                debug_draw(pr, r, indexed);
+            }
         }
     }
     bool vertex_only_xfb = vkey.xfb;
@@ -3913,9 +3941,7 @@ static void draw_(CmdRec *r, bool indexed) {
         first = (uint32_t)r->x[1]; base_inst = (uint32_t)r->x[3]; inst = (uint32_t)r->x[4] ? (uint32_t)r->x[4] : 1;
         max_index = first + count;
         if (!native) {
-            uint32_t *e = expand_indices(mode, count, NULL, 0, first, &icount);
-            ib = vk_transient_copy(e, (uint64_t)icount * 4 + 4, 4);
-            free(e);
+            ib = expand_indices(mode, count, NULL, 0, first, &icount, NULL);
         }
     } else {
         uint32_t itype = (uint32_t)r->x[1];
@@ -3944,10 +3970,7 @@ static void draw_(CmdRec *r, bool indexed) {
             itype_vk = VK_INDEX_TYPE_UINT16;
             icount = count;
         } else {
-            uint32_t *e = expand_indices(mode, count, src, (int)itype, 0, &icount);
-            for (uint32_t i = 0; i < icount; i++) if (e[i] > max_index) max_index = e[i];
-            ib = vk_transient_copy(e, (uint64_t)icount * 4 + 4, 4);
-            free(e);
+            ib = expand_indices(mode, count, src, (int)itype, 0, &icount, &max_index);
         }
         if (!scan_src) {
             // Vertex fetch for indexed draws addresses index + baseVertex.  A
