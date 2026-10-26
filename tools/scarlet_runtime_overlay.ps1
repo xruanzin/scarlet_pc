@@ -4792,4 +4792,189 @@ if (Test-Path -LiteralPath $scarletRuntimeCmdPath) {
     }
 }
 
+
+# Scarlet AOT production fast path. The title is now proven fully static across
+# repeated runs, so keep expensive coverage/debug instrumentation out of the
+# dispatch hot loop and let generated direct branches run in long slices.
+$scarletArmRecompPath = Join-Path $SourceDir 'src\core\arm\recomp\arm_recomp.cpp'
+$scarletArmRecompText = [IO.File]::ReadAllText($scarletArmRecompPath)
+
+# 32 blocks forces the host dispatcher back into the loop far too frequently.
+# SVCs, interrupts and explicit halt reasons still break a chain immediately.
+$scarletArmRecompText = $scarletArmRecompText.Replace(
+    'std::atomic<int> g_recomp_chain_budget{32};',
+    @'
+std::atomic<int> g_recomp_chain_budget{4096};
+
+const bool kScarletAotDiagnostics = [] {
+    const char* value = std::getenv("SCARLET_AOT_DIAGNOSTICS");
+    return value && *value && *value != '0';
+}();
+'@.Trim()
+)
+
+# SVC histogramming used a global mutex + std::map for every supervisor call.
+# Scarlet issues ~10k SVC/s, so use fixed relaxed atomics instead.
+$scarletArmRecompText = $scarletArmRecompText.Replace(
+    '    std::map<u32, u64> svc_numbers;     ///< SVC imm -> times the guest issued it',
+    '    std::array<std::atomic<u64>, 0x100> svc_numbers{}; ///< lock-free SVC histogram'
+)
+$scarletArmRecompText = $scarletArmRecompText.Replace(
+@'
+    void RecordSvc(u32 num) {
+        std::scoped_lock lk{hist_lock};
+        ++svc_numbers[num];
+    }
+'@.Trim(),
+@'
+    void RecordSvc(u32 num) {
+        if (num < svc_numbers.size()) {
+            svc_numbers[num].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+'@.Trim()
+)
+
+$scarletSvcReportOld = @'
+    if (!g_counters.svc_numbers.empty()) {
+        // What the guest actually asks the kernel for. A boot that stops making
+        // system calls while still executing millions of blocks is spinning on
+        // something, and this says on what.
+        o += "  --- SVCs by call count ---\n";
+        for (const auto& [num, count] : TopN(g_counters.svc_numbers, 40)) {
+            o += fmt::format("    svc 0x{:02X}  {:>10}\n", num, count);
+        }
+        o += fmt::format("    {} distinct SVCs\n", g_counters.svc_numbers.size());
+    }
+'@
+$scarletSvcReportNew = @'
+    {
+        std::vector<std::pair<u32, u64>> svc_counts;
+        svc_counts.reserve(g_counters.svc_numbers.size());
+        for (u32 num = 0; num < g_counters.svc_numbers.size(); ++num) {
+            const u64 count =
+                g_counters.svc_numbers[num].load(std::memory_order_relaxed);
+            if (count != 0) {
+                svc_counts.emplace_back(num, count);
+            }
+        }
+        if (!svc_counts.empty()) {
+            std::partial_sort(
+                svc_counts.begin(),
+                svc_counts.begin() + std::min<size_t>(40, svc_counts.size()),
+                svc_counts.end(),
+                [](const auto& a, const auto& b) { return a.second > b.second; });
+            if (svc_counts.size() > 40) {
+                svc_counts.resize(40);
+            }
+            o += "  --- SVCs by call count ---\n";
+            for (const auto& [num, count] : svc_counts) {
+                o += fmt::format("    svc 0x{:02X}  {:>10}\n", num, count);
+            }
+            size_t distinct = 0;
+            for (const auto& counter : g_counters.svc_numbers) {
+                distinct += counter.load(std::memory_order_relaxed) != 0 ? 1 : 0;
+            }
+            o += fmt::format("    {} distinct SVCs\n", distinct);
+        }
+    }
+'@
+if ($scarletArmRecompText.Contains($scarletSvcReportOld.Trim())) {
+    $scarletArmRecompText =
+        $scarletArmRecompText.Replace($scarletSvcReportOld.Trim(), $scarletSvcReportNew.Trim())
+}
+
+$scarletDispatchDiagOld = @'
+        impl->SampleDiagnostics(thread);
+        if (impl->core_index < g_current_pcs.size()) {
+            g_current_pcs[impl->core_index].store(impl->ctx.pc, std::memory_order_relaxed);
+        }
+'@
+$scarletDispatchDiagNew = @'
+        if (kScarletAotDiagnostics) {
+            impl->SampleDiagnostics(thread);
+            if (impl->core_index < g_current_pcs.size()) {
+                g_current_pcs[impl->core_index].store(impl->ctx.pc,
+                                                      std::memory_order_relaxed);
+            }
+        }
+'@
+if ($scarletArmRecompText.Contains($scarletDispatchDiagOld.Trim())) {
+    $scarletArmRecompText =
+        $scarletArmRecompText.Replace($scarletDispatchDiagOld.Trim(), $scarletDispatchDiagNew.Trim())
+}
+
+$scarletArmRecompText = $scarletArmRecompText.Replace(
+    '        impl->trail[impl->trail_pos++ & (Impl::kTrail - 1)] = impl->ctx.pc;',
+@'
+        if (kScarletAotDiagnostics) {
+            impl->trail[impl->trail_pos++ & (Impl::kTrail - 1)] = impl->ctx.pc;
+        }
+'@.TrimEnd()
+)
+
+$scarletEarlyOld = @'
+        static std::atomic<u64> early_dispatches{0};
+        const u64 early_dispatch = early_dispatches.fetch_add(1, std::memory_order_relaxed);
+        if (early_dispatch < 64) {
+            LOG_INFO(Core_ARM, "Early static dispatch #{}: pc={:#x}", early_dispatch,
+                     impl->ctx.pc);
+        }
+'@
+$scarletEarlyNew = @'
+        u64 early_dispatch = 64;
+        if (kScarletAotDiagnostics) {
+            static std::atomic<u64> early_dispatches{0};
+            early_dispatch =
+                early_dispatches.fetch_add(1, std::memory_order_relaxed);
+            if (early_dispatch < 64) {
+                LOG_INFO(Core_ARM, "Early static dispatch #{}: pc={:#x}",
+                         early_dispatch, impl->ctx.pc);
+            }
+        }
+'@
+if ($scarletArmRecompText.Contains($scarletEarlyOld.Trim())) {
+    $scarletArmRecompText =
+        $scarletArmRecompText.Replace($scarletEarlyOld.Trim(), $scarletEarlyNew.Trim())
+}
+
+# All forced-miss/hole controls are development diagnostics. Skip their branches
+# entirely in the production loop unless explicitly requested.
+$scarletForceHookOld = @'
+        // Test hook: forces every lookup past the Nth to miss, so the JIT
+        // fallback below can be exercised on a title that would otherwise never
+        // hit a gap. Unset in normal runs.
+        {
+'@
+$scarletForceHookNew = @'
+        // Test-only fallback/bisect hooks stay out of the production hot loop.
+        if (kScarletAotDiagnostics) {
+'@
+if ($scarletArmRecompText.Contains($scarletForceHookOld.Trim())) {
+    $scarletArmRecompText =
+        $scarletArmRecompText.Replace($scarletForceHookOld.Trim(), $scarletForceHookNew.Trim())
+}
+
+$scarletCoverageIoOld = @'
+        if ((seen & 0x3FFFFULL) == 0x3FFFFULL) {
+            WriteRecompCoverageFile(FormatRecompCoverage());
+            // Time-limited inside; teardown is not guaranteed, as above.
+            RecompGaps::Flush(true, false);
+        }
+'@
+$scarletCoverageIoNew = @'
+        if (kScarletAotDiagnostics &&
+            (seen & 0x3FFFFULL) == 0x3FFFFULL) {
+            WriteRecompCoverageFile(FormatRecompCoverage());
+            RecompGaps::Flush(true, false);
+        }
+'@
+if ($scarletArmRecompText.Contains($scarletCoverageIoOld.Trim())) {
+    $scarletArmRecompText =
+        $scarletArmRecompText.Replace($scarletCoverageIoOld.Trim(), $scarletCoverageIoNew.Trim())
+}
+
+[IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
+Write-Host '[Scarlet PC] AOT CPU fast path: 4096-block slices + lock-free SVC telemetry.' -ForegroundColor DarkGray
+
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
