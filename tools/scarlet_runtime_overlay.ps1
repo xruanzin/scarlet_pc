@@ -868,6 +868,7 @@ $new = @'
         Settings::values.gpu_accuracy.SetValue(
             scarlet_gpu_safe ? Settings::GpuAccuracy::High
                              : Settings::GpuAccuracy::Low);
+        Settings::UpdateGPUAccuracy();
         Settings::values.vram_usage_mode.SetValue(
             scarlet_gpu_safe ? Settings::VramUsageMode::Conservative
                              : Settings::VramUsageMode::Aggressive);
