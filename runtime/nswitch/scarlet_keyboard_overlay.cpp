@@ -59,8 +59,114 @@ const std::vector<KeySpec>& NormalKeys() {
         constexpr int key_w = 96;
         constexpr int special_w = 116;
         const auto col_x = [](int col) { return margin_x + (col - 1) * key_w; };
-        struct Pair { wchar_t lower; wchar_t upper; };
-        static constexpr std::array<Pair, 11> row1{{{L'1',L'#'},{L'2',L'['},{L'3',L']'},{L'4',L'
+
+        struct Pair {
+            wchar_t lower;
+            wchar_t upper;
+        };
+
+        static constexpr std::array<Pair, 11> row1{{
+            {L'1', L'#'}, {L'2', L'['}, {L'3', L']'}, {L'4', L'$'}, {L'5', L'%'},
+            {L'6', L'^'}, {L'7', L'&'}, {L'8', L'*'}, {L'9', L'('}, {L'0', L')'},
+            {L'-', L'_'},
+        }};
+        static constexpr std::array<Pair, 11> row2{{
+            {L'q', L'Q'}, {L'w', L'W'}, {L'e', L'E'}, {L'r', L'R'}, {L't', L'T'},
+            {L'y', L'Y'}, {L'u', L'U'}, {L'i', L'I'}, {L'o', L'O'}, {L'p', L'P'},
+            {L'/', L'@'},
+        }};
+        static constexpr std::array<Pair, 11> row3{{
+            {L'a', L'A'}, {L's', L'S'}, {L'd', L'D'}, {L'f', L'F'}, {L'g', L'G'},
+            {L'h', L'H'}, {L'j', L'J'}, {L'k', L'K'}, {L'l', L'L'}, {L':', L';'},
+            {L'\'', L'"'},
+        }};
+        static constexpr std::array<Pair, 11> row4{{
+            {L'z', L'Z'}, {L'x', L'X'}, {L'c', L'C'}, {L'v', L'V'}, {L'b', L'B'},
+            {L'n', L'N'}, {L'm', L'M'}, {L',', L'<'}, {L'.', L'>'}, {L'?', L'+'},
+            {L'!', L'='},
+        }};
+
+        const std::array<const Pair*, 4> rows{
+            row1.data(), row2.data(), row3.data(), row4.data()
+        };
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 11; ++c) {
+                out.push_back(KeySpec{
+                    nullptr,
+                    rows[r][c].lower,
+                    rows[r][c].upper,
+                    KeyAction::Character,
+                    col_x(c + 1),
+                    row_y[r],
+                    key_w,
+                    key_h,
+                });
+            }
+        }
+
+        out.push_back(KeySpec{L"⌫", 0, 0, KeyAction::Backspace,
+                              col_x(12), row_y[0], special_w, key_h});
+        out.push_back(KeySpec{L"Return", 0, 0, KeyAction::Return,
+                              col_x(12), row_y[1], special_w, key_h * 2});
+        out.push_back(KeySpec{L"OK", 0, 0, KeyAction::Accept,
+                              col_x(12), row_y[3], special_w, key_h * 2});
+        out.push_back(KeySpec{L"⇧", 0, 0, KeyAction::Shift,
+                              col_x(1), row_y[4], key_w * 2, key_h});
+        out.push_back(KeySpec{L"Space", 0, 0, KeyAction::Space,
+                              col_x(3), row_y[4], key_w * 9, key_h});
+        return out;
+    }();
+    return keys;
+}
+
+const std::vector<KeySpec>& NumberPadKeys() {
+    static const std::vector<KeySpec> keys = [] {
+        std::vector<KeySpec> out;
+        constexpr int key_w = 180;
+        constexpr int key_h = 76;
+        constexpr int gap = 4;
+        constexpr int start_x = (BaseWidth - (key_w * 4 + gap * 3)) / 2;
+        constexpr int start_y = 348;
+        static constexpr wchar_t digits[4][3] = {
+            {L'1', L'2', L'3'},
+            {L'4', L'5', L'6'},
+            {L'7', L'8', L'9'},
+            {L'\0', L'0', L'\0'},
+        };
+
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                const wchar_t ch = digits[r][c];
+                if (ch != L'\0') {
+                    out.push_back(KeySpec{
+                        nullptr,
+                        ch,
+                        ch,
+                        KeyAction::Character,
+                        start_x + c * (key_w + gap),
+                        start_y + r * (key_h + gap),
+                        key_w,
+                        key_h,
+                    });
+                }
+            }
+        }
+
+        out.push_back(KeySpec{L"⌫", 0, 0, KeyAction::Backspace,
+                              start_x + 3 * (key_w + gap), start_y, key_w, key_h});
+        out.push_back(KeySpec{L"OK", 0, 0, KeyAction::Accept,
+                              start_x + 3 * (key_w + gap), start_y + key_h + gap,
+                              key_w, key_h * 3 + gap * 2});
+        return out;
+    }();
+    return keys;
+}
+
+const std::vector<KeySpec>& Keys(const Config& config) {
+    return config.number_pad ? NumberPadKeys() : NormalKeys();
+}
+
+struct State {
     std::mutex mutex;
     Config config{};
     std::u16string text;
