@@ -10,6 +10,7 @@
 #include "settings.h"
 #include "hle.h"
 #include "kernel.h"
+#include "scarlet_native/aot.h"
 
 const char *g_romfs_dir;
 uint64_t g_boot_started_ns;
@@ -202,9 +203,34 @@ static void boot(const char *root) {
         LOG("[package] direct container: ExeFS=%s RomFS=%s image=%s\n", exefs, romfs,
             getenv("LARECOMP_ROMFS_IMAGE") ? getenv("LARECOMP_ROMFS_IMAGE") : "(default)");
 
+    const char *runtime_mode = getenv("SCARLET_RUNTIME");
+    bool native_aot = !runtime_mode || !*runtime_mode || !strcmp(runtime_mode, "native");
+    bool las_runtime = runtime_mode && !strcmp(runtime_mode, "las");
+
     char why[512];
-    if (!gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
+    if (native_aot) {
+        if (!scarlet_aot_load(root, why, sizeof why)) FATAL("%s\n", why);
+        LOG("[runtime] Scarlet Native Runtime (existing AOT ABI)\n");
+    } else if (las_runtime) {
+        if (!gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
+        LOG("[runtime] LAS-generated comparison backend\n");
+    } else if (runtime_mode && !strcmp(runtime_mode, "legacy")) {
+        FATAL("SCARLET_RUNTIME=legacy is the suyu fallback and must be launched via "
+              "tools/scarlet_native_run.ps1; this executable is the native runtime\n");
+    } else {
+        FATAL("unknown SCARLET_RUNTIME=%s (use native, las, or legacy via the run script)\n",
+              runtime_mode ? runtime_mode : "");
+    }
+
     loader_load(exefs);
+    if (native_aot) {
+        if (!scarlet_aot_bind_loaded_modules(why, sizeof why)) FATAL("%s\n", why);
+        rt_set_guest_call_backend(scarlet_aot_guest_call);
+        scarlet_aot_log_status();
+    } else {
+        rt_set_guest_call_backend(NULL);
+    }
+
     { extern void settings_load(void); settings_load(); }
     kernel_init();
     dispatch_init();
