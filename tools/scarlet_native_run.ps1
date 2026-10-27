@@ -89,6 +89,10 @@ $oldExeFs = $env:LARECOMP_EXEFS_DIR
 $oldRomFsDir = $env:LARECOMP_ROMFS_DIR
 $oldRomFsImage = $env:LARECOMP_ROMFS_IMAGE
 $oldPackageStream = $env:LARECOMP_PACKAGE_STREAM
+$oldSvcProfile = $env:LARECOMP_PROF_SVC
+$oldVkProfile = $env:LARECOMP_VK_PROF
+$oldCommandCounts = $env:LARECOMP_COMMAND_COUNTS
+$oldFrameCsv = $env:LARECOMP_FRAME_CSV
 try {
     $env:SCARLET_RUNTIME = $Runtime
     if ($packageMount) {
@@ -100,8 +104,15 @@ try {
         Write-Host ("[package] RomFS: {0}" -f $env:LARECOMP_ROMFS_IMAGE) -ForegroundColor DarkGray
     }
     if ($Profile) {
+        $profileDir = Join-Path $repoRoot 'build\native\profile'
+        New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
         $env:SCARLET_NATIVE_PROFILE = '1'
         $env:LARECOMP_HLE_PROF = '1'
+        $env:LARECOMP_PROF_SVC = '1'
+        $env:LARECOMP_VK_PROF = '1'
+        $env:LARECOMP_COMMAND_COUNTS = '1'
+        $env:LARECOMP_FRAME_CSV = Join-Path $profileDir 'frames.csv'
+        Write-Host ("[profile] frame timeline -> {0}" -f $env:LARECOMP_FRAME_CSV) -ForegroundColor DarkGray
     }
     if ($NoLauncher) { $env:LARECOMP_NO_LAUNCHER = '1' }
 
@@ -125,6 +136,10 @@ finally {
     if ($null -eq $oldRomFsDir) { Remove-Item Env:LARECOMP_ROMFS_DIR -ErrorAction SilentlyContinue } else { $env:LARECOMP_ROMFS_DIR = $oldRomFsDir }
     if ($null -eq $oldRomFsImage) { Remove-Item Env:LARECOMP_ROMFS_IMAGE -ErrorAction SilentlyContinue } else { $env:LARECOMP_ROMFS_IMAGE = $oldRomFsImage }
     if ($null -eq $oldPackageStream) { Remove-Item Env:LARECOMP_PACKAGE_STREAM -ErrorAction SilentlyContinue } else { $env:LARECOMP_PACKAGE_STREAM = $oldPackageStream }
+    if ($null -eq $oldSvcProfile) { Remove-Item Env:LARECOMP_PROF_SVC -ErrorAction SilentlyContinue } else { $env:LARECOMP_PROF_SVC = $oldSvcProfile }
+    if ($null -eq $oldVkProfile) { Remove-Item Env:LARECOMP_VK_PROF -ErrorAction SilentlyContinue } else { $env:LARECOMP_VK_PROF = $oldVkProfile }
+    if ($null -eq $oldCommandCounts) { Remove-Item Env:LARECOMP_COMMAND_COUNTS -ErrorAction SilentlyContinue } else { $env:LARECOMP_COMMAND_COUNTS = $oldCommandCounts }
+    if ($null -eq $oldFrameCsv) { Remove-Item Env:LARECOMP_FRAME_CSV -ErrorAction SilentlyContinue } else { $env:LARECOMP_FRAME_CSV = $oldFrameCsv }
     if ($packageMountPid) {
         Stop-Process -Id $packageMountPid -Force -ErrorAction SilentlyContinue
         try { Wait-Process -Id $packageMountPid -Timeout 5 -ErrorAction SilentlyContinue } catch {}
