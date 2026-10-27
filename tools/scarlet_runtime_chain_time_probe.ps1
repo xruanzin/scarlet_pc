@@ -15,7 +15,26 @@ if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
 
 $text = [IO.File]::ReadAllText($path)
 if ($text.Contains('[Scarlet.ChainTime] sampled wall-time')) {
-    Write-Host '[Scarlet PC] Chain-time probe already applied.' -ForegroundColor DarkGray
+    # FastIncremental preserves transformed sources after a failed compile.
+    # Repair the first chain-time revision, which used a local variable named
+    # 'blocks' inside ReportRecompCoverage() and trips MSVC C4456 because that
+    # function already has a local named 'blocks'.
+    $repaired = $false
+    if ($text.Contains('const u64 blocks = g_counters.chain_pair_blocks[pair];')) {
+        $text = $text.Replace(
+            'const u64 blocks = g_counters.chain_pair_blocks[pair];',
+            'const u64 sampled_blocks = g_counters.chain_pair_blocks[pair];')
+        $text = $text.Replace(
+            'const double ns_per_block = blocks ? static_cast<double>(ns) / blocks : 0.0;',
+            'const double ns_per_block = sampled_blocks ? static_cast<double>(ns) / sampled_blocks : 0.0;')
+        $repaired = $true
+    }
+    if ($repaired) {
+        [IO.File]::WriteAllText($path, $text, $utf8)
+        Write-Host '[Scarlet PC] Chain-time probe: repaired preserved report variable for MSVC.' -ForegroundColor Green
+    } else {
+        Write-Host '[Scarlet PC] Chain-time probe already applied.' -ForegroundColor DarkGray
+    }
     exit 0
 }
 
@@ -155,10 +174,11 @@ $reportInsert = @'
         o += "  --- sampled AOT chain wall-time by total time ---\n";
         for (const auto& [pair, ns] : TopN(g_counters.chain_pair_ns, 64)) {
             const u64 count = g_counters.chain_pair_count[pair];
-            const u64 blocks = g_counters.chain_pair_blocks[pair];
+            const u64 sampled_blocks = g_counters.chain_pair_blocks[pair];
             const double total_ms = static_cast<double>(ns) * 1.0e-6;
             const double avg_us = count ? static_cast<double>(ns) / count * 1.0e-3 : 0.0;
-            const double ns_per_block = blocks ? static_cast<double>(ns) / blocks : 0.0;
+            const double ns_per_block =
+                sampled_blocks ? static_cast<double>(ns) / sampled_blocks : 0.0;
             o += fmt::format(
                 "    {:>10.3f} ms  n={:<7} avg={:>8.2f} us  {:>8.1f} ns/block  {} -> {}\n",
                 total_ms, count, avg_us, ns_per_block,
