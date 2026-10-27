@@ -173,7 +173,7 @@ $1                        "x4={:#x} x5={:#x} x6={:#x} x7={:#x} sp={:#x}",
 $1                        off, hit + 1, resolve_offset(impl->ctx.x[30]),
 $1                        impl->ctx.x[0], impl->ctx.x[1], impl->ctx.x[2],
 $1                        impl->ctx.x[3], impl->ctx.x[4], impl->ctx.x[5],
-$1                        impl->ctx.x[6], impl->ctx.x[7], impl->ctx.sp);
+$1                        impl->ctx.x[6], impl->ctx.x[7], impl->ctx.x[31]);
 $1                }
 $1            }
 $1        }
