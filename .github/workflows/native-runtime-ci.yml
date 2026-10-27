@@ -23,7 +23,22 @@ on:
       - 'tools/scarlet_native_*.ps1'
       - '.github/workflows/native-runtime-ci.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
+  windows-scripts:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse and exercise the native runner
+        shell: powershell
+        run: |
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_build.ps1 -Raw))
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_run.ps1 -Raw))
+          ./tools/test_native_runner.ps1
+
   syntax:
     runs-on: ubuntu-latest
     steps:
@@ -56,8 +71,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Initialize the native FidelityFX provider
+        run: git submodule update --init --recursive -- third_party/FSR-Vulkan
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
