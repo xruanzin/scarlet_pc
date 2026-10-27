@@ -304,7 +304,7 @@ gen:
 gen-objs: $(GEN_OBJ)
 
 # Runtime objects only (no generated code, no link): quick compile check
-runtime-objs: $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ)
+runtime-objs: $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(FSR_OBJ)
 
 $(B)/rt/platform/windows_rc.o: runtime/platform/windows.rc docs/icon/icon.ico
 	@mkdir -p $(dir $@)

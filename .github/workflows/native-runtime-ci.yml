@@ -7,9 +7,13 @@ on:
   pull_request:
     paths:
       - 'runtime/scarlet_native/**'
+      - 'runtime/nvn/vulkan/**'
       - 'runtime/kernel.c'
       - 'runtime/dispatch.c'
+      - 'runtime/ipc.c'
       - 'runtime/rt.h'
+      - 'Makefile'
+      - 'tools/scarlet_native_*.ps1'
       - '.github/workflows/native-runtime-ci.yml'
 
 jobs:
@@ -36,3 +40,29 @@ jobs:
         run: |
           printf '#include "runtime/scarlet_native/aot_abi.h"\nint main(void){return 0;}\n' > /tmp/aot_abi_check.c
           clang -std=c11 -fsyntax-only -I. /tmp/aot_abi_check.c
+
+  windows-runtime:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-lld
+            mingw-w64-ucrt-x86_64-sdl3
+            mingw-w64-ucrt-x86_64-ffmpeg
+            mingw-w64-ucrt-x86_64-vulkan-devel
+            mingw-w64-ucrt-x86_64-vulkan-memory-allocator
+            mingw-w64-ucrt-x86_64-shaderc
+            mingw-w64-ucrt-x86_64-spirv-tools
+            mingw-w64-ucrt-x86_64-pkgconf
+      - name: Compile Scarlet native runtime, renderer and FidelityFX provider
+        shell: msys2 {0}
+        run: |
+          make -j2 B=build/native-ci EXE_NAME=ScarletPC runtime-objs
