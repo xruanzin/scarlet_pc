@@ -5692,19 +5692,16 @@ if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] sampled SVC histogram'))
         // Scarlet issues thousands of synchronization SVCs per second across
         // multiple guest cores, turning diagnostic telemetry into a global
         // serialization point. Keep exact accounting only when explicitly
-        // requested; normal gameplay samples one call in 1024.
+        // requested; normal gameplay performs no histogram bookkeeping at all.
         static const bool full_coverage = [] {
             const char* value = std::getenv("SCARLET_RECOMP_COVERAGE");
             return value && *value && *value != '0';
         }();
         if (!full_coverage) {
-            static thread_local u32 sample_counter = 0;
-            if ((++sample_counter & 0x3FFu) != 0) {
-                return;
-            }
+            return;
         }
         std::scoped_lock lk{hist_lock};
-        svc_numbers[num] += full_coverage ? 1 : 1024;
+        ++svc_numbers[num];
     }
 '@
     if (-not $scarletArmRecompText.Contains($recordSvcOld.Trim())) {
@@ -5796,6 +5793,36 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
     }
     $scarletArmRecompText = $scarletArmRecompText.Remove($fpIndex, $fpOld.Trim().Length).Insert($fpIndex, $fpNew.Trim())
     Write-Host '[Scarlet PC] Enabled lightweight same-thread resume for synchronization SVCs.' -ForegroundColor Green
+}
+
+
+# Disable periodic coverage/report file I/O in the production gameplay path.
+if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] no periodic coverage I/O during gameplay')) {
+    $scarletPeriodicOld = @'
+        if ((seen & 0x3FFFFULL) == 0x3FFFFULL) {
+            WriteRecompCoverageFile(FormatRecompCoverage());
+            // Time-limited inside; teardown is not guaranteed, as above.
+            RecompGaps::Flush(true, false);
+        }
+'@
+    $scarletPeriodicNew = @'
+        // [Scarlet.Perf] no periodic coverage I/O during gameplay
+        static const bool scarlet_periodic_coverage = [] {
+            const char* value = std::getenv("SCARLET_RECOMP_COVERAGE");
+            return value && *value && *value != '0';
+        }();
+        if (scarlet_periodic_coverage &&
+            (seen & 0x3FFFFULL) == 0x3FFFFULL) {
+            WriteRecompCoverageFile(FormatRecompCoverage());
+            RecompGaps::Flush(true, false);
+        }
+'@
+    if ($scarletArmRecompText.Contains($scarletPeriodicOld.Trim())) {
+        $scarletArmRecompText =
+            $scarletArmRecompText.Replace($scarletPeriodicOld.Trim(),
+                                          $scarletPeriodicNew.Trim())
+        Write-Host '[Scarlet PC] Disabled periodic recomp coverage I/O for gameplay.' -ForegroundColor Green
+    }
 }
 
 [IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
