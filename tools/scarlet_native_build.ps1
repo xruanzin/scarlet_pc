@@ -15,6 +15,17 @@ $buildDir = Join-Path $repoRoot 'build\native'
 $exe = Join-Path $buildDir 'ScarletPC.exe'
 $deps = Join-Path $repoRoot 'build\deps-win'
 
+$fsrHeader = Join-Path $repoRoot 'third_party\FSR-Vulkan\include\ffx_vk_portable.h'
+if (-not (Test-Path $fsrHeader -PathType Leaf)) {
+    Write-Host '[native] Initializing declared FSR-Vulkan submodule (no reset/clean)...' -ForegroundColor DarkCyan
+    Push-Location $repoRoot
+    try {
+        & git submodule update --init --recursive -- third_party/FSR-Vulkan
+        if ($LASTEXITCODE -ne 0) { throw 'Could not initialize third_party/FSR-Vulkan.' }
+    }
+    finally { Pop-Location }
+}
+
 $make = Get-Command make -ErrorAction SilentlyContinue
 if (-not $make) {
     throw 'make was not found. Use the same MSYS2/UCRT64 environment used by the existing native Makefile.'

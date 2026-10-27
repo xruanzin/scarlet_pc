@@ -20,6 +20,7 @@
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
+#include "scarlet_fsr3.h"
 #include "../output_scale.h"
 #include "../renderer.h"
 
@@ -702,13 +703,18 @@ void backend_present(NvnTexture *t) {
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();
+
+    const bool native_fsr3 = scarlet_fsr3_requested();
+    if (native_fsr3)
+        b = scarlet_fsr3_upscale(b);
+
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
-    // Frame interpolation (60 fps, exec.c vk_interp_render): the in-between image now, this frame's own half a frame
-    // later (the period: the game's present rhythm, smoothed).
+    // The old analytical interpolator is kept for non-FSR modes. Never feed
+    // interpolated frames back through FSR temporal history.
     TexBackend *hold = NULL;
     extern bool vk_interp_render(TexBackend *b, TexBackend **hold);
-    bool two = vk_interp_render(b, &hold);
+    bool two = native_fsr3 ? false : vk_interp_render(b, &hold);
     static uint64_t last_present, period = 33333333;
     if (last_present && t0 - last_present > 5000000 && t0 - last_present < 100000000) period = (period * 7 + (t0 - last_present)) / 8;
     last_present = t0;
@@ -959,7 +965,8 @@ static void quick_exit_handler(void) {
         if (trace) LOG("[vk] exit: saving the pipeline cache/history\n");
         extern void vk_pipe_history_save(void);
         vk_pipe_history_save();
-        vk_pipeline_cache_save();
+        scarlet_fsr3_shutdown();
+    vk_pipeline_cache_save();
     }
     if (trace) LOG("[vk] exit: terminating\n");
     fflush(stdout);
