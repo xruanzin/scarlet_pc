@@ -132,6 +132,10 @@ else
 EXE      := $(B)/$(EXE_NAME).exe
 DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
 OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S -DWIN32_LEAN_AND_MEAN -DNOMINMAX
+# FidelityFX 1.1.4 uses the MSVC secure CRT spelling. MinGW/Clang exposes
+# the same bounded signature as swprintf(buffer, count, fmt, ...).
+# Keep the compatibility define in our build layer; never patch the submodule.
+FSR_DEFS += -Dswprintf_s=swprintf
 GENARCH  ?= -march=x86-64-v3 -mtune=znver2  # x86-v3 compatibility, scheduled for Ryzen 4000G/Zen 2
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
