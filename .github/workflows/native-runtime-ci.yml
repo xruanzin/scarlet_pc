@@ -50,7 +50,7 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
-          update: true
+          update: false
           install: >-
             make
             mingw-w64-ucrt-x86_64-clang
