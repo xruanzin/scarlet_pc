@@ -450,17 +450,19 @@ void MaybeReportScarletCpuProfile() {
         return;
     }
 
-    static u64 last_blocks = 0;
-    static u64 last_time = now;
+    static std::atomic<u64> last_blocks{0};
+    static std::atomic<u64> last_time{now};
     const u64 blocks = TotalStaticBlocks();
-    const u64 elapsed = now - last_time;
-    const u64 delta_blocks = blocks - last_blocks;
+    const u64 previous_blocks = last_blocks.exchange(blocks, std::memory_order_relaxed);
+    const u64 previous_time = last_time.exchange(now, std::memory_order_relaxed);
+    const u64 elapsed = now - previous_time;
+    const u64 delta_blocks = blocks - previous_blocks;
     const u64 aot_ns = g_scarlet_aot_ns.exchange(0, std::memory_order_relaxed);
     const u64 aot_calls = g_scarlet_aot_calls.exchange(0, std::memory_order_relaxed);
     const u64 svc_gap_ns = g_scarlet_svc_gap_ns.exchange(0, std::memory_order_relaxed);
     const u64 svc_gaps = g_scarlet_svc_gap_count.exchange(0, std::memory_order_relaxed);
 
-    if (last_blocks != 0 && elapsed != 0) {
+    if (previous_blocks != 0 && elapsed != 0) {
         const double seconds = static_cast<double>(elapsed) * 1.0e-9;
         const double mblocks_s = static_cast<double>(delta_blocks) / seconds / 1.0e6;
         LOG_INFO(
@@ -473,8 +475,6 @@ void MaybeReportScarletCpuProfile() {
             static_cast<double>(svc_gap_ns) * 1.0e-6, svc_gaps);
     }
 
-    last_blocks = blocks;
-    last_time = now;
 }
 '@
     if (-not $arm.Contains($totalAnchor.Trim())) {
