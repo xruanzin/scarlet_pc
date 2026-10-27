@@ -6400,4 +6400,29 @@ if (-not $scarletCondText.Contains('[Scarlet.Perf] CV wait uncontended unlock fa
     }
 }
 
+
+# Production runs do not need the aggregate SVC counter either. Although relaxed,
+# it is one shared atomic RMW on every HLE transition (~10k/s in Scarlet).
+# Keep it only when AOT diagnostics are explicitly enabled.
+$scarletArmRecompPath = Join-Path $SourceDir 'src\core\arm\recomp\arm_recomp.cpp'
+$scarletArmRecompText = [IO.File]::ReadAllText($scarletArmRecompPath)
+if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] production SVC total gate')) {
+    $scarletSvcTotalOld = 'g_counters.svc_calls.fetch_add(1, std::memory_order_relaxed);'
+    $scarletSvcTotalNew = @'
+if (kScarletAotDiagnostics) {
+                // [Scarlet.Perf] production SVC total gate
+                g_counters.svc_calls.fetch_add(1, std::memory_order_relaxed);
+            }
+'@.Trim()
+    if ($scarletArmRecompText.Contains($scarletSvcTotalOld)) {
+        $scarletArmRecompText =
+            $scarletArmRecompText.Replace($scarletSvcTotalOld, $scarletSvcTotalNew)
+        [IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
+        Write-Host '[Scarlet PC] Disabled aggregate SVC atomic counter during gameplay.' -ForegroundColor Green
+    } else {
+        Write-Host '[Scarlet PC] Aggregate SVC counter already absent from gameplay path.' -ForegroundColor DarkGray
+    }
+}
+
+
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
