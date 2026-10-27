@@ -85,6 +85,7 @@ elseif (Test-Path (Join-Path $repoRoot $GameRoot) -PathType Container) {
 $oldRuntime = $env:SCARLET_RUNTIME
 $oldProfile = $env:SCARLET_NATIVE_PROFILE
 $oldLauncher = $env:LARECOMP_NO_LAUNCHER
+$oldHleProfile = $env:LARECOMP_HLE_PROF
 $oldExeFs = $env:LARECOMP_EXEFS_DIR
 $oldRomFsDir = $env:LARECOMP_ROMFS_DIR
 $oldRomFsImage = $env:LARECOMP_ROMFS_IMAGE
@@ -121,7 +122,12 @@ try {
 
     $launch = @()
     if ($NoLauncher) { $launch += '--play' }
-    $launch += $resolvedRoot
+    # Start-Process joins ArgumentList with spaces, so preserve a root such as
+    # C:\Users\Player\Pokemon Scarlet as one argument. Keep a drive root's
+    # trailing separator by doubling trailing backslashes before the quote.
+    if ($resolvedRoot.Contains('"')) { throw 'Invalid quote in game path.' }
+    $quotedRoot = [regex]::Replace($resolvedRoot, '(\\+)$', '$1$1')
+    $launch += ('"' + $quotedRoot + '"')
 
     $p = Start-Process -FilePath $exe -ArgumentList $launch -WorkingDirectory $repoRoot -PassThru -Wait
     if ($p.ExitCode -ne 0) {
@@ -144,5 +150,5 @@ finally {
         Stop-Process -Id $packageMountPid -Force -ErrorAction SilentlyContinue
         try { Wait-Process -Id $packageMountPid -Timeout 5 -ErrorAction SilentlyContinue } catch {}
     }
-    if (-not $Profile) { Remove-Item Env:LARECOMP_HLE_PROF -ErrorAction SilentlyContinue }
+    if ($null -eq $oldHleProfile) { Remove-Item Env:LARECOMP_HLE_PROF -ErrorAction SilentlyContinue } else { $env:LARECOMP_HLE_PROF = $oldHleProfile }
 }
