@@ -111,6 +111,7 @@ void rt_unwind_point(void) {}
 uint64_t rt_ticks(void) { return 100; }
 uint64_t plat_now_ns(void) { static uint64_t ticks; return ++ticks; }
 void rt_hle_profile_report(void) {}
+void kernel_profile_report(void) {}
 void rt_fatal_trace(void) { abort(); }
 const char *loader_symbol_at(uint64_t pc, uint64_t *off) { (void)pc; *off = 0; return NULL; }
 GuestFn dispatch_lookup(uint64_t pc) { (void)pc; return NULL; }
