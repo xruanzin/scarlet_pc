@@ -84,8 +84,14 @@ void rt_hle_profile_report(void) {
 
 // Overrides of recompiled guest functions (by address)
 #define MAX_OVERRIDE 1024
+#define OVERRIDE_TABLE 2048
 static struct { uint64_t addr; HostFn fn; const char *name; } overrides[MAX_OVERRIDE];
+static struct { uint64_t addr; HostFn fn; } override_table[OVERRIDE_TABLE];
 static int override_count;
+
+static unsigned override_hash(uint64_t addr) {
+    return (unsigned)(((addr >> 2) * UINT64_C(11400714819323198485)) >> (64 - 11));
+}
 
 // Host implementations registered by name (runtime/hle/*.c fill this via HLE_FUNC)
 typedef struct { const char *name; HostFn fn; } HleImpl;
@@ -127,6 +133,15 @@ void hle_override(uint64_t addr, HostFn fn, const char *name) {
     overrides[override_count].fn = fn;
     overrides[override_count].name = name;
     override_count++;
+
+    unsigned h = override_hash(addr);
+    while (override_table[h].addr && override_table[h].addr != addr)
+        h = (h + 1) & (OVERRIDE_TABLE - 1);
+    // Preserve the legacy "first registration wins" behavior.
+    if (!override_table[h].addr) {
+        override_table[h].fn = fn;
+        override_table[h].addr = addr;
+    }
 }
 
 // ---- recent-HLE ring. Shared histories outlive their writer threads (TLS does not).
@@ -360,8 +375,15 @@ GuestFn rt_dispatch_host_lookup(Cpu *c, uint64_t pc) {
             return hle_unimplemented;
         }
     }
-    for (int i = 0; i < override_count; i++)
-        if (overrides[i].addr == pc) return overrides[i].fn;
+    if (pc) {
+        unsigned h = override_hash(pc);
+        for (;;) {
+            uint64_t addr = override_table[h].addr;
+            if (addr == pc) return override_table[h].fn;
+            if (!addr) break;
+            h = (h + 1) & (OVERRIDE_TABLE - 1);
+        }
+    }
     return NULL;
 }
 

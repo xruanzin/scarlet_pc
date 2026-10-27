@@ -53,10 +53,9 @@ static bool guest_span(uint64_t address, uint32_t size) {
            bytes <= GUEST_HI - address;
 }
 
-static uint64_t host_load(void *user, uint64_t address, uint32_t size) {
+static uint64_t host_load_fast(void *user, uint64_t address, uint32_t size) {
     (void)user;
     address &= UINT64_C(0x0000ffffffffffff);
-    if (profile_enabled()) atomic_fetch_add_explicit(&g_prof.loads, 1, memory_order_relaxed);
     if (!guest_span(address, size)) return 0;
 
     // Guard-v2 reserves size 0: bit 32 says the mapping is valid and low32 is
@@ -73,13 +72,24 @@ static uint64_t host_load(void *user, uint64_t address, uint32_t size) {
     return value;
 }
 
-static void host_store(void *user, uint64_t address, uint32_t size, uint64_t value) {
+static void host_store_fast(void *user, uint64_t address, uint32_t size, uint64_t value) {
     (void)user;
     address &= UINT64_C(0x0000ffffffffffff);
-    if (profile_enabled()) atomic_fetch_add_explicit(&g_prof.stores, 1, memory_order_relaxed);
     if (!size || size > sizeof value || !guest_span(address, size)) return;
-    scarlet_aot_note_store(address, size);
     memcpy((void *)(uintptr_t)address, &value, size);
+    // Publish the new generation only after the bytes are visible. A block
+    // observing the new generation can then safely verify the new code.
+    scarlet_aot_note_store(address, size);
+}
+
+static uint64_t host_load_profiled(void *user, uint64_t address, uint32_t size) {
+    atomic_fetch_add_explicit(&g_prof.loads, 1, memory_order_relaxed);
+    return host_load_fast(user, address, size);
+}
+
+static void host_store_profiled(void *user, uint64_t address, uint32_t size, uint64_t value) {
+    atomic_fetch_add_explicit(&g_prof.stores, 1, memory_order_relaxed);
+    host_store_fast(user, address, size, value);
 }
 
 static uint64_t host_excl_load(void *user, uint64_t address, uint32_t size) {
@@ -90,7 +100,7 @@ static uint64_t host_excl_load(void *user, uint64_t address, uint32_t size) {
     case 2: return ldx16(c, address);
     case 4: return ldx32(c, address);
     case 8: return ldx64(c, address);
-    default: return host_load(user, address, size);
+    default: return host_load_fast(user, address, size);
     }
 }
 
@@ -129,8 +139,8 @@ static void host_excl_load_pair(void *user, uint64_t address, uint32_t size,
         *lo = (uint64_t)v;
         *hi = (uint64_t)(v >> 64);
     } else {
-        *lo = host_load(user, address, size);
-        *hi = host_load(user, address + size, size);
+        *lo = host_load_fast(user, address, size);
+        *hi = host_load_fast(user, address + size, size);
     }
 }
 
@@ -184,8 +194,9 @@ static void aot_to_cpu(const ScarletAotGuestContext *g, Cpu *c) {
 static ScarletAotHostMem host_bridge(Cpu *cpu) {
     ScarletAotHostMem h = {0};
     h.user = cpu;
-    h.load = host_load;
-    h.store = host_store;
+    const bool prof = profile_enabled();
+    h.load = prof ? host_load_profiled : host_load_fast;
+    h.store = prof ? host_store_profiled : host_store_fast;
     h.excl_load = host_excl_load;
     h.excl_store = host_excl_store;
     h.clear_excl = host_clear_excl;

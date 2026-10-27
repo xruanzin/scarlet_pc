@@ -6,7 +6,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SCARLET_AOT_ABI_MIN 5u
+// The preserved Scarlet images use ABI 6. ABI 5 has a shorter context tail
+// (save_dir starts where ABI 6 adds FM1 fields), so pretending one struct fits
+// both would silently corrupt standalone-helper state.
+#define SCARLET_AOT_ABI_MIN 6u
 #define SCARLET_AOT_ABI_MAX 6u
 
 #define SCARLET_AOT_FEATURE_FASTMEM_PT1 (1u << 0)
