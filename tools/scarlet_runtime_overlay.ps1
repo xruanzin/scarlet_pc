@@ -6400,4 +6400,144 @@ if (-not $scarletCondText.Contains('[Scarlet.Perf] CV wait uncontended unlock fa
     }
 }
 
+
+# ---------------------------------------------------------------------------
+# Runtime parity with the lightweight LASRecomp / letsgo-recomp architecture.
+# These changes touch only the host runtime: existing Scarlet AOT DLLs remain
+# byte-for-byte reusable.
+# ---------------------------------------------------------------------------
+
+# LASRecomp keeps indirect dispatch cheap with a direct-mapped cache in front
+# of its slow lookup. Scarlet currently calls up to four DLL lookup functions
+# on every host-side redispatch. Mirror the same tactic here.
+$scarletRuntimeCmdPath = Join-Path $SourceDir (Expand-Legacy 'src\__PRODUCT___cmd\__PRODUCT__.cpp')
+$scarletRuntimeCmdText = [IO.File]::ReadAllText($scarletRuntimeCmdPath)
+if (-not $scarletRuntimeCmdText.Contains('[Scarlet.Perf] LAS-style AOT dispatch cache')) {
+    $scarletLookupOld = @'
+        Core::SetRecompLookup([](u64 pc) -> Core::RecompBlockFn {
+            for (const auto& m : s_recomp_modules) {
+                if (auto fn = m.lookup(pc)) return m.run_slice ? m.run_slice : fn;
+            }
+            return nullptr;
+        });
+'@
+    $scarletLookupNew = @'
+        Core::SetRecompLookup([](u64 pc) -> Core::RecompBlockFn {
+            // [Scarlet.Perf] LAS-style AOT dispatch cache
+            struct DispatchCacheEntry {
+                u64 pc{};
+                Core::RecompBlockFn fn{};
+            };
+            constexpr size_t CacheBits = 16;
+            constexpr size_t CacheSize = size_t{1} << CacheBits;
+            static thread_local DispatchCacheEntry cache[CacheSize]{};
+
+            const u64 mixed = (pc >> 2) * 11400714819323198485ull;
+            auto& entry = cache[static_cast<size_t>(mixed >> (64 - CacheBits))];
+            if (entry.pc == pc && entry.fn != nullptr) {
+                return entry.fn;
+            }
+
+            for (const auto& m : s_recomp_modules) {
+                if (auto fn = m.lookup(pc)) {
+                    const auto result = m.run_slice ? m.run_slice : fn;
+                    entry.pc = pc;
+                    entry.fn = result;
+                    return result;
+                }
+            }
+            return nullptr;
+        });
+'@
+    if (-not $scarletRuntimeCmdText.Contains($scarletLookupOld.Trim())) {
+        throw 'Scarlet runtime overlay: combined AOT lookup block missing'
+    }
+    $scarletRuntimeCmdText =
+        $scarletRuntimeCmdText.Replace($scarletLookupOld.Trim(), $scarletLookupNew.Trim())
+    [IO.File]::WriteAllText($scarletRuntimeCmdPath, $scarletRuntimeCmdText, $utf8)
+    Write-Host '[Scarlet PC] LAS-style AOT dispatch cache installed (64K/thread).' -ForegroundColor Green
+}
+
+# Keep ABI 6 run_slice in guest code longer so artificial slice cutoffs do not
+# dominate host redispatches. SVCs and interrupts still break execution.
+$scarletArmRecompPath = Join-Path $SourceDir 'src\core\arm\recomp\arm_recomp.cpp'
+$scarletArmRecompText = [IO.File]::ReadAllText($scarletArmRecompPath)
+
+$scarletArmRecompText = [regex]::Replace(
+    $scarletArmRecompText,
+    'std::atomic<int>\s+g_recomp_chain_budget\{\d+\};',
+    'std::atomic<int> g_recomp_chain_budget{16384};',
+    1
+)
+$scarletArmRecompText = $scarletArmRecompText.Replace(
+    'g_recomp_chain_budget.store(enabled ? 1024 : 32, std::memory_order_relaxed);',
+    'g_recomp_chain_budget.store(enabled ? 16384 : 32, std::memory_order_relaxed);'
+)
+$scarletArmRecompText = $scarletArmRecompText.Replace(
+    'g_recomp_chain_budget.store(enabled ? 4096 : 32, std::memory_order_relaxed);',
+    'g_recomp_chain_budget.store(enabled ? 16384 : 32, std::memory_order_relaxed);'
+)
+
+# SSBU-style production diagnostics: aggregate SVC counting is opt-in instead
+# of a shared atomic RMW on every supervisor call.
+if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] production SVC total gate')) {
+    $scarletSvcAtomic = 'g_counters.svc_calls.fetch_add(1, std::memory_order_relaxed);'
+    $scarletSvcAtomicGated = @'
+if (kScarletAotDiagnostics) {
+                // [Scarlet.Perf] production SVC total gate
+                g_counters.svc_calls.fetch_add(1, std::memory_order_relaxed);
+            }
+'@.Trim()
+    if ($scarletArmRecompText.Contains($scarletSvcAtomic)) {
+        $scarletArmRecompText =
+            $scarletArmRecompText.Replace($scarletSvcAtomic, $scarletSvcAtomicGated)
+        Write-Host '[Scarlet PC] SSBU-style opt-in aggregate SVC diagnostics applied.' -ForegroundColor Green
+    }
+}
+
+# Keep the block tally out of production gameplay. This tally exists only for
+# recompiler diagnostics and coverage reports.
+if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] production block tally gate')) {
+    $scarletSeenOld = @'
+        const u64 seen = t_blocks.slot->n.load(std::memory_order_relaxed) + 1;
+        t_blocks.slot->n.store(seen, std::memory_order_relaxed);
+'@
+    $scarletSeenNew = @'
+        // [Scarlet.Perf] production block tally gate
+        static const bool scarlet_coverage_enabled = [] {
+            const char* value = std::getenv("SCARLET_RECOMP_COVERAGE");
+            return value && *value && *value != '0';
+        }();
+        const bool scarlet_count_blocks =
+            kScarletAotDiagnostics || scarlet_coverage_enabled;
+        u64 seen = 0;
+        if (scarlet_count_blocks) {
+            seen = t_blocks.slot->n.load(std::memory_order_relaxed) + 1;
+            t_blocks.slot->n.store(seen, std::memory_order_relaxed);
+        }
+'@
+    if ($scarletArmRecompText.Contains($scarletSeenOld.Trim())) {
+        $scarletArmRecompText =
+            $scarletArmRecompText.Replace($scarletSeenOld.Trim(), $scarletSeenNew.Trim())
+    }
+
+    $scarletSpentOld = @'
+        {
+            const int spent = chain_budget - impl->ctx.chain_budget;
+'@
+    $scarletSpentNew = @'
+        if (scarlet_count_blocks) {
+            const int spent = chain_budget - impl->ctx.chain_budget;
+'@
+    if ($scarletArmRecompText.Contains($scarletSpentOld.Trim())) {
+        $scarletArmRecompText =
+            $scarletArmRecompText.Replace($scarletSpentOld.Trim(), $scarletSpentNew.Trim())
+    }
+    Write-Host '[Scarlet PC] Production AOT block tally disabled unless diagnostics are requested.' -ForegroundColor Green
+}
+
+[IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
+Write-Host '[Scarlet PC] Native-port runtime parity: 16K slices + cached dispatch + zero hot telemetry.' -ForegroundColor Green
+
+
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
