@@ -83,6 +83,7 @@ KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio
 void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4);
 uint32_t kernel_current_thread_handle(void);
 Cpu *kernel_current_cpu(void);
+void kernel_profile_report(void);
 
 // ---- ipc.c
 typedef struct Service Service;
