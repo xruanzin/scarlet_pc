@@ -99,8 +99,15 @@ if (-not $cmake) { throw 'cmake.exe was not found.' }
 $ninja = Find-Ninja $vsRoot
 if (-not $ninja) { throw 'ninja.exe was not found.' }
 
-$clangOutput = @(& $clang --version 2>&1)
-$clangExit = $LASTEXITCODE
+$previousEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    $clangOutput = @(& $clang --version 2>&1)
+    $clangExit = $LASTEXITCODE
+}
+finally {
+    $ErrorActionPreference = $previousEap
+}
 if ($clangExit -ne 0) {
     $detail = ($clangOutput | Out-String).Trim()
     throw "clang-cl self-test failed with exit code $clangExit using '$clang'. $detail"
