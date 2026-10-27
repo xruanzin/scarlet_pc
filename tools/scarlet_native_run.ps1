@@ -67,7 +67,7 @@ if (-not [string]::IsNullOrWhiteSpace($GamePath)) {
         }
         Write-Host '[package] mounting base game directly (zero extraction)...' -ForegroundColor Cyan
         $mountJson = & (Join-Path $PSScriptRoot 'scarlet_mount_package.ps1') -PackagePath $resolvedGame
-        if ($LASTEXITCODE -ne 0 -or -not $mountJson) {
+        if (-not $mountJson) {
             throw 'Base package mount failed.'
         }
         $packageMount = ($mountJson | Select-Object -Last 1 | ConvertFrom-Json)
