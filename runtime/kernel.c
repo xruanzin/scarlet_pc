@@ -1,6 +1,7 @@
 // A small Horizon kernel: handles, threads, synchronization, memory, and the SVC dispatcher.
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <SDL3/SDL.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -297,6 +298,37 @@ KThread *kernel_current_thread(void) { return t_cur; }
 
 static uint32_t *u32p(uint64_t a) { return (uint32_t *)(uintptr_t)a; }
 
+// Let's Go measured that a Windows sleep/wake is more expensive than the
+// lifetime of many hot guest mutexes. Spin only for a short bounded window,
+// and only by default when the host has enough logical CPUs that the waiter is
+// unlikely to steal the owner's only execution slot.
+#if defined(__x86_64__) || defined(_M_X64)
+#define SCARLET_CPU_RELAX() __builtin_ia32_pause()
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define SCARLET_CPU_RELAX() __asm__ volatile("yield")
+#else
+#define SCARLET_CPU_RELAX() ((void)0)
+#endif
+
+static uint64_t lock_spin_ns(void) {
+    static _Atomic int64_t cached = -1;
+    int64_t value = atomic_load_explicit(&cached, memory_order_acquire);
+    if (value >= 0) return (uint64_t)value;
+
+    const char *e = getenv("SCARLET_LOCK_SPIN_US");
+    if (!e || !*e) e = getenv("LARECOMP_LOCK_SPIN_US");
+    long us = e && *e ? atol(e) : 40;
+    if ((!e || !*e) && SDL_GetNumLogicalCPUCores() < 4) us = 0;
+    if (us < 0) us = 0;
+    if (us > 1000) us = 1000;  // never turn a short fast path into busy waiting
+
+    int64_t ns = (int64_t)us * 1000;
+    int64_t expected = -1;
+    atomic_compare_exchange_strong_explicit(&cached, &expected, ns,
+                                            memory_order_release, memory_order_relaxed);
+    return (uint64_t)atomic_load_explicit(&cached, memory_order_acquire);
+}
+
 // Try to take mutex `m` for `tag`, or mark it contended. Returns true if acquired. Uses CAS so a
 // concurrent user-space unlock (owner storing 0) is never overwritten.
 static bool mutex_acquire_or_mark(uint64_t m, uint32_t tag) {
@@ -410,7 +442,29 @@ static uint32_t svc_arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) 
     t->wait_kind = WAIT_MUTEX;
     t->wait_addr = addr;
     t->wait_tag = tag;
-    uint32_t r = block_current(-1);
+
+    uint32_t r = R_OK;
+    bool handed = false;
+    const uint64_t spin = lock_spin_ns();
+    if (spin) {
+        // mutex_release() hands ownership to one concrete waiter and changes
+        // only that waiter's wait_kind. Watching this thread-local flag avoids
+        // a kernel sleep+wake for locks released within a few microseconds.
+        waitlist_add(t);
+        pthread_mutex_unlock(&g_klock);
+
+        const uint64_t end = plat_now_ns() + spin;
+        while (__atomic_load_n((int *)&t->wait_kind, __ATOMIC_ACQUIRE) != WAIT_NONE &&
+               !g_rt_unwind && plat_now_ns() < end)
+            SCARLET_CPU_RELAX();
+
+        pthread_mutex_lock(&g_klock);
+        waitlist_remove(t);
+        handed = t->wait_kind == WAIT_NONE;
+        r = t->wait_result;
+    }
+
+    if (!handed) r = block_current(-1);
     pthread_mutex_unlock(&g_klock);
     return r == R_CANCELLED ? R_OK : r;
 }
