@@ -5586,6 +5586,11 @@ if ($scarletArmRecompText.Contains($scarletInlineSvcOld.Trim())) {
 $scarletArbiterPath = Join-Path $SourceDir 'src\core\hle\kernel\k_address_arbiter.cpp'
 $scarletArbiterText = [IO.File]::ReadAllText($scarletArbiterPath)
 
+if (-not $scarletArbiterText.Contains('#include <cstdlib>')) {
+    $scarletArbiterText =
+        "#include <cstdlib>" + [Environment]::NewLine + $scarletArbiterText
+}
+
 if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast reject')) {
     # Incremental-safe structural insertion for WaitIfLessThan.
     if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast reject less')) {
@@ -5603,18 +5608,39 @@ if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast rejec
         $scarletWaitLessInsert = @'
 
     // [Scarlet.Perf] address-arbiter fast reject less
+    // [Scarlet.Perf] short address wait spin
     // Preserve termination precedence from the original slow path.
     if (cur_thread->IsTerminationRequested()) {
         R_THROW(ResultTerminationRequested);
     }
 
-    // If the userspace predicate is already false, this call cannot enqueue.
-    // Matching candidates still enter the original scheduler-locked path and
-    // are revalidated there before any decrement or sleep.
+    // Short producer/consumer hand-offs are common in Scarlet. Give the other
+    // guest core a tiny bounded window to change the word before taking the
+    // global scheduler lock. If the predicate becomes false, linearizing the
+    // SVC here is equivalent to the original locked re-check and avoids a
+    // sleep/wake round-trip. SCARLET_SYNC_SPIN=0 disables this experiment.
+    static const int scarlet_sync_spin = [] {
+        const char* e = std::getenv("SCARLET_SYNC_SPIN");
+        int v = (e && *e) ? std::atoi(e) : 32;
+        if (v < 0) v = 0;
+        if (v > 256) v = 256;
+        return v;
+    }();
+
     s32 fast_value{};
-    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
-        fast_value >= value) {
-        R_THROW(ResultInvalidState);
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr)) {
+        if (fast_value >= value) {
+            R_THROW(ResultInvalidState);
+        }
+        for (int i = 0; i < scarlet_sync_spin; ++i) {
+            s32 spin_value{};
+            if (!ReadFromUser(system.Kernel(), std::addressof(spin_value), addr)) {
+                break;
+            }
+            if (spin_value >= value) {
+                R_THROW(ResultInvalidState);
+            }
+        }
     }
 '@
         $scarletArbiterText = $scarletWaitLessRegex.Replace(
@@ -5641,17 +5667,38 @@ if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast rejec
         $scarletWaitEqualInsert = @'
 
     // [Scarlet.Perf] address-arbiter fast reject equal
+    // [Scarlet.Perf] short address wait spin
     // Preserve termination precedence from the original slow path.
     if (cur_thread->IsTerminationRequested()) {
         R_THROW(ResultTerminationRequested);
     }
 
-    // A mismatched value means this wait must fail. Equal candidates continue
-    // through the original scheduler-locked path and are rechecked there.
+    static const int scarlet_sync_spin = [] {
+        const char* e = std::getenv("SCARLET_SYNC_SPIN");
+        int v = (e && *e) ? std::atoi(e) : 32;
+        if (v < 0) v = 0;
+        if (v > 256) v = 256;
+        return v;
+    }();
+
+    // A mismatched value means this wait must fail. For equal candidates, poll
+    // briefly before entering the scheduler; a producer that changes the word
+    // during this bounded window turns the expensive wait into the same
+    // ResultInvalidState the original locked path would return.
     s32 fast_value{};
-    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
-        fast_value != value) {
-        R_THROW(ResultInvalidState);
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr)) {
+        if (fast_value != value) {
+            R_THROW(ResultInvalidState);
+        }
+        for (int i = 0; i < scarlet_sync_spin; ++i) {
+            s32 spin_value{};
+            if (!ReadFromUser(system.Kernel(), std::addressof(spin_value), addr)) {
+                break;
+            }
+            if (spin_value != value) {
+                R_THROW(ResultInvalidState);
+            }
+        }
     }
 '@
         $scarletArbiterText = $scarletWaitEqualRegex.Replace(
@@ -5710,6 +5757,120 @@ if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast rejec
 
     [IO.File]::WriteAllText($scarletArbiterPath, $scarletArbiterText, $utf8)
     Write-Host '[Scarlet PC] Address-arbiter fast rejects avoid unnecessary scheduler locks.' -ForegroundColor DarkGray
+}
+
+# FastIncremental may preserve the older one-read fast rejects. Upgrade those
+# in-place so this performance experiment does not require deleting the runtime
+# source tree.
+if (-not $scarletArbiterText.Contains('[Scarlet.Perf] short address wait spin')) {
+    $oldLessRuntime = @'
+    // [Scarlet.Perf] address-arbiter fast reject less
+    // Preserve termination precedence from the original slow path.
+    if (cur_thread->IsTerminationRequested()) {
+        R_THROW(ResultTerminationRequested);
+    }
+
+    // If the userspace predicate is already false, this call cannot enqueue.
+    // Matching candidates still enter the original scheduler-locked path and
+    // are revalidated there before any decrement or sleep.
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
+        fast_value >= value) {
+        R_THROW(ResultInvalidState);
+    }
+'@
+    $newLessRuntime = @'
+    // [Scarlet.Perf] address-arbiter fast reject less
+    // [Scarlet.Perf] short address wait spin
+    if (cur_thread->IsTerminationRequested()) {
+        R_THROW(ResultTerminationRequested);
+    }
+    static const int scarlet_sync_spin = [] {
+        const char* e = std::getenv("SCARLET_SYNC_SPIN");
+        int v = (e && *e) ? std::atoi(e) : 32;
+        if (v < 0) v = 0;
+        if (v > 256) v = 256;
+        return v;
+    }();
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr)) {
+        if (fast_value >= value) {
+            R_THROW(ResultInvalidState);
+        }
+        for (int i = 0; i < scarlet_sync_spin; ++i) {
+            s32 spin_value{};
+            if (!ReadFromUser(system.Kernel(), std::addressof(spin_value), addr)) {
+                break;
+            }
+            if (spin_value >= value) {
+                R_THROW(ResultInvalidState);
+            }
+        }
+    }
+'@
+    $oldEqRuntime = @'
+    // [Scarlet.Perf] address-arbiter fast reject equal
+    // Preserve termination precedence from the original slow path.
+    if (cur_thread->IsTerminationRequested()) {
+        R_THROW(ResultTerminationRequested);
+    }
+
+    // A mismatched value means this wait must fail. Equal candidates continue
+    // through the original scheduler-locked path and are rechecked there.
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
+        fast_value != value) {
+        R_THROW(ResultInvalidState);
+    }
+'@
+    $newEqRuntime = @'
+    // [Scarlet.Perf] address-arbiter fast reject equal
+    // [Scarlet.Perf] short address wait spin
+    if (cur_thread->IsTerminationRequested()) {
+        R_THROW(ResultTerminationRequested);
+    }
+    static const int scarlet_sync_spin = [] {
+        const char* e = std::getenv("SCARLET_SYNC_SPIN");
+        int v = (e && *e) ? std::atoi(e) : 32;
+        if (v < 0) v = 0;
+        if (v > 256) v = 256;
+        return v;
+    }();
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr)) {
+        if (fast_value != value) {
+            R_THROW(ResultInvalidState);
+        }
+        for (int i = 0; i < scarlet_sync_spin; ++i) {
+            s32 spin_value{};
+            if (!ReadFromUser(system.Kernel(), std::addressof(spin_value), addr)) {
+                break;
+            }
+            if (spin_value != value) {
+                R_THROW(ResultInvalidState);
+            }
+        }
+    }
+'@
+    $changedSpin = $false
+    if ($scarletArbiterText.Contains($oldLessRuntime.Trim())) {
+        $scarletArbiterText =
+            $scarletArbiterText.Replace($oldLessRuntime.Trim(), $newLessRuntime.Trim())
+        $changedSpin = $true
+    }
+    if ($scarletArbiterText.Contains($oldEqRuntime.Trim())) {
+        $scarletArbiterText =
+            $scarletArbiterText.Replace($oldEqRuntime.Trim(), $newEqRuntime.Trim())
+        $changedSpin = $true
+    }
+    if ($changedSpin) {
+        if (-not $scarletArbiterText.Contains('#include <cstdlib>')) {
+            $scarletArbiterText =
+                "#include <cstdlib>" + [Environment]::NewLine + $scarletArbiterText
+        }
+        [IO.File]::WriteAllText($scarletArbiterPath, $scarletArbiterText, $utf8)
+        Write-Host '[Scarlet PC] Short address-wait spin applied (default 32 polls).' -ForegroundColor Green
+    }
 }
 
 
