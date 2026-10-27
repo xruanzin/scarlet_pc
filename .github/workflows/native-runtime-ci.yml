@@ -118,7 +118,7 @@ jobs:
           for module in rtld main multimedia sdk; do
             cp build/native-ci/test-aot/fixture.dll "build/native-ci/test-aot/scarlet-${module}.dll"
           done
-          export SCARLET_AOT_DIR="$(cygpath -w build/native-ci/test-aot)"
+          export SCARLET_AOT_DIR="$(cygpath -aw build/native-ci/test-aot)"
           ./build/native-ci/ScarletPC.exe --check-aot
           clang -std=c11 -shared -DFIXTURE_ABI=5 tools/fixtures/native_aot_dll.c -o build/native-ci/test-aot/scarlet-main.dll
           set +e
