@@ -132,10 +132,10 @@ else
 EXE      := $(B)/$(EXE_NAME).exe
 DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
 OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S -DWIN32_LEAN_AND_MEAN -DNOMINMAX
-# FidelityFX 1.1.4 uses the MSVC secure CRT spelling. MinGW/Clang exposes
-# the same bounded signature as swprintf(buffer, count, fmt, ...).
-# Keep the compatibility define in our build layer; never patch the submodule.
-FSR_DEFS += -Dswprintf_s=swprintf
+# FidelityFX 1.1.4 C++ sources use the MSVC secure CRT spelling. Apply the
+# compatibility alias only while compiling C++: putting it on C translation
+# units rewrites MinGW's own swprintf_s declaration in <wchar.h>.
+FSR_CPP_COMPAT := -Dswprintf_s=swprintf
 GENARCH  ?= -march=x86-64-v3 -mtune=znver2  # x86-v3 compatibility, scheduled for Ryzen 4000G/Zen 2
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
@@ -271,7 +271,7 @@ $(B)/fsr/%.o: $(FSR_VK_DIR)/%.c
 
 $(B)/fsr/%.o: $(FSR_VK_DIR)/%.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) -O2 $(GENARCH) -std=c++17 $(OSFLAGS) $(FSR_DEFS) $(FSR_INC) -c $< -o $@
+	$(CXX) -O2 $(GENARCH) -std=c++17 $(OSFLAGS) $(FSR_DEFS) $(FSR_CPP_COMPAT) $(FSR_INC) -c $< -o $@
 
 $(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(FSR_OBJ)
 	@mkdir -p $(dir $@)link
