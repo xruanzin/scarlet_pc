@@ -99,8 +99,13 @@ if (-not $cmake) { throw 'cmake.exe was not found.' }
 $ninja = Find-Ninja $vsRoot
 if (-not $ninja) { throw 'ninja.exe was not found.' }
 
-$clangVersion = (& $clang --version | Select-Object -First 1)
-if ($LASTEXITCODE -ne 0) { throw "clang-cl self-test failed with exit code $LASTEXITCODE" }
+$clangOutput = @(& $clang --version 2>&1)
+$clangExit = $LASTEXITCODE
+if ($clangExit -ne 0) {
+    $detail = ($clangOutput | Out-String).Trim()
+    throw "clang-cl self-test failed with exit code $clangExit using '$clang'. $detail"
+}
+$clangVersion = ($clangOutput | Select-Object -First 1)
 if ([string]::IsNullOrWhiteSpace($clangVersion)) { $clangVersion = 'clang-cl' }
 
 Write-Host ''
