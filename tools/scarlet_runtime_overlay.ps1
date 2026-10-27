@@ -1557,8 +1557,15 @@ s32 NormalizeSwapInterval(f32* out_speed_scale, s32 swap_interval) {
     }
 
     const char* target_env = std::getenv("SCARLET_TARGET_FPS");
-    const int target_fps = target_env && *target_env ? std::atoi(target_env) : 60;
-    if (target_fps >= 60 && swap_interval == 2) {
+    const int target_fps = target_env && *target_env ? std::atoi(target_env) : 30;
+
+    // Scarlet targets 30 FPS on a 60 Hz display by presenting every other
+    // vertical blank (swap interval 2). Keep that native pacing for the stable
+    // mode instead of lowering the emulated VI clock itself.
+    if (target_fps <= 30 && swap_interval == 1) {
+        swap_interval = 2;
+    } else if (target_fps >= 60 && swap_interval == 2) {
+        // Explicit 60 FPS mode: remove the game's native every-other-vblank cap.
         swap_interval = 1;
     }
 
@@ -1567,8 +1574,11 @@ s32 NormalizeSwapInterval(f32* out_speed_scale, s32 swap_interval) {
 '@
 Replace-Literal 'src\core\hle\service\nvnflinger\hardware_composer.cpp' $old.Trim() $new.Trim()
 
-# Make VI pacing follow the requested Scarlet target. 60 is the supported default;
-# higher rates are experimental and may expose frame-dependent animations.
+# Keep the emulated display/VI clock at the Switch-native 60 Hz. Scarlet's
+# 30 FPS mode is represented by swap interval 2; changing the VI clock itself
+# to 30 Hz makes interval 2 behave like 15 FPS and adds avoidable timing skew.
+# SCARLET_TARGET_FPS only selects native 30 (interval 2) versus unlocked 60
+# (interval 1).
 $old = @'
 #include "common/settings.h"
 '@
@@ -1586,17 +1596,12 @@ constexpr auto FrameNs = std::chrono::nanoseconds{1000000000 / 60};
 $new = @'
 namespace {
 
-int ScarletTargetFps() {
-    static const int target = [] {
-        const char* value = std::getenv("SCARLET_TARGET_FPS");
-        int fps = value && *value ? std::atoi(value) : 60;
-        return std::clamp(fps, 30, 240);
-    }();
-    return target;
+constexpr int ScarletDisplayHz() {
+    return 60;
 }
 
 std::chrono::nanoseconds ScarletFrameNs() {
-    return std::chrono::nanoseconds{1000000000 / ScarletTargetFps()};
+    return std::chrono::nanoseconds{1000000000 / ScarletDisplayHz()};
 }
 
 } // namespace
@@ -1609,7 +1614,7 @@ $old = @'
 '@
 $new = @'
     const f32 effective_fps =
-        static_cast<f32>(ScarletTargetFps()) / static_cast<f32>(m_swap_interval);
+        static_cast<f32>(ScarletDisplayHz()) / static_cast<f32>(m_swap_interval);
 '@
 Replace-Literal 'src\core\hle\service\vi\conductor.cpp' $old.Trim() $new.Trim()
 
