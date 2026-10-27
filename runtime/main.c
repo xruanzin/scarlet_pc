@@ -320,13 +320,25 @@ int main(int argc, char **argv) {
 #endif
     const char *root = "extracted";  // (in the data root)
     bool skip_launcher = getenv("LARECOMP_NO_LAUNCHER") || getenv("LARECOMP_INPUT");  // tests boot straight in
+    bool check_aot = false;
     static char arg_root[1024];
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--play")) skip_launcher = true;
+        if (!strcmp(argv[i], "--check-aot")) check_aot = true;
+        else if (!strcmp(argv[i], "--play")) skip_launcher = true;
         else if (argv[i][0] != '-' && !realpath(argv[i], arg_root)) root = argv[i];  // (relative to where we started)
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+    if (check_aot) {
+        char why[512];
+        if (!scarlet_aot_load(root, why, sizeof why)) {
+            LOG("[native-aot] loader check failed: %s\n", why);
+            return 2;
+        }
+        scarlet_aot_log_status();
+        LOG("[native-aot] loader check passed; guest code was not executed\n");
+        return 0;
+    }
     for (bool title = !skip_launcher;;) {
         if (title) {  // start screen: resolution, fullscreen, anti-aliasing, translation, keys (runtime/ui/launcher_lg.mm)
             extern void launcher_lg_run(const char *root);

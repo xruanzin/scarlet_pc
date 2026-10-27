@@ -10,7 +10,8 @@ on:
       - 'runtime/scarlet_native/**'
       - 'runtime/gamesetup.*'
       - 'runtime/ui/**'
-      - 'tools/test_native_*.py'
+      - 'tools/test_native_*'
+      - 'tools/fixtures/native_aot_dll.c'
       - 'runtime/main.c'
       - 'tools/gen.py'
       - 'runtime/nvn/vulkan/**'
@@ -92,3 +93,28 @@ jobs:
         shell: msys2 {0}
         run: |
           make -j2 B=build/native-ci EXE_NAME=ScarletPC build/native-ci/ScarletPC.exe
+
+      - name: Exercise actual Windows DLL loading without game assets or GPU
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          mkdir -p build/native-ci/test-aot
+          clang -std=c11 -shared tools/fixtures/native_aot_dll.c -o build/native-ci/test-aot/fixture.dll
+          for module in rtld main multimedia sdk; do
+            cp build/native-ci/test-aot/fixture.dll "build/native-ci/test-aot/scarlet-${module}.dll"
+          done
+          export SCARLET_AOT_DIR="$(cygpath -w build/native-ci/test-aot)"
+          ./build/native-ci/ScarletPC.exe --check-aot
+          clang -std=c11 -shared -DFIXTURE_ABI=5 tools/fixtures/native_aot_dll.c -o build/native-ci/test-aot/scarlet-main.dll
+          set +e
+          ./build/native-ci/ScarletPC.exe --check-aot
+          result=$?
+          set -e
+          test "$result" -eq 2
+          cp build/native-ci/test-aot/fixture.dll build/native-ci/test-aot/scarlet-main.dll
+          rm build/native-ci/test-aot/scarlet-sdk.dll
+          set +e
+          ./build/native-ci/ScarletPC.exe --check-aot
+          result=$?
+          set -e
+          test "$result" -eq 2
