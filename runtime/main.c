@@ -223,6 +223,23 @@ static void boot(const char *root) {
     if (native_aot) {
         if (!scarlet_aot_load(root, why, sizeof why)) FATAL("%s\n", why);
         LOG("[runtime] Scarlet Native Runtime (existing AOT ABI)\n");
+
+        // Keep the already-generated LAS game library as a migration safety net
+        // when it is present. It is never consulted on a covered AOT path; only
+        // a missing target/unhandled AOT instruction can enter it. Set
+        // SCARLET_NATIVE_LAS_FALLBACK=0 to prove a run is 100% AOT+native HLE.
+        const char *fallback = getenv("SCARLET_NATIVE_LAS_FALLBACK");
+        const bool allow_las_fallback = !fallback || !*fallback || atoi(fallback) != 0;
+        if (allow_las_fallback && gamelib_present(root)) {
+            if (gamelib_load(root, why, sizeof why))
+                LOG("[runtime] LAS fallback armed for native AOT gaps only\n");
+            else
+                LOG("[runtime] LAS fallback present but unavailable: %s\n", why);
+        } else if (!allow_las_fallback) {
+            LOG("[runtime] LAS fallback disabled; native gaps are fatal\n");
+        } else {
+            LOG("[runtime] no compatible LAS fallback found; native gaps are fatal\n");
+        }
     } else if (las_runtime) {
         if (!gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
         LOG("[runtime] LAS-generated comparison backend\n");

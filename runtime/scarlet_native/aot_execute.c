@@ -31,6 +31,8 @@ typedef struct {
     _Atomic uint64_t stores;
     _Atomic uint64_t missing_targets;
     _Atomic uint64_t unhandled_halts;
+    _Atomic uint64_t las_fallbacks;
+    _Atomic uint64_t las_fallback_ns;
 } AotProfile;
 
 static AotProfile g_prof;
@@ -219,15 +221,39 @@ void scarlet_aot_profile_report(void) {
     uint64_t hle = TAKE(hle_calls), hle_ns = TAKE(hle_ns);
     uint64_t loads = TAKE(loads), stores = TAKE(stores);
     uint64_t miss = TAKE(missing_targets), gaps = TAKE(unhandled_halts);
+    uint64_t las = TAKE(las_fallbacks), las_ns = TAKE(las_fallback_ns);
 #undef TAKE
     LOG("[native-prof] calls=%llu slices=%llu blocks=%llu aot=%.3fms "
-        "svc=%llu/%.3fms hle=%llu/%.3fms mem=%lluR/%lluW miss=%llu gaps=%llu\n",
+        "svc=%llu/%.3fms hle=%llu/%.3fms mem=%lluR/%lluW miss=%llu gaps=%llu "
+        "las-fallback=%llu/%.3fms\n",
         (unsigned long long)calls, (unsigned long long)slices,
         (unsigned long long)blocks, aot_ns / 1e6,
         (unsigned long long)svc, svc_ns / 1e6,
         (unsigned long long)hle, hle_ns / 1e6,
         (unsigned long long)loads, (unsigned long long)stores,
-        (unsigned long long)miss, (unsigned long long)gaps);
+        (unsigned long long)miss, (unsigned long long)gaps,
+        (unsigned long long)las, las_ns / 1e6);
+}
+
+static bool try_las_fallback(ScarletAotGuestContext *g, Cpu *cpu, bool prof) {
+    // dispatch_lookup is populated only when a compatible lasgame is already
+    // present and was loaded at boot. Normal native execution never touches
+    // this table; it is strictly a migration fallback for uncovered AOT PCs.
+    if (!dispatch_lookup(g->pc)) return false;
+
+    aot_to_cpu(g, cpu);
+    cpu->pc = g->pc;
+    uint64_t t0 = prof ? plat_now_ns() : 0;
+    rt_dispatch(cpu);
+    if (prof) {
+        atomic_fetch_add_explicit(&g_prof.las_fallbacks, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_prof.las_fallback_ns,
+                                  plat_now_ns() - t0, memory_order_relaxed);
+    }
+    cpu_to_aot(cpu, g);
+    g->halted = SCARLET_AOT_HALT_NONE;
+    g->pending_svc = SCARLET_AOT_NO_SVC;
+    return true;
 }
 
 void scarlet_aot_guest_call(Cpu *cpu, uint64_t address) {
@@ -276,10 +302,12 @@ void scarlet_aot_guest_call(Cpu *cpu, uint64_t address) {
         ScarletAotModule *m = scarlet_aot_find_pc(g.pc);
         if (!m) {
             if (prof) atomic_fetch_add_explicit(&g_prof.missing_targets, 1, memory_order_relaxed);
+            if (try_las_fallback(&g, cpu, prof)) continue;
             aot_to_cpu(&g, cpu);
             uint64_t off = 0;
             const char *sym = loader_symbol_at(g.x[30], &off);
-            FATAL("native AOT has no target at %llx (lr=%llx %s+%llx)\n",
+            FATAL("native AOT has no target at %llx (lr=%llx %s+%llx); "
+                  "no LAS fallback covers it\n",
                   (unsigned long long)g.pc, (unsigned long long)g.x[30],
                   sym ? sym : "?", (unsigned long long)off);
         }
@@ -310,10 +338,11 @@ void scarlet_aot_guest_call(Cpu *cpu, uint64_t address) {
 
         if (g.halted == SCARLET_AOT_HALT_UNHANDLED) {
             if (prof) atomic_fetch_add_explicit(&g_prof.unhandled_halts, 1, memory_order_relaxed);
+            if (try_las_fallback(&g, cpu, prof)) continue;
             aot_to_cpu(&g, cpu);
             uint32_t op = guest_span(g.pc, 4) ? *(const uint32_t *)(uintptr_t)g.pc : 0;
-            FATAL("native AOT uncovered instruction %08x at %llx; "
-                  "this build has no interpreter in the normal gameplay path\n",
+            FATAL("native AOT uncovered instruction %08x at %llx and no LAS "
+                  "resume/function covers that PC\n",
                   op, (unsigned long long)g.pc);
         }
         if (g.halted == SCARLET_AOT_HALT_BREAKPOINT)
