@@ -5582,111 +5582,125 @@ $scarletArbiterPath = Join-Path $SourceDir 'src\core\hle\kernel\k_address_arbite
 $scarletArbiterText = [IO.File]::ReadAllText($scarletArbiterPath)
 
 if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast reject')) {
-    $scarletWaitLessAnchor = @'
-Result KAddressArbiter::WaitIfLessThan(uint64_t addr, s32 value, bool decrement, s64 timeout) {
-    // Prepare to wait.
-    KThread* cur_thread = GetCurrentThreadPointer(system.Kernel());
-'@
-    $scarletWaitLessReplacement = @'
-Result KAddressArbiter::WaitIfLessThan(uint64_t addr, s32 value, bool decrement, s64 timeout) {
-    // [Scarlet.Perf] address-arbiter fast reject
+    # Incremental-safe structural insertion for WaitIfLessThan.
+    if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast reject less')) {
+        $scarletWaitLessPattern =
+            '(?s)(Result KAddressArbiter::WaitIfLessThan\(uint64_t addr, s32 value, bool decrement, s64 timeout\)\s*\{.*?' +
+            'KThread\*\s+cur_thread\s*=\s*GetCurrentThreadPointer\(system\.Kernel\(\)\);)'
+        $scarletWaitLessRegex = [regex]::new(
+            $scarletWaitLessPattern,
+            [Text.RegularExpressions.RegexOptions]::Singleline
+        )
+        $scarletWaitLessMatch = $scarletWaitLessRegex.Match($scarletArbiterText)
+        if (-not $scarletWaitLessMatch.Success) {
+            throw 'Scarlet runtime overlay: semantic WaitIfLessThan fast-reject anchor missing'
+        }
+        $scarletWaitLessInsert = @'
+
+    // [Scarlet.Perf] address-arbiter fast reject less
     // Preserve termination precedence from the original slow path.
-    KThread* cur_thread = GetCurrentThreadPointer(system.Kernel());
     if (cur_thread->IsTerminationRequested()) {
         R_THROW(ResultTerminationRequested);
     }
 
-    // If the userspace predicate is already false, the kernel cannot legally
-    // enqueue this thread. Return before constructing the scheduler sleep scope.
-    // The slow path re-reads/re-applies the predicate under scheduler lock.
+    // If the userspace predicate is already false, this call cannot enqueue.
+    // Matching candidates still enter the original scheduler-locked path and
+    // are revalidated there before any decrement or sleep.
     s32 fast_value{};
     if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
         fast_value >= value) {
         R_THROW(ResultInvalidState);
     }
-
-    // Prepare to wait.
 '@
-    if (-not $scarletArbiterText.Contains($scarletWaitLessAnchor.Trim())) {
-        throw 'Scarlet runtime overlay: WaitIfLessThan fast-reject anchor missing'
+        $scarletArbiterText = $scarletWaitLessRegex.Replace(
+            $scarletArbiterText,
+            '$1' + $scarletWaitLessInsert,
+            1
+        )
+        Write-Host '[Scarlet PC] Added WaitIfLessThan scheduler-lock fast reject.' -ForegroundColor DarkGray
     }
-    $scarletArbiterText =
-        $scarletArbiterText.Replace($scarletWaitLessAnchor.Trim(),
-                                    $scarletWaitLessReplacement.Trim())
 
-    $scarletWaitEqualAnchor = @'
-Result KAddressArbiter::WaitIfEqual(uint64_t addr, s32 value, s64 timeout) {
-    // Prepare to wait.
-    KThread* cur_thread = GetCurrentThreadPointer(system.Kernel());
-'@
-    $scarletWaitEqualReplacement = @'
-Result KAddressArbiter::WaitIfEqual(uint64_t addr, s32 value, s64 timeout) {
-    // [Scarlet.Perf] address-arbiter fast reject
+    # Incremental-safe structural insertion for WaitIfEqual.
+    if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast reject equal')) {
+        $scarletWaitEqualPattern =
+            '(?s)(Result KAddressArbiter::WaitIfEqual\(uint64_t addr, s32 value, s64 timeout\)\s*\{.*?' +
+            'KThread\*\s+cur_thread\s*=\s*GetCurrentThreadPointer\(system\.Kernel\(\)\);)'
+        $scarletWaitEqualRegex = [regex]::new(
+            $scarletWaitEqualPattern,
+            [Text.RegularExpressions.RegexOptions]::Singleline
+        )
+        $scarletWaitEqualMatch = $scarletWaitEqualRegex.Match($scarletArbiterText)
+        if (-not $scarletWaitEqualMatch.Success) {
+            throw 'Scarlet runtime overlay: semantic WaitIfEqual fast-reject anchor missing'
+        }
+        $scarletWaitEqualInsert = @'
+
+    // [Scarlet.Perf] address-arbiter fast reject equal
     // Preserve termination precedence from the original slow path.
-    KThread* cur_thread = GetCurrentThreadPointer(system.Kernel());
     if (cur_thread->IsTerminationRequested()) {
         R_THROW(ResultTerminationRequested);
     }
 
-    // A mismatched value means the wait must fail with InvalidState. This read
-    // is a valid linearization point; if equal, the original slow path rechecks
-    // under the scheduler lock before sleeping.
+    // A mismatched value means this wait must fail. Equal candidates continue
+    // through the original scheduler-locked path and are rechecked there.
     s32 fast_value{};
     if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
         fast_value != value) {
         R_THROW(ResultInvalidState);
     }
-
-    // Prepare to wait.
 '@
-    if (-not $scarletArbiterText.Contains($scarletWaitEqualAnchor.Trim())) {
-        throw 'Scarlet runtime overlay: WaitIfEqual fast-reject anchor missing'
+        $scarletArbiterText = $scarletWaitEqualRegex.Replace(
+            $scarletArbiterText,
+            '$1' + $scarletWaitEqualInsert,
+            1
+        )
+        Write-Host '[Scarlet PC] Added WaitIfEqual scheduler-lock fast reject.' -ForegroundColor DarkGray
     }
-    $scarletArbiterText =
-        $scarletArbiterText.Replace($scarletWaitEqualAnchor.Trim(),
-                                    $scarletWaitEqualReplacement.Trim())
 
-    # Conditional signal variants also take the scheduler lock before checking
-    # their userspace compare. Reject mismatches early; matching values still go
-    # through the exact original atomic/scheduler path.
-    $scarletSignalIncAnchor = @'
-Result KAddressArbiter::SignalAndIncrementIfEqual(uint64_t addr, s32 value, s32 count) {
-    // Perform signaling.
-'@
-    $scarletSignalIncReplacement = @'
-Result KAddressArbiter::SignalAndIncrementIfEqual(uint64_t addr, s32 value, s32 count) {
+    # Conditional signal variants: reject only proven userspace mismatches before
+    # acquiring the scheduler lock. Matching values retain the exact old path.
+    if (-not $scarletArbiterText.Contains('[Scarlet.Perf] signal increment fast reject')) {
+        $scarletSignalIncPattern =
+            '(Result KAddressArbiter::SignalAndIncrementIfEqual\(uint64_t addr, s32 value, s32 count\)\s*\{)'
+        $scarletSignalIncRegex = [regex]::new($scarletSignalIncPattern)
+        if ($scarletSignalIncRegex.IsMatch($scarletArbiterText)) {
+            $scarletSignalIncInsert = @'
+
+    // [Scarlet.Perf] signal increment fast reject
     s32 fast_value{};
     if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
         fast_value != value) {
         R_THROW(ResultInvalidState);
     }
-
-    // Perform signaling.
 '@
-    if ($scarletArbiterText.Contains($scarletSignalIncAnchor.Trim())) {
-        $scarletArbiterText =
-            $scarletArbiterText.Replace($scarletSignalIncAnchor.Trim(),
-                                        $scarletSignalIncReplacement.Trim())
+            $scarletArbiterText = $scarletSignalIncRegex.Replace(
+                $scarletArbiterText,
+                '$1' + $scarletSignalIncInsert,
+                1
+            )
+        }
     }
 
-    $scarletSignalModifyAnchor = @'
-Result KAddressArbiter::SignalAndModifyByWaitingCountIfEqual(uint64_t addr, s32 value, s32 count) {
-    // Perform signaling.
-'@
-    $scarletSignalModifyReplacement = @'
-Result KAddressArbiter::SignalAndModifyByWaitingCountIfEqual(uint64_t addr, s32 value, s32 count) {
+    if (-not $scarletArbiterText.Contains('[Scarlet.Perf] signal modify fast reject')) {
+        $scarletSignalModifyPattern =
+            '(Result KAddressArbiter::SignalAndModifyByWaitingCountIfEqual\(uint64_t addr, s32 value, s32 count\)\s*\{)'
+        $scarletSignalModifyRegex = [regex]::new($scarletSignalModifyPattern)
+        if ($scarletSignalModifyRegex.IsMatch($scarletArbiterText)) {
+            $scarletSignalModifyInsert = @'
+
+    // [Scarlet.Perf] signal modify fast reject
     s32 fast_value{};
     if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
         fast_value != value) {
         R_THROW(ResultInvalidState);
     }
-
-    // Perform signaling.
 '@
-    if ($scarletArbiterText.Contains($scarletSignalModifyAnchor.Trim())) {
-        $scarletArbiterText =
-            $scarletArbiterText.Replace($scarletSignalModifyAnchor.Trim(),
-                                        $scarletSignalModifyReplacement.Trim())
+            $scarletArbiterText = $scarletSignalModifyRegex.Replace(
+                $scarletArbiterText,
+                '$1' + $scarletSignalModifyInsert,
+                1
+            )
+        }
     }
 
     [IO.File]::WriteAllText($scarletArbiterPath, $scarletArbiterText, $utf8)
