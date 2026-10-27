@@ -35,48 +35,58 @@ if (-not $pass.Contains('[Scarlet.FPS] presentation overlay')) {
         $pass = $pass.Replace($includeAnchor, $includeText)
     }
 
-    $drawAnchor = @'
-    const size_t layer_count = configs.size();
-    std::vector<PresentPushConstants> push_constants(layer_count);
-'@
+    $drawPattern =
+        '(?m)^(?<indent>[ \t]*)const\s+size_t\s+layer_count\s*=\s*configs\.size\(\)\s*;\s*$'
+    $drawRegex = [regex]::new(
+        $drawPattern,
+        [Text.RegularExpressions.RegexOptions]::Multiline
+    )
+    if (-not $drawRegex.IsMatch($pass)) {
+        throw 'Scarlet FPS overlay: WindowAdaptPass layer_count anchor missing'
+    }
     $drawInsert = @'
-    // [Scarlet.FPS] presentation overlay
-    // Enabled by default. Set SCARLET_FPS_OVERLAY=0 to hide it.
-    static const bool scarlet_fps_overlay = [] {
-        const char* value = std::getenv("SCARLET_FPS_OVERLAY");
-        return value == nullptr || *value == '\0' || *value != '0';
-    }();
+${indent}// [Scarlet.FPS] presentation overlay
+${indent}// Enabled by default. Set SCARLET_FPS_OVERLAY=0 to hide it.
+${indent}static const bool scarlet_fps_overlay = [] {
+${indent}    const char* value = std::getenv("SCARLET_FPS_OVERLAY");
+${indent}    return value == nullptr || *value == '\0' || *value != '0';
+${indent}}();
 
-    static thread_local auto scarlet_fps_window_start = std::chrono::steady_clock::now();
-    static thread_local u32 scarlet_fps_frames = 0;
-    static thread_local f32 scarlet_fps_value = 0.0f;
-    ++scarlet_fps_frames;
-    const auto scarlet_fps_now = std::chrono::steady_clock::now();
-    const auto scarlet_fps_elapsed =
-        std::chrono::duration<f32>(scarlet_fps_now - scarlet_fps_window_start).count();
-    if (scarlet_fps_elapsed >= 0.25f) {
-        scarlet_fps_value =
-            static_cast<f32>(scarlet_fps_frames) / scarlet_fps_elapsed;
-        scarlet_fps_frames = 0;
-        scarlet_fps_window_start = scarlet_fps_now;
-    }
+${indent}static thread_local auto scarlet_fps_window_start = std::chrono::steady_clock::now();
+${indent}static thread_local u32 scarlet_fps_frames = 0;
+${indent}static thread_local f32 scarlet_fps_value = 0.0f;
+${indent}++scarlet_fps_frames;
+${indent}const auto scarlet_fps_now = std::chrono::steady_clock::now();
+${indent}const auto scarlet_fps_elapsed =
+${indent}    std::chrono::duration<f32>(scarlet_fps_now - scarlet_fps_window_start).count();
+${indent}if (scarlet_fps_elapsed >= 0.25f) {
+${indent}    scarlet_fps_value =
+${indent}        static_cast<f32>(scarlet_fps_frames) / scarlet_fps_elapsed;
+${indent}    scarlet_fps_frames = 0;
+${indent}    scarlet_fps_window_start = scarlet_fps_now;
+${indent}}
 
-    const size_t layer_count = configs.size();
-    std::vector<PresentPushConstants> push_constants(layer_count);
+${indent}const size_t layer_count = configs.size();
 '@
-    if (-not $pass.Contains($drawAnchor.Trim())) {
-        throw 'Scarlet FPS overlay: WindowAdaptPass draw anchor missing'
-    }
-    $pass = $pass.Replace($drawAnchor.Trim(), $drawInsert.Trim())
+    $pass = $drawRegex.Replace(
+        $pass,
+        $drawInsert.TrimEnd(),
+        1
+    )
 
-    $configureAnchor = @'
-        layer_it->ConfigureDraw(device, &push_constants[i], &descriptor_sets[i], rasterizer, *sampler,
-                                image_index, configs[i], layout);
-        layer_it++;
-'@
+    $configurePattern =
+        '(?s)(?<call>layer_it->ConfigureDraw\s*\(\s*device\s*,\s*&push_constants\[i\]\s*,\s*' +
+        '&descriptor_sets\[i\]\s*,\s*rasterizer\s*,\s*\*sampler\s*,\s*image_index\s*,\s*' +
+        'configs\[i\]\s*,\s*layout\s*\)\s*;)'
+    $configureRegex = [regex]::new(
+        $configurePattern,
+        [Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    if (-not $configureRegex.IsMatch($pass)) {
+        throw 'Scarlet FPS overlay: ConfigureDraw semantic anchor missing'
+    }
     $configureInsert = @'
-        layer_it->ConfigureDraw(device, &push_constants[i], &descriptor_sets[i], rasterizer, *sampler,
-                                image_index, configs[i], layout);
+${call}
 
         // The third matrix column multiplies guest vertex Z (always zero).
         // Reuse it as fragment-stage metadata without growing push constants.
@@ -86,19 +96,25 @@ if (-not $pass.Contains('[Scarlet.FPS] presentation overlay')) {
         push_constants[i].modelview_matrix[9] = static_cast<f32>(render_area.width);
         push_constants[i].modelview_matrix[10] = static_cast<f32>(render_area.height);
         push_constants[i].modelview_matrix[11] = scarlet_draw_fps ? 1.0f : 0.0f;
-        layer_it++;
 '@
-    if (-not $pass.Contains($configureAnchor.Trim())) {
-        throw 'Scarlet FPS overlay: ConfigureDraw anchor missing'
-    }
-    $pass = $pass.Replace($configureAnchor.Trim(), $configureInsert.Trim())
+    $pass = $configureRegex.Replace(
+        $pass,
+        $configureInsert.TrimEnd(),
+        1
+    )
 
-    $stageOld = '.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,'
-    $stageNew = '.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,'
-    if (-not $pass.Contains($stageOld)) {
-        throw 'Scarlet FPS overlay: push-constant stage anchor missing'
+    if (-not $pass.Contains('VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT')) {
+        $stagePattern = '\.stageFlags\s*=\s*VK_SHADER_STAGE_VERTEX_BIT\s*,'
+        $stageRegex = [regex]::new($stagePattern)
+        if (-not $stageRegex.IsMatch($pass)) {
+            throw 'Scarlet FPS overlay: push-constant stage semantic anchor missing'
+        }
+        $pass = $stageRegex.Replace(
+            $pass,
+            '.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,',
+            1
+        )
     }
-    $pass = $pass.Replace($stageOld, $stageNew)
 
     Write-Source $passRel $pass
     Write-Host '[Scarlet PC] Native Vulkan FPS overlay host path installed.' -ForegroundColor Green
@@ -255,10 +271,30 @@ void main() {
 }
 '@
 
-    if (-not $shader.Contains($oldShader.Trim())) {
-        throw 'Scarlet FPS overlay: vulkan_present.frag differs from expected pinned source'
+    if ($shader.Contains($oldShader.Trim())) {
+        $shader = $shader.Replace($oldShader.Trim(), $newShader.Trim())
+    } else {
+        $mainPattern =
+            '(?s)void\s+main\s*\(\s*\)\s*\{\s*color\s*=\s*texture\s*\(\s*color_texture\s*,\s*frag_tex_coord\s*\)\s*;\s*\}'
+        $mainRegex = [regex]::new(
+            $mainPattern,
+            [Text.RegularExpressions.RegexOptions]::Singleline
+        )
+        if (-not $mainRegex.IsMatch($shader)) {
+            throw 'Scarlet FPS overlay: vulkan_present.frag semantic main anchor missing'
+        }
+
+        $shaderPrefix = $newShader.Substring(0, $newShader.IndexOf('void main()'))
+        $helperStart = $shaderPrefix.IndexOf('struct ScreenRectVertex')
+        $helpers = $shaderPrefix.Substring($helperStart)
+        if (-not $shader.Contains('[Scarlet.FPS] procedural counter')) {
+            $mainIndex = $shader.IndexOf('void main()')
+            $shader = $shader.Insert($mainIndex, $helpers + [Environment]::NewLine)
+        }
+
+        $newMain = $newShader.Substring($newShader.IndexOf('void main()'))
+        $shader = $mainRegex.Replace($shader, $newMain.Trim(), 1)
     }
-    $shader = $shader.Replace($oldShader.Trim(), $newShader.Trim())
     Write-Source $shaderRel $shader
     Write-Host '[Scarlet PC] Native Vulkan FPS badge shader installed.' -ForegroundColor Green
 } else {
