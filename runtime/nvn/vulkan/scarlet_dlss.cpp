@@ -4,8 +4,9 @@
 // MIT bridge DLL only when DLSS is selected, negotiates the bridge-requested
 // Vulkan extensions before instance/device creation, and then feeds it the
 // native renderer's real Scarlet depth/motion images.
-#include "scarlet_dlss.h"
-
+//
+// Keep C++ standard headers ahead of vk.h/nvn.h: the C runtime headers expose
+// C11 stdatomic compatibility names which can otherwise collide with libstdc++.
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -14,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "scarlet_dlss.h"
 #include "../../rt.h"
 #include "../../nvidia/scarlet_dlss_bridge.h"
 #include "scarlet_temporal.h"
