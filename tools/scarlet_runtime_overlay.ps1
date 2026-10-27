@@ -5671,6 +5671,175 @@ $scarletArmRecompText = $scarletArmRecompText.Replace(
 [IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
 Write-Host '[Scarlet PC] CPU hot path: AOT long slices=1024 + inline SVC 0x10.' -ForegroundColor DarkGray
 
+# Production gameplay hot path: remove diagnostic serialization from the
+# hottest AOT/SVC paths and avoid full host re-entry when a serviced SVC resumes
+# on the same guest thread/core. Diagnostics remain opt-in through
+# SCARLET_RECOMP_COVERAGE=1.
+$scarletArmRecompPath = Join-Path $SourceDir 'src\core\arm\recomp\arm_recomp.cpp'
+$scarletArmRecompText = [IO.File]::ReadAllText($scarletArmRecompPath)
+
+if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] sampled SVC histogram')) {
+    $recordSvcOld = @'
+    void RecordSvc(u32 num) {
+        std::scoped_lock lk{hist_lock};
+        ++svc_numbers[num];
+    }
+'@
+    $recordSvcNew = @'
+    void RecordSvc(u32 num) {
+        // [Scarlet.Perf] sampled SVC histogram
+        // Full per-SVC accounting used to take hist_lock for every guest SVC.
+        // Scarlet issues thousands of synchronization SVCs per second across
+        // multiple guest cores, turning diagnostic telemetry into a global
+        // serialization point. Keep exact accounting only when explicitly
+        // requested; normal gameplay samples one call in 1024.
+        static const bool full_coverage = [] {
+            const char* value = std::getenv("SCARLET_RECOMP_COVERAGE");
+            return value && *value && *value != '0';
+        }();
+        if (!full_coverage) {
+            static thread_local u32 sample_counter = 0;
+            if ((++sample_counter & 0x3FFu) != 0) {
+                return;
+            }
+        }
+        std::scoped_lock lk{hist_lock};
+        svc_numbers[num] += full_coverage ? 1 : 1024;
+    }
+'@
+    if (-not $scarletArmRecompText.Contains($recordSvcOld.Trim())) {
+        throw 'Scarlet runtime overlay: RecordSvc hot-path anchor missing'
+    }
+    $scarletArmRecompText =
+        $scarletArmRecompText.Replace($recordSvcOld.Trim(), $recordSvcNew.Trim())
+    Write-Host '[Scarlet PC] Removed per-SVC global telemetry lock from gameplay hot path.' -ForegroundColor Green
+}
+
+if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] thread-local early dispatch logging')) {
+    $earlyOld = @'
+        static std::atomic<u64> early_dispatches{0};
+        const u64 early_dispatch = early_dispatches.fetch_add(1, std::memory_order_relaxed);
+        if (early_dispatch < 64) {
+'@
+    $earlyNew = @'
+        // [Scarlet.Perf] thread-local early dispatch logging
+        // This is startup diagnostics only; a shared atomic here caused needless
+        // cache-line ping-pong between guest CPU cores for the entire run.
+        static thread_local u32 early_dispatches = 0;
+        const u32 early_dispatch = early_dispatches;
+        if (early_dispatches < 8) {
+            ++early_dispatches;
+        }
+        if (early_dispatch < 8) {
+'@
+    if ($scarletArmRecompText.Contains($earlyOld.Trim())) {
+        $scarletArmRecompText =
+            $scarletArmRecompText.Replace($earlyOld.Trim(), $earlyNew.Trim())
+        Write-Host '[Scarlet PC] Removed shared early-dispatch atomic from AOT hot path.' -ForegroundColor DarkGray
+    }
+}
+
+if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] hot sync SVC resume')) {
+    $runThreadOld = @'
+HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+    // A context switch voids any outstanding reservation. A thread preempted
+'@
+    $runThreadNew = @'
+HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+    // [Scarlet.Perf] hot sync SVC resume
+    // pending_svc remains set until the dispatch loop clears it. On same-thread
+    // re-entry after a synchronization SVC, the process page table cannot have
+    // changed, so skip rebuilding the fastmem view. Mapping-related SVCs retain
+    // the full refresh path.
+    const bool scarlet_same_thread = impl->last_thread == thread;
+    const u32 scarlet_resume_svc = static_cast<u32>(impl->ctx.pending_svc);
+    const bool scarlet_hot_sync_resume =
+        scarlet_same_thread &&
+        (scarlet_resume_svc == 0x18 || scarlet_resume_svc == 0x1A ||
+         scarlet_resume_svc == 0x1B || scarlet_resume_svc == 0x1C ||
+         scarlet_resume_svc == 0x1D || scarlet_resume_svc == 0x34 ||
+         scarlet_resume_svc == 0x35);
+
+    // A context switch voids any outstanding reservation. A thread preempted
+'@
+    if (-not $scarletArmRecompText.Contains($runThreadOld.Trim())) {
+        throw 'Scarlet runtime overlay: ArmRecomp RunThread anchor missing'
+    }
+    $scarletArmRecompText =
+        $scarletArmRecompText.Replace($runThreadOld.Trim(), $runThreadNew.Trim())
+
+    $refreshOld = '    impl->RefreshPageTable();'
+    $refreshNew = @'
+    if (!scarlet_hot_sync_resume) {
+        impl->RefreshPageTable();
+    }
+'@.TrimEnd()
+    $refreshIndex = $scarletArmRecompText.IndexOf($refreshOld, $scarletArmRecompText.IndexOf('[Scarlet.Perf] hot sync SVC resume'))
+    if ($refreshIndex -lt 0) {
+        throw 'Scarlet runtime overlay: ArmRecomp RefreshPageTable anchor missing'
+    }
+    $scarletArmRecompText = $scarletArmRecompText.Remove($refreshIndex, $refreshOld.Length).Insert($refreshIndex, $refreshNew)
+
+    $fpOld = @'
+    if (fpx_active) {
+        RepairFpEnv("entry");
+    }
+'@
+    $fpNew = @'
+    if (fpx_active && !scarlet_hot_sync_resume) {
+        RepairFpEnv("entry");
+    }
+'@
+    $fpIndex = $scarletArmRecompText.IndexOf($fpOld.Trim(), $scarletArmRecompText.IndexOf('[Scarlet.Perf] hot sync SVC resume'))
+    if ($fpIndex -lt 0) {
+        throw 'Scarlet runtime overlay: ArmRecomp FP entry anchor missing'
+    }
+    $scarletArmRecompText = $scarletArmRecompText.Remove($fpIndex, $fpOld.Trim().Length).Insert($fpIndex, $fpNew.Trim())
+    Write-Host '[Scarlet PC] Enabled lightweight same-thread resume for synchronization SVCs.' -ForegroundColor Green
+}
+
+[IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
+
+$scarletPhysicalCorePath = Join-Path $SourceDir 'src\core\hle\kernel\physical_core.cpp'
+$scarletPhysicalCoreText = [IO.File]::ReadAllText($scarletPhysicalCorePath)
+if (-not $scarletPhysicalCoreText.Contains('[Scarlet.Perf] resume serviced SVC in-place')) {
+    $svcReturnOld = @'
+        if (supervisor_call) {
+            // Perform call.
+            Svc::Call(system, interface->GetSvcNumber());
+            return;
+        }
+'@
+    $svcReturnNew = @'
+        if (supervisor_call) {
+            // Perform call.
+            Svc::Call(system, interface->GetSvcNumber());
+
+            // [Scarlet.Perf] resume serviced SVC in-place
+            // Most Scarlet SVCs are synchronization calls. If the kernel
+            // serviced the call and resumed this exact guest thread on this
+            // exact physical core, continue immediately instead of unwinding
+            // through CpuManager and rebuilding the PhysicalCore run context.
+            // Blocking/migrating/interrupted calls still take the stock path.
+            if (&kernel.CurrentPhysicalCore() == this &&
+                GetCurrentThreadPointer(kernel) == thread &&
+                !IsInterrupted()) {
+                continue;
+            }
+            return;
+        }
+'@
+    if (-not $scarletPhysicalCoreText.Contains($svcReturnOld.Trim())) {
+        throw 'Scarlet runtime overlay: PhysicalCore SVC return anchor missing'
+    }
+    $scarletPhysicalCoreText =
+        $scarletPhysicalCoreText.Replace($svcReturnOld.Trim(), $svcReturnNew.Trim())
+    [IO.File]::WriteAllText($scarletPhysicalCorePath, $scarletPhysicalCoreText, $utf8)
+    Write-Host '[Scarlet PC] Same-core SVC resume avoids full CpuManager unwind.' -ForegroundColor Green
+}
+
+
+
 
 # Scarlet synchronization hot paths. Preserve the exact slow path whenever
 # contention exists; skip the global scheduler lock only when userspace proves
