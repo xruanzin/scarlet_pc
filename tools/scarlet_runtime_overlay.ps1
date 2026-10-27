@@ -5575,4 +5575,122 @@ if ($scarletArmRecompText.Contains($scarletInlineSvcOld.Trim())) {
     Write-Host '[Scarlet PC] Coverage now excludes inline SVC 0x10 from HLE transitions.' -ForegroundColor DarkGray
 }
 
+
+# Address-arbiter fast rejects. The slow path is unchanged whenever a wait can
+# really happen; only provably-failed conditions skip the global scheduler lock.
+$scarletArbiterPath = Join-Path $SourceDir 'src\core\hle\kernel\k_address_arbiter.cpp'
+$scarletArbiterText = [IO.File]::ReadAllText($scarletArbiterPath)
+
+if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast reject')) {
+    $scarletWaitLessAnchor = @'
+Result KAddressArbiter::WaitIfLessThan(uint64_t addr, s32 value, bool decrement, s64 timeout) {
+    // Prepare to wait.
+    KThread* cur_thread = GetCurrentThreadPointer(system.Kernel());
+'@
+    $scarletWaitLessReplacement = @'
+Result KAddressArbiter::WaitIfLessThan(uint64_t addr, s32 value, bool decrement, s64 timeout) {
+    // [Scarlet.Perf] address-arbiter fast reject
+    // Preserve termination precedence from the original slow path.
+    KThread* cur_thread = GetCurrentThreadPointer(system.Kernel());
+    if (cur_thread->IsTerminationRequested()) {
+        R_THROW(ResultTerminationRequested);
+    }
+
+    // If the userspace predicate is already false, the kernel cannot legally
+    // enqueue this thread. Return before constructing the scheduler sleep scope.
+    // The slow path re-reads/re-applies the predicate under scheduler lock.
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
+        fast_value >= value) {
+        R_THROW(ResultInvalidState);
+    }
+
+    // Prepare to wait.
+'@
+    if (-not $scarletArbiterText.Contains($scarletWaitLessAnchor.Trim())) {
+        throw 'Scarlet runtime overlay: WaitIfLessThan fast-reject anchor missing'
+    }
+    $scarletArbiterText =
+        $scarletArbiterText.Replace($scarletWaitLessAnchor.Trim(),
+                                    $scarletWaitLessReplacement.Trim())
+
+    $scarletWaitEqualAnchor = @'
+Result KAddressArbiter::WaitIfEqual(uint64_t addr, s32 value, s64 timeout) {
+    // Prepare to wait.
+    KThread* cur_thread = GetCurrentThreadPointer(system.Kernel());
+'@
+    $scarletWaitEqualReplacement = @'
+Result KAddressArbiter::WaitIfEqual(uint64_t addr, s32 value, s64 timeout) {
+    // [Scarlet.Perf] address-arbiter fast reject
+    // Preserve termination precedence from the original slow path.
+    KThread* cur_thread = GetCurrentThreadPointer(system.Kernel());
+    if (cur_thread->IsTerminationRequested()) {
+        R_THROW(ResultTerminationRequested);
+    }
+
+    // A mismatched value means the wait must fail with InvalidState. This read
+    // is a valid linearization point; if equal, the original slow path rechecks
+    // under the scheduler lock before sleeping.
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
+        fast_value != value) {
+        R_THROW(ResultInvalidState);
+    }
+
+    // Prepare to wait.
+'@
+    if (-not $scarletArbiterText.Contains($scarletWaitEqualAnchor.Trim())) {
+        throw 'Scarlet runtime overlay: WaitIfEqual fast-reject anchor missing'
+    }
+    $scarletArbiterText =
+        $scarletArbiterText.Replace($scarletWaitEqualAnchor.Trim(),
+                                    $scarletWaitEqualReplacement.Trim())
+
+    # Conditional signal variants also take the scheduler lock before checking
+    # their userspace compare. Reject mismatches early; matching values still go
+    # through the exact original atomic/scheduler path.
+    $scarletSignalIncAnchor = @'
+Result KAddressArbiter::SignalAndIncrementIfEqual(uint64_t addr, s32 value, s32 count) {
+    // Perform signaling.
+'@
+    $scarletSignalIncReplacement = @'
+Result KAddressArbiter::SignalAndIncrementIfEqual(uint64_t addr, s32 value, s32 count) {
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
+        fast_value != value) {
+        R_THROW(ResultInvalidState);
+    }
+
+    // Perform signaling.
+'@
+    if ($scarletArbiterText.Contains($scarletSignalIncAnchor.Trim())) {
+        $scarletArbiterText =
+            $scarletArbiterText.Replace($scarletSignalIncAnchor.Trim(),
+                                        $scarletSignalIncReplacement.Trim())
+    }
+
+    $scarletSignalModifyAnchor = @'
+Result KAddressArbiter::SignalAndModifyByWaitingCountIfEqual(uint64_t addr, s32 value, s32 count) {
+    // Perform signaling.
+'@
+    $scarletSignalModifyReplacement = @'
+Result KAddressArbiter::SignalAndModifyByWaitingCountIfEqual(uint64_t addr, s32 value, s32 count) {
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
+        fast_value != value) {
+        R_THROW(ResultInvalidState);
+    }
+
+    // Perform signaling.
+'@
+    if ($scarletArbiterText.Contains($scarletSignalModifyAnchor.Trim())) {
+        $scarletArbiterText =
+            $scarletArbiterText.Replace($scarletSignalModifyAnchor.Trim(),
+                                        $scarletSignalModifyReplacement.Trim())
+    }
+
+    [IO.File]::WriteAllText($scarletArbiterPath, $scarletArbiterText, $utf8)
+    Write-Host '[Scarlet PC] Address-arbiter fast rejects avoid unnecessary scheduler locks.' -ForegroundColor DarkGray
+}
+
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
