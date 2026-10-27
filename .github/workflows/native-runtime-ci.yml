@@ -62,6 +62,18 @@ jobs:
             mingw-w64-ucrt-x86_64-shaderc
             mingw-w64-ucrt-x86_64-spirv-tools
             mingw-w64-ucrt-x86_64-pkgconf
+      - name: Parse native Windows launch scripts
+        shell: powershell
+        run: |
+          $scripts = @(
+            'tools/scarlet_native_build.ps1',
+            'tools/scarlet_native_run.ps1'
+          )
+          foreach ($script in $scripts) {
+            [void][ScriptBlock]::Create((Get-Content -LiteralPath $script -Raw))
+            Write-Host "parsed $script"
+          }
+
       - name: Compile Scarlet native runtime, renderer and FidelityFX provider
         shell: msys2 {0}
         run: |
