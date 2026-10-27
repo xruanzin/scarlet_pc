@@ -1,0 +1,38 @@
+name: Scarlet native runtime CI
+
+on:
+  push:
+    branches:
+      - native/scarlet-runtime-migration
+  pull_request:
+    paths:
+      - 'runtime/scarlet_native/**'
+      - 'runtime/kernel.c'
+      - 'runtime/dispatch.c'
+      - 'runtime/rt.h'
+      - '.github/workflows/native-runtime-ci.yml'
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Provide the one SDL declaration used by the kernel syntax check
+        run: |
+          mkdir -p .ci-stubs/SDL3
+          cat > .ci-stubs/SDL3/SDL.h <<'EOF'
+          #pragma once
+          int SDL_GetNumLogicalCPUCores(void);
+          EOF
+      - name: Check native AOT bridge and native kernel hot path
+        run: |
+          clang -std=gnu11 -fsyntax-only -Wall -Wextra \
+            -I.ci-stubs -Iruntime -Iruntime/nvn \
+            runtime/scarlet_native/aot_loader.c \
+            runtime/scarlet_native/aot_execute.c \
+            runtime/dispatch.c \
+            runtime/kernel.c
+      - name: Check pinned AOT layout header by itself
+        run: |
+          printf '#include "runtime/scarlet_native/aot_abi.h"\nint main(void){return 0;}\n' > /tmp/aot_abi_check.c
+          clang -std=c11 -fsyntax-only -I. /tmp/aot_abi_check.c
