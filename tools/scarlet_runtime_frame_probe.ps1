@@ -241,73 +241,62 @@ $schedRel = 'src\video_core\renderer_vulkan\vk_scheduler.cpp'
 $sched = Read-Source $schedRel
 
 if (-not $sched.Contains('[Scarlet.FrameProbe] scheduler dispatch')) {
-    $old = @'
-    if (chunk && !chunk->Empty()) {
-        {
-'@
-    $new = @'
-    if (chunk && !chunk->Empty()) {
+    $dispatchPattern =
+        '(?s)(void Scheduler::DispatchWork\(\)\s*\{\s*if\s*\(chunk\s*&&\s*!chunk->Empty\(\)\)\s*\{)'
+    $dispatchRegex = [regex]::new(
+        $dispatchPattern,
+        [Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    if (-not $dispatchRegex.IsMatch($sched)) {
+        throw 'Scarlet frame probe: could not locate Scheduler::DispatchWork semantically'
+    }
+    $dispatchInsert = @'
+$1
         // [Scarlet.FrameProbe] scheduler dispatch
         StallProbe::Accum scarlet_dispatch_probe{
             StallProbe::dispatch_ns, &StallProbe::dispatch_count};
-        {
 '@
-    if (-not $sched.Contains($old.Trim())) {
-        throw 'Scarlet frame probe: DispatchWork anchor missing'
-    }
-    $sched = $sched.Replace($old.Trim(), $new.Trim())
+    $sched = $dispatchRegex.Replace($sched, $dispatchInsert.TrimEnd(), 1)
 }
 
 if (-not $sched.Contains('[Scarlet.FrameProbe] Vulkan worker execution')) {
-    $old = @'
-            // Perform the work, tracking whether the chunk was a submission
-            // before executing.
-            const bool has_submit = work->HasSubmit();
-            work->ExecuteAll(current_cmdbuf, current_upload_cmdbuf);
-
-            // If the chunk was a submission, reallocate the command buffer.
-            if (has_submit) {
-                AllocateWorkerCommandBuffer();
-            }
-'@
-    $new = @'
-            // Perform the work, tracking whether the chunk was a submission
-            // before executing.
+    $workerPattern =
+        '(?s)(const bool has_submit\s*=\s*work->HasSubmit\(\);\s*' +
+        'work->ExecuteAll\(current_cmdbuf,\s*current_upload_cmdbuf\);)'
+    $workerRegex = [regex]::new(
+        $workerPattern,
+        [Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    if (-not $workerRegex.IsMatch($sched)) {
+        throw 'Scarlet frame probe: could not locate Vulkan worker execution semantically'
+    }
+    $workerInsert = @'
             // [Scarlet.FrameProbe] Vulkan worker execution
             StallProbe::Accum scarlet_worker_probe{
                 StallProbe::worker_exec_ns, &StallProbe::worker_exec_count};
-            const bool has_submit = work->HasSubmit();
-            work->ExecuteAll(current_cmdbuf, current_upload_cmdbuf);
-
-            // If the chunk was a submission, reallocate the command buffer.
-            if (has_submit) {
-                AllocateWorkerCommandBuffer();
-            }
+            $1
 '@
-    if (-not $sched.Contains($old.Trim())) {
-        throw 'Scarlet frame probe: WorkerThread execution anchor missing'
-    }
-    $sched = $sched.Replace($old.Trim(), $new.Trim())
+    $sched = $workerRegex.Replace($sched, $workerInsert.TrimEnd(), 1)
 }
 
 if (-not $sched.Contains('[Scarlet.FrameProbe] Vulkan queue submit path')) {
-    $old = @'
-    RecordWithUploadBuffer([signal_semaphore, wait_semaphore, signal_value,
-                            this](vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf) {
-        static constexpr VkMemoryBarrier WRITE_BARRIER{
-'@
-    $new = @'
-    RecordWithUploadBuffer([signal_semaphore, wait_semaphore, signal_value,
-                            this](vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf) {
+    $submitPattern =
+        '(?s)(RecordWithUploadBuffer\(\[signal_semaphore,\s*wait_semaphore,\s*signal_value,\s*' +
+        'this\]\(vk::CommandBuffer cmdbuf,\s*vk::CommandBuffer upload_cmdbuf\)\s*\{)'
+    $submitRegex = [regex]::new(
+        $submitPattern,
+        [Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    if (-not $submitRegex.IsMatch($sched)) {
+        throw 'Scarlet frame probe: could not locate SubmitExecution lambda semantically'
+    }
+    $submitInsert = @'
+$1
         // [Scarlet.FrameProbe] Vulkan queue submit path
         StallProbe::Accum scarlet_submit_probe{
             StallProbe::submit_ns, &StallProbe::submit_count};
-        static constexpr VkMemoryBarrier WRITE_BARRIER{
 '@
-    if (-not $sched.Contains($old.Trim())) {
-        throw 'Scarlet frame probe: SubmitExecution anchor missing'
-    }
-    $sched = $sched.Replace($old.Trim(), $new.Trim())
+    $sched = $submitRegex.Replace($sched, $submitInsert.TrimEnd(), 1)
 }
 
 Write-Source $schedRel $sched
