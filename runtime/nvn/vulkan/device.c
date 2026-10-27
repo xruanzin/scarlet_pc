@@ -956,7 +956,9 @@ static void quick_exit_handler(void) {
     if (trace) LOG("[vk] exit: waiting for the GPU\n");
     if (g_vk.dev) {
         vkDeviceWaitIdle(g_vk.dev);
-        if (trace) LOG("[vk] exit: saving the pipeline cache\n");
+        if (trace) LOG("[vk] exit: saving the pipeline cache/history\n");
+        extern void vk_pipe_history_save(void);
+        vk_pipe_history_save();
         vk_pipeline_cache_save();
     }
     if (trace) LOG("[vk] exit: terminating\n");
