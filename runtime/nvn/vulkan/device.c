@@ -21,6 +21,7 @@
 #include "../../ui/menu.h"
 #include "vk.h"
 #include "scarlet_fsr3.h"
+#include "scarlet_fsr4.h"
 #include "../output_scale.h"
 #include "../renderer.h"
 
@@ -705,7 +706,10 @@ void backend_present(NvnTexture *t) {
     vk_end_pass();
 
     const bool native_fsr3 = scarlet_fsr3_requested();
-    if (native_fsr3)
+    const bool native_fsr4 = scarlet_fsr4_requested();
+    if (native_fsr4)
+        b = scarlet_fsr4_upscale(b);
+    else if (native_fsr3)
         b = scarlet_fsr3_upscale(b);
 
     static const float black[4] = {0, 0, 0, 1};
@@ -714,7 +718,7 @@ void backend_present(NvnTexture *t) {
     // interpolated frames back through FSR temporal history.
     TexBackend *hold = NULL;
     extern bool vk_interp_render(TexBackend *b, TexBackend **hold);
-    bool two = native_fsr3 ? false : vk_interp_render(b, &hold);
+    bool two = (native_fsr3 || native_fsr4) ? false : vk_interp_render(b, &hold);
     static uint64_t last_present, period = 33333333;
     if (last_present && t0 - last_present > 5000000 && t0 - last_present < 100000000) period = (period * 7 + (t0 - last_present)) / 8;
     last_present = t0;
@@ -965,7 +969,8 @@ static void quick_exit_handler(void) {
         if (trace) LOG("[vk] exit: saving the pipeline cache/history\n");
         extern void vk_pipe_history_save(void);
         vk_pipe_history_save();
-        scarlet_fsr3_shutdown();
+        scarlet_fsr4_shutdown();
+    scarlet_fsr3_shutdown();
     vk_pipeline_cache_save();
     }
     if (trace) LOG("[vk] exit: terminating\n");

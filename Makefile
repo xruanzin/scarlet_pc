@@ -34,6 +34,8 @@ FSR_C_SRC := \
     $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_descriptor.c
 FSR_CPP_SRC := \
     $(FSR_VK_DIR)/src/ffx_vk_fsr3_portable.cpp \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr4_v07.cpp \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr4_v07_assets.cpp \
     $(FSR114_ROOT)/src/shared/ffx_assert.cpp \
     $(FSR114_ROOT)/src/shared/ffx_message.cpp \
     $(FSR114_ROOT)/src/shared/ffx_object_management.cpp \

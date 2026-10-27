@@ -82,6 +82,20 @@ if ([string]::IsNullOrWhiteSpace($AotDir)) {
     }
 }
 
+# Preserve an existing FSR4 v07 asset set when the legacy package already has it.
+foreach ($fsr4Source in @(
+    (Join-Path $repoRoot 'dist\ScarletPC-Independent\assets\fsr4-v07'),
+    (Join-Path $repoRoot 'assets\fsr4-v07')
+)) {
+    if (Test-Path $fsr4Source -PathType Container) {
+        $fsr4Dest = Join-Path $buildDir 'assets\fsr4-v07'
+        New-Item -ItemType Directory -Force -Path $fsr4Dest | Out-Null
+        Copy-Item (Join-Path $fsr4Source '*') $fsr4Dest -Recurse -Force
+        Write-Host "[native] Reused FSR4 v07 assets from $fsr4Source" -ForegroundColor DarkGreen
+        break
+    }
+}
+
 if (-not [string]::IsNullOrWhiteSpace($AotDir)) {
     $resolvedAot = (Resolve-Path $AotDir).Path
     $outAot = Join-Path $buildDir 'aot'
