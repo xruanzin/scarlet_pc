@@ -378,9 +378,16 @@ $armRel = 'src\core\arm\recomp\arm_recomp.cpp'
 $arm = Read-Source $armRel
 
 if (-not $arm.Contains('[Scarlet.FrameProbe] AOT timing')) {
-    $globalAnchor = 'std::atomic<u64> g_fpx_env_repairs{0};'
-    $globalNew = @'
-std::atomic<u64> g_fpx_env_repairs{0};
+    $armOriginal = $arm
+    $armProbeOk = $true
+
+    # Global timing state. Match spacing semantically because preserved runtime
+    # trees may have been formatted or patched by older Scarlet overlays.
+    $globalPattern = '(std::atomic\s*<\s*u64\s*>\s+g_fpx_env_repairs\s*\{\s*0\s*\}\s*;)'
+    $globalRegex = [regex]::new($globalPattern)
+    if ($globalRegex.IsMatch($arm)) {
+        $globalInsert = @'
+$1
 
 // [Scarlet.FrameProbe] AOT timing
 const bool kScarletFrameProbe = [] {
@@ -397,30 +404,25 @@ u64 ScarletProfileNow() {
         std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 '@
-    if (-not $arm.Contains($globalAnchor)) {
-        throw 'Scarlet frame probe: ArmRecomp global anchor missing'
+        $arm = $globalRegex.Replace($arm, $globalInsert.TrimEnd(), 1)
+    } else {
+        $armProbeOk = $false
+        Write-Host '[Scarlet PC] Frame probe: AOT global timing anchor differs; skipping AOT sub-probe.' -ForegroundColor Yellow
     }
-    $arm = $arm.Replace($globalAnchor, $globalNew.TrimEnd())
 
-    $totalAnchor = @'
-u64 TotalStaticBlocks() {
-    std::scoped_lock lk{g_tally_lock};
-    u64 sum = g_retired_blocks.load(std::memory_order_relaxed);
-    for (const ThreadBlocks* s : g_tallies) {
-        sum += s->n.load(std::memory_order_relaxed);
-    }
-    return sum;
-}
-'@
-    $totalNew = @'
-u64 TotalStaticBlocks() {
-    std::scoped_lock lk{g_tally_lock};
-    u64 sum = g_retired_blocks.load(std::memory_order_relaxed);
-    for (const ThreadBlocks* s : g_tallies) {
-        sum += s->n.load(std::memory_order_relaxed);
-    }
-    return sum;
-}
+    # Append the periodic CPU report after TotalStaticBlocks() rather than
+    # replacing its exact implementation. This tolerates earlier tally changes.
+    if ($armProbeOk) {
+        $totalPattern =
+            '(?s)(u64\s+TotalStaticBlocks\s*\(\s*\)\s*\{.*?\r?\n\})' +
+            '(?=\s*\r?\n\s*template\s*<\s*typename\s+Map\s*>)'
+        $totalRegex = [regex]::new(
+            $totalPattern,
+            [Text.RegularExpressions.RegexOptions]::Singleline
+        )
+        if ($totalRegex.IsMatch($arm)) {
+            $totalInsert = @'
+$1
 
 void MaybeReportScarletCpuProfile() {
     if (!kScarletFrameProbe) {
@@ -463,31 +465,39 @@ void MaybeReportScarletCpuProfile() {
             delta_blocks, mblocks_s,
             static_cast<double>(svc_gap_ns) * 1.0e-6, svc_gaps);
     }
-
 }
 '@
-    if (-not $arm.Contains($totalAnchor.Trim())) {
-        throw 'Scarlet frame probe: TotalStaticBlocks anchor missing'
+            $arm = $totalRegex.Replace($arm, $totalInsert.TrimEnd(), 1)
+        } else {
+            $armProbeOk = $false
+            Write-Host '[Scarlet PC] Frame probe: TotalStaticBlocks shape differs; skipping AOT sub-probe.' -ForegroundColor Yellow
+        }
     }
-    $arm = $arm.Replace($totalAnchor.Trim(), $totalNew.Trim())
 
-    $memberAnchor = @'
-    Kernel::KThread* last_thread{};
-    std::size_t core_index{};
-'@
-    $memberNew = @'
-    Kernel::KThread* last_thread{};
+    # Add one timestamp field beside the existing per-core last-thread state.
+    if ($armProbeOk) {
+        $memberPattern = '(Kernel::KThread\s*\*\s*last_thread\s*\{\s*\}\s*;)'
+        $memberRegex = [regex]::new($memberPattern)
+        if ($memberRegex.IsMatch($arm)) {
+            $memberInsert = @'
+$1
     u64 scarlet_svc_depart_ns{};
-    std::size_t core_index{};
 '@
-    if (-not $arm.Contains($memberAnchor.Trim())) {
-        throw 'Scarlet frame probe: ArmRecomp Impl member anchor missing'
+            $arm = $memberRegex.Replace($arm, $memberInsert.TrimEnd(), 1)
+        } else {
+            $armProbeOk = $false
+            Write-Host '[Scarlet PC] Frame probe: ArmRecomp per-core state differs; skipping AOT sub-probe.' -ForegroundColor Yellow
+        }
     }
-    $arm = $arm.Replace($memberAnchor.Trim(), $memberNew.Trim())
 
-    $runAnchor = 'HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {'
-    $runNew = @'
-HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+    # Instrument RunThread entry semantically.
+    if ($armProbeOk) {
+        $runPattern =
+            '(HaltReason\s+ArmRecomp::RunThread\s*\(\s*Kernel::KThread\s*\*\s*thread\s*\)\s*\{)'
+        $runRegex = [regex]::new($runPattern)
+        if ($runRegex.IsMatch($arm)) {
+            $runInsert = @'
+$1
     if (kScarletFrameProbe) {
         const u64 now = ScarletProfileNow();
         if (impl->scarlet_svc_depart_ns != 0) {
@@ -499,52 +509,85 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
         MaybeReportScarletCpuProfile();
     }
 '@
-    if (-not $arm.Contains($runAnchor)) {
-        throw 'Scarlet frame probe: RunThread anchor missing'
-    }
-    $arm = $arm.Replace($runAnchor, $runNew.TrimEnd())
-
-    $blockAnchor = '        block(&impl->ctx);'
-    $blockNew = @'
-        const u64 scarlet_aot_start = kScarletFrameProbe ? ScarletProfileNow() : 0;
-        block(&impl->ctx);
-        if (kScarletFrameProbe) {
-            g_scarlet_aot_ns.fetch_add(
-                ScarletProfileNow() - scarlet_aot_start, std::memory_order_relaxed);
-            g_scarlet_aot_calls.fetch_add(1, std::memory_order_relaxed);
+            $arm = $runRegex.Replace($arm, $runInsert.TrimEnd(), 1)
+        } else {
+            $armProbeOk = $false
+            Write-Host '[Scarlet PC] Frame probe: RunThread signature differs; skipping AOT sub-probe.' -ForegroundColor Yellow
         }
-'@
-    if (-not $arm.Contains($blockAnchor)) {
-        throw 'Scarlet frame probe: AOT block call anchor missing'
     }
-    # Only the RunThread block call; StepThread has the same text later.
-    $blockIndex = $arm.IndexOf($blockAnchor)
-    $arm = $arm.Substring(0, $blockIndex) + $blockNew.TrimEnd() +
-        $arm.Substring($blockIndex + $blockAnchor.Length)
 
-    # There are several SupervisorCall returns. Patch the one in RunThread by
-    # anchoring to the SVC counter immediately before it; this remains valid
-    # after the separate inline-sync overlay has inserted its proof fast paths.
-    $svcOld = @'
-            g_counters.svc_calls.fetch_add(1, std::memory_order_relaxed);
-            g_counters.RecordSvc(static_cast<u32>(impl->ctx.pending_svc));
-            return HaltReason::SupervisorCall;
+    # Limit the remaining edits to RunThread, so StepThread's identical block()
+    # call and SupervisorCall return are never touched accidentally.
+    if ($armProbeOk) {
+        $runStart = $arm.IndexOf('HaltReason ArmRecomp::RunThread')
+        $stepStart = $arm.IndexOf('HaltReason ArmRecomp::StepThread', $runStart)
+        if ($runStart -lt 0 -or $stepStart -le $runStart) {
+            $armProbeOk = $false
+            Write-Host '[Scarlet PC] Frame probe: RunThread boundaries differ; skipping AOT sub-probe.' -ForegroundColor Yellow
+        } else {
+            $prefix = $arm.Substring(0, $runStart)
+            $runText = $arm.Substring($runStart, $stepStart - $runStart)
+            $suffix = $arm.Substring($stepStart)
+
+            $blockPattern = '(?m)^([ \t]*)block\s*\(\s*&impl->ctx\s*\)\s*;'
+            $blockRegex = [regex]::new(
+                $blockPattern,
+                [Text.RegularExpressions.RegexOptions]::Multiline
+            )
+            if ($blockRegex.IsMatch($runText)) {
+                $blockInsert = @'
+$1const u64 scarlet_aot_start = kScarletFrameProbe ? ScarletProfileNow() : 0;
+$1block(&impl->ctx);
+$1if (kScarletFrameProbe) {
+$1    g_scarlet_aot_ns.fetch_add(
+$1        ScarletProfileNow() - scarlet_aot_start, std::memory_order_relaxed);
+$1    g_scarlet_aot_calls.fetch_add(1, std::memory_order_relaxed);
+$1}
 '@
-    $svcNew = @'
-            g_counters.svc_calls.fetch_add(1, std::memory_order_relaxed);
-            g_counters.RecordSvc(static_cast<u32>(impl->ctx.pending_svc));
+                $runText = $blockRegex.Replace($runText, $blockInsert.TrimEnd(), 1)
+            } else {
+                $armProbeOk = $false
+                Write-Host '[Scarlet PC] Frame probe: AOT dispatch call differs; skipping AOT sub-probe.' -ForegroundColor Yellow
+            }
+
+            if ($armProbeOk) {
+                $svcPattern =
+                    '(?s)(g_counters\.svc_calls\.fetch_add\(\s*1\s*,\s*std::memory_order_relaxed\s*\)\s*;\s*' +
+                    'g_counters\.RecordSvc\(\s*static_cast<u32>\(\s*impl->ctx\.pending_svc\s*\)\s*\)\s*;)' +
+                    '(\s*return\s+HaltReason::SupervisorCall\s*;)'
+                $svcRegex = [regex]::new(
+                    $svcPattern,
+                    [Text.RegularExpressions.RegexOptions]::Singleline
+                )
+                if ($svcRegex.IsMatch($runText)) {
+                    $svcInsert = @'
+$1
             if (kScarletFrameProbe) {
                 impl->scarlet_svc_depart_ns = ScarletProfileNow();
-            }
-            return HaltReason::SupervisorCall;
+            }$2
 '@
-    if (-not $arm.Contains($svcOld.Trim())) {
-        throw 'Scarlet frame probe: RunThread SVC return anchor missing'
-    }
-    $arm = $arm.Replace($svcOld.Trim(), $svcNew.Trim())
+                    $runText = $svcRegex.Replace($runText, $svcInsert.TrimEnd(), 1)
+                } else {
+                    $armProbeOk = $false
+                    Write-Host '[Scarlet PC] Frame probe: SVC exit shape differs; skipping AOT sub-probe.' -ForegroundColor Yellow
+                }
+            }
 
-    Write-Source $armRel $arm
-    Write-Host '[Scarlet PC] Frame probe: AOT chain + SVC host-gap timing added.' -ForegroundColor DarkGray
+            if ($armProbeOk) {
+                $arm = $prefix + $runText + $suffix
+            }
+        }
+    }
+
+    if ($armProbeOk) {
+        Write-Source $armRel $arm
+        Write-Host '[Scarlet PC] Frame probe: AOT chain + SVC host-gap timing added.' -ForegroundColor DarkGray
+    } else {
+        # Do not let an optional CPU sub-probe block the Vulkan profiler or the
+        # batching optimization. Restore the untouched ARM source for this run.
+        $arm = $armOriginal
+        Write-Host '[Scarlet PC] Frame probe: Vulkan metrics active; AOT sub-probe skipped for this preserved runtime.' -ForegroundColor Yellow
+    }
 }
 
 Write-Host '[Scarlet PC] Vulkan batching v2 + frame probe overlay applied.' -ForegroundColor Green
