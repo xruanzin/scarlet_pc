@@ -269,4 +269,54 @@ KThread* cur_thread = GetCurrentThreadPointer(kernel);
 }
 
 
+
+
+# LAS/Let's Go ArbitrateLock precheck: if userspace no longer contains
+# owner|WAITERS_BIT, Horizon's WaitForAddress returns success immediately.
+# Do the same in ArmRecomp so this common retry case never leaves AOT.
+$scarletArmRecompPath = Join-Path $SourceDir 'src\core\arm\recomp\arm_recomp.cpp'
+$scarletArmRecompText = [IO.File]::ReadAllText($scarletArmRecompPath)
+
+if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] LetsGo ArbitrateLock fast return')) {
+    $svcLogAnchor =
+        '            LOG_TRACE(Core_ARM, "recomp SVC {} at pc={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x}",'
+    if (-not $scarletArmRecompText.Contains($svcLogAnchor)) {
+        throw 'Scarlet ports parity: ArmRecomp SVC log anchor missing'
+    }
+
+    $lockFast = @'
+            // [Scarlet.Perf] LetsGo ArbitrateLock fast return
+            //
+            // svcArbitrateLock(x0=owner handle, x1=mutex address, x2=tag).
+            // letsgo-recomp first reads the userspace word and returns success
+            // whenever it is no longer owner|WAITERS_BIT. The SDK then retries
+            // its CAS loop. Mirror that exact cheap case here before HLE.
+            if (svc_number == 0x1A && !Kernel::LockTrace::Enabled() &&
+                !thread->IsTerminationRequested()) {
+                constexpr u32 ScarletHandleWaitMask = 1u << 30;
+                const u64 address = impl->ctx.x[1];
+                const u64 user_limit = impl->bridge.address_space_max;
+                if ((address & 3u) == 0 && user_limit != 0 && address < user_limit) {
+                    const u32 owner = static_cast<u32>(impl->ctx.x[0]);
+                    const u32 current = static_cast<u32>(
+                        Impl::HostLoad(impl.get(), address, sizeof(u32)));
+                    if (current != (owner | ScarletHandleWaitMask)) {
+                        impl->ctx.x[0] = 0; // ResultSuccess
+                        impl->ctx.pending_svc = kNoPendingSvc;
+                        impl->ctx.halted = 0;
+                        continue;
+                    }
+                }
+            }
+
+'@
+    $scarletArmRecompText =
+        $scarletArmRecompText.Replace($svcLogAnchor, $lockFast + $svcLogAnchor)
+    [IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
+    Write-Host '[Scarlet PC] LetsGo-style ArbitrateLock fast return installed before HLE.' -ForegroundColor Green
+} else {
+    Write-Host '[Scarlet PC] LetsGo-style ArbitrateLock fast return already installed.' -ForegroundColor DarkGray
+}
+
+
 Write-Host '[Scarlet PC] Native-port runtime parity active: 16K slices + cached dispatch + lean telemetry.' -ForegroundColor Green
