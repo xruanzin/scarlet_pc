@@ -2265,6 +2265,8 @@ static uint32_t pipe_hist_count, pipe_hist_loaded;
 static pthread_mutex_t pipe_hist_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool pipe_hist_initialized;
 
+static uint64_t hash_words(uint64_t h, const void *p, size_t n);
+
 static bool pipe_prewarm_enabled(void) {
     static int enabled = -1;
     if (enabled < 0) {
