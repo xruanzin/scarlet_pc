@@ -1,11 +1,12 @@
 #pragma once
 
 #include <stdbool.h>
-#include "vk.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#include "vk.h"
 
 bool scarlet_fsr3_requested(void);
 

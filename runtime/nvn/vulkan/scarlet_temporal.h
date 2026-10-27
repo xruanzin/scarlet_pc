@@ -11,6 +11,10 @@
 
 #include "../nvn.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct ScarletTemporalImages {
     VkImage depth_image;
     VkFormat depth_format;
@@ -40,3 +44,7 @@ void scarlet_temporal_forget(NvnTexture *texture);
 bool scarlet_temporal_get(ScarletTemporalImages *out);
 
 void scarlet_temporal_reset(void);
+
+#ifdef __cplusplus
+}
+#endif

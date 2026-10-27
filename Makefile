@@ -18,6 +18,44 @@ endif
 # differs per arch (AArch64 hosts run the guest's FP/SIMD as inline asm, others use the portable C of simd.h), so a
 # cross build has its own generated-<arch>/ and build/<arch>/; SYSROOT is the target's root filesystem (headers, libs).
 GEN      ?= generated
+# Scarlet FSR 3.1: the same FireBurn/FSR-Vulkan portable provider used by the
+# verified legacy path, now linked directly into the native renderer.
+FSR_VK_DIR := third_party/FSR-Vulkan
+FSR114_ROOT := $(FSR_VK_DIR)/upstream/ffx-1.1.4/sdk
+FSR114_GEN_UP := $(FSR_VK_DIR)/generated/ffx-1.1.4/vk/fsr3upscaler
+FSR114_GEN_FG := $(FSR_VK_DIR)/generated/ffx-1.1.4/vk/fsr3framegeneration
+FSR230_GEN_UP := $(FSR_VK_DIR)/generated/ffx-2.3.0/vk/fsr3upscaler-q2-v2
+FSR_C_SRC := \
+    $(FSR_VK_DIR)/src/ffx_vk_portable.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_reflection.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_catalog.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_pipeline.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_bundle.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_descriptor.c
+FSR_CPP_SRC := \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr3_portable.cpp \
+    $(FSR114_ROOT)/src/shared/ffx_assert.cpp \
+    $(FSR114_ROOT)/src/shared/ffx_message.cpp \
+    $(FSR114_ROOT)/src/shared/ffx_object_management.cpp \
+    $(FSR114_ROOT)/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp \
+    $(FSR114_ROOT)/src/components/opticalflow/ffx_opticalflow.cpp \
+    $(FSR114_ROOT)/src/components/frameinterpolation/ffx_frameinterpolation.cpp \
+    $(FSR114_ROOT)/src/components/fsr3/ffx_fsr3.cpp \
+    $(FSR114_ROOT)/src/backends/vk/ffx_vk.cpp \
+    $(FSR114_ROOT)/src/backends/shared/ffx_shader_blobs.cpp \
+    $(FSR114_ROOT)/src/backends/shared/blob_accessors/ffx_fsr3upscaler_shaderblobs.cpp \
+    $(FSR114_ROOT)/src/backends/shared/blob_accessors/ffx_frameinterpolation_shaderblobs.cpp \
+    $(FSR114_ROOT)/src/backends/shared/blob_accessors/ffx_opticalflow_shaderblobs.cpp \
+    $(FSR114_ROOT)/src/shared/ffx_breadcrumbs_list.cpp
+FSR_C_OBJ := $(patsubst $(FSR_VK_DIR)/%.c,$(B)/fsr/%.o,$(FSR_C_SRC))
+FSR_CPP_OBJ := $(patsubst $(FSR_VK_DIR)/%.cpp,$(B)/fsr/%.o,$(FSR_CPP_SRC))
+FSR_OBJ := $(FSR_C_OBJ) $(FSR_CPP_OBJ)
+FSR_INC := -I$(FSR_VK_DIR)/include -I$(FSR114_ROOT)/include \
+           -I$(FSR114_ROOT)/src/shared -I$(FSR114_ROOT)/src/components \
+           -I$(FSR114_ROOT)/src/backends/shared -I$(FSR114_ROOT)/src/backends/shared/blob_accessors \
+           -I$(FSR114_GEN_UP) -I$(FSR114_GEN_FG) -I$(FSR230_GEN_UP)
+FSR_DEFS := -DFFX_VK_PORTABLE_HAS_FSR3_UPSCALER=1 -DFFX_FSR3UPSCALER=1 -DFFX_FI=1 -DFFX_OF=1
+
 ifeq ($(PLATFORM),linux)
 HOSTARCH := $(patsubst arm64,aarch64,$(shell uname -m))
 ARCH     ?= $(HOSTARCH)
@@ -101,44 +139,6 @@ BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
 BACKEND_OBJ += $(B)/rt/platform/windows_rc.o  # the .exe's icon (Explorer, taskbar)
 
-# Scarlet FSR 3.1: the same FireBurn/FSR-Vulkan portable provider used by the
-# verified legacy path, now linked directly into the native renderer.
-FSR_VK_DIR := third_party/FSR-Vulkan
-FSR114_ROOT := $(FSR_VK_DIR)/upstream/ffx-1.1.4/sdk
-FSR114_GEN_UP := $(FSR_VK_DIR)/generated/ffx-1.1.4/vk/fsr3upscaler
-FSR114_GEN_FG := $(FSR_VK_DIR)/generated/ffx-1.1.4/vk/fsr3framegeneration
-FSR230_GEN_UP := $(FSR_VK_DIR)/generated/ffx-2.3.0/vk/fsr3upscaler-q2-v2
-FSR_C_SRC := \
-    $(FSR_VK_DIR)/src/ffx_vk_portable.c \
-    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_reflection.c \
-    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_catalog.c \
-    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_pipeline.c \
-    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_bundle.c \
-    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_descriptor.c
-FSR_CPP_SRC := \
-    $(FSR_VK_DIR)/src/ffx_vk_fsr3_portable.cpp \
-    $(FSR114_ROOT)/src/shared/ffx_assert.cpp \
-    $(FSR114_ROOT)/src/shared/ffx_message.cpp \
-    $(FSR114_ROOT)/src/shared/ffx_object_management.cpp \
-    $(FSR114_ROOT)/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp \
-    $(FSR114_ROOT)/src/components/opticalflow/ffx_opticalflow.cpp \
-    $(FSR114_ROOT)/src/components/frameinterpolation/ffx_frameinterpolation.cpp \
-    $(FSR114_ROOT)/src/components/fsr3/ffx_fsr3.cpp \
-    $(FSR114_ROOT)/src/backends/vk/ffx_vk.cpp \
-    $(FSR114_ROOT)/src/backends/shared/ffx_shader_blobs.cpp \
-    $(FSR114_ROOT)/src/backends/shared/blob_accessors/ffx_fsr3upscaler_shaderblobs.cpp \
-    $(FSR114_ROOT)/src/backends/shared/blob_accessors/ffx_frameinterpolation_shaderblobs.cpp \
-    $(FSR114_ROOT)/src/backends/shared/blob_accessors/ffx_opticalflow_shaderblobs.cpp \
-    $(FSR114_ROOT)/src/shared/ffx_breadcrumbs_list.cpp
-FSR_C_OBJ := $(patsubst $(FSR_VK_DIR)/%.c,$(B)/fsr/%.o,$(FSR_C_SRC))
-FSR_CPP_OBJ := $(patsubst $(FSR_VK_DIR)/%.cpp,$(B)/fsr/%.o,$(FSR_CPP_SRC))
-FSR_OBJ := $(FSR_C_OBJ) $(FSR_CPP_OBJ)
-FSR_INC := -I$(FSR_VK_DIR)/include -I$(FSR114_ROOT)/include \
-           -I$(FSR114_ROOT)/src/shared -I$(FSR114_ROOT)/src/components \
-           -I$(FSR114_ROOT)/src/backends/shared -I$(FSR114_ROOT)/src/backends/shared/blob_accessors \
-           -I$(FSR114_GEN_UP) -I$(FSR114_GEN_FG) -I$(FSR230_GEN_UP)
-FSR_DEFS := -DFFX_VK_PORTABLE_HAS_FSR3_UPSCALER=1 -DFFX_FSR3UPSCALER=1 -DFFX_FI=1 -DFFX_OF=1
-CXXFLAGS += -I$(FSR_VK_DIR)/include
 WINDRES  ?= windres
 IMGUI_OBJ += $(B)/imgui/imgui_impl_vulkan.o
 UIFLAGS  := -x c++ $(OSFLAGS)  # the .mm UI sources are plain C++
@@ -210,7 +210,7 @@ RT_REV_STAMP := $(B)/rt/.rev-$(RT_REV)
 # enable unsafe fast-math; graphics correctness remains governed by the shader
 # translator and guest code.
 RTFLAGS  := -O3 -g $(GENARCH) -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
-CXXFLAGS := -O3 -g $(GENARCH) -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(DEPINC)
+CXXFLAGS := -O3 -g $(GENARCH) -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -I$(FSR_VK_DIR)/include $(DEPINC)
 
 all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))
 
