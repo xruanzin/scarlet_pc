@@ -30,15 +30,11 @@ $stallRel = 'src\video_core\renderer_vulkan\vk_stall_probe.h'
 $stall = Read-Source $stallRel
 
 if (-not $stall.Contains('[Scarlet.FrameProbe] periodic frame breakdown')) {
-    $enabledOld = @'
-inline bool Enabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("SUYU_STALL_PROBE");
-        return value && *value && *value != '0';
-    }();
-    return enabled;
-}
-'@
+    $enabledPattern = '(?s)inline bool Enabled\(\)\s*\{\s*static const bool enabled\s*=\s*\[\]\s*\{.*?\}\(\);\s*return enabled;\s*\}'
+    $enabledRegex = [regex]::new(
+        $enabledPattern,
+        [Text.RegularExpressions.RegexOptions]::Singleline
+    )
     $enabledNew = @'
 inline bool Enabled() {
     static const bool enabled = [] {
@@ -55,15 +51,18 @@ inline bool Enabled() {
     return enabled;
 }
 '@
-    if (-not $stall.Contains($enabledOld.Trim())) {
-        throw 'Scarlet frame probe: StallProbe::Enabled anchor missing'
+    if (-not $enabledRegex.IsMatch($stall)) {
+        throw 'Scarlet frame probe: could not locate StallProbe::Enabled semantically'
     }
-    $stall = $stall.Replace($enabledOld.Trim(), $enabledNew.Trim())
+    $stall = $enabledRegex.Replace($stall, $enabledNew.Trim(), 1)
 
-    $counterOld = @'
-inline std::atomic<u64> draw_flush_ns{0}, pipeline_lookup_ns{0}, pipeline_configure_ns{0},
-    draw_record_ns{0};
-'@
+    $counterPattern =
+        'inline std::atomic<u64>\s+draw_flush_ns\{0\},\s*pipeline_lookup_ns\{0\},\s*' +
+        'pipeline_configure_ns\{0\},\s*draw_record_ns\{0\};'
+    $counterRegex = [regex]::new(
+        $counterPattern,
+        [Text.RegularExpressions.RegexOptions]::Singleline
+    )
     $counterNew = @'
 inline std::atomic<u64> draw_flush_ns{0}, pipeline_lookup_ns{0}, pipeline_configure_ns{0},
     draw_record_ns{0};
@@ -72,10 +71,10 @@ inline std::atomic<u64> worker_exec_ns{0}, worker_exec_count{0};
 inline std::atomic<u64> submit_ns{0}, submit_count{0};
 inline std::atomic<u64> gpu_wait_ns{0}, gpu_wait_count{0};
 '@
-    if (-not $stall.Contains($counterOld.Trim())) {
-        throw 'Scarlet frame probe: StallProbe counter anchor missing'
+    if (-not $counterRegex.IsMatch($stall)) {
+        throw 'Scarlet frame probe: could not locate StallProbe counters semantically'
     }
-    $stall = $stall.Replace($counterOld.Trim(), $counterNew.Trim())
+    $stall = $counterRegex.Replace($stall, $counterNew.Trim(), 1)
 
     $reportPattern = '(?s)inline void ReportFrame\(\) \{.*?\r?\n\}\r?\n\r?\n\} // namespace Vulkan::StallProbe'
     $reportRegex = [regex]::new(
