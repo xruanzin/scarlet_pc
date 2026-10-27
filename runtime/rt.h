@@ -55,6 +55,14 @@ const char *loader_symbol_at(uint64_t addr, uint64_t *offset);
 typedef void (*HostFn)(Cpu *c);
 void dispatch_init(void);
 GuestFn dispatch_lookup(uint64_t addr);
+// Resolve only native/HLE destinations. AOT execution uses this before its
+// own module lookup so existing service implementations and overrides survive
+// the backend transition.
+GuestFn rt_dispatch_host_lookup(Cpu *c, uint64_t addr);
+
+typedef void (*RtGuestCallBackend)(Cpu *c, uint64_t addr);
+void rt_set_guest_call_backend(RtGuestCallBackend backend);
+
 void rt_hle_profile_report(void);  // interval HLE wall times, when LARECOMP_HLE_PROF is enabled
 // A generated setjmp site tail-enters this scope; continuation runs while its
 // native jump buffer is live. Guest SDK code still saves/restores guest state.

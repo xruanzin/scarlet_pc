@@ -34,6 +34,8 @@ typedef struct ScarletAotModule {
     unsigned features;
     uint64_t guest_base;
     uint64_t guest_size;
+    uint64_t guest_text_lo;
+    uint64_t guest_text_hi;
     uint64_t index_lo;
     uint64_t index_hi;
     ScarletAotBlockFn *index;
@@ -45,3 +47,4 @@ enum { SCARLET_AOT_MODULE_COUNT = 4 };
 
 ScarletAotModule *scarlet_aot_modules(void);
 ScarletAotModule *scarlet_aot_find_pc(uint64_t pc);
+void scarlet_aot_note_store(uint64_t address, uint32_t size);

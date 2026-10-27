@@ -303,6 +303,10 @@ void dispatch_init(void) {  // (after gamelib_load)
     else memset(exact_tab, 0, EXACT_TAB * sizeof *exact_tab);
     if (!exact_tab) FATAL("cannot allocate exact guest dispatch table\n");
     ntables = 0;
+    if (!g) {
+        LOG("[dispatch] native AOT owns guest lookup; HLE/override dispatch remains active\n");
+        return;
+    }
     for (uint32_t i = 0; i < g->nmods && i < GAMELIB_MAX_MODULES; i++) {
         const GameLibModule *m = &g->mods[i];
         uint64_t n = *m->count;
@@ -341,10 +345,9 @@ GuestFn dispatch_lookup(uint64_t addr) {
     return NULL;
 }
 
-static GuestFn dispatch_slow(Cpu *c, RtCallCache *site) {
-    uint64_t pc = c->pc;
+GuestFn rt_dispatch_host_lookup(Cpu *c, uint64_t pc) {
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
-        rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)
+        rt_unwind_point();
         int i = (int)((pc - HLE_BASE) / 16);
         if (i < hle_count) {
             if (__builtin_expect(hh_enabled, 0)) hhist_push(hle_slots[i].name, c);
@@ -359,6 +362,13 @@ static GuestFn dispatch_slow(Cpu *c, RtCallCache *site) {
     }
     for (int i = 0; i < override_count; i++)
         if (overrides[i].addr == pc) return overrides[i].fn;
+    return NULL;
+}
+
+static GuestFn dispatch_slow(Cpu *c, RtCallCache *site) {
+    uint64_t pc = c->pc;
+    GuestFn host = rt_dispatch_host_lookup(c, pc);
+    if (host) return host;
     GuestFn f = dispatch_lookup(pc);
     if (!f) {
         uint64_t off;
@@ -410,11 +420,18 @@ void rt_dispatch(Cpu *c) {
     __attribute__((musttail)) return f(c);
 }
 
+static RtGuestCallBackend guest_call_backend;
+
+void rt_set_guest_call_backend(RtGuestCallBackend backend) {
+    guest_call_backend = backend;
+}
+
 void guest_call(Cpu *c, uint64_t addr) {
     uint64_t lr = c->x[30];
     c->x[30] = 0;
     c->pc = addr;
-    rt_dispatch(c);
+    if (guest_call_backend) guest_call_backend(c, addr);
+    else rt_dispatch(c);
     c->x[30] = lr;
 }
 

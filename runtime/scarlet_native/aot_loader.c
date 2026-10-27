@@ -188,6 +188,7 @@ bool scarlet_aot_bind_loaded_modules(char *why, size_t why_size) {
         ScarletAotModule *a = &g_aot[i];
         a->bound = false;
         a->guest_base = a->guest_size = 0;
+        a->guest_text_lo = a->guest_text_hi = 0;
         a->index_lo = a->index_hi = 0;
         a->index = NULL;
 
@@ -205,6 +206,8 @@ bool scarlet_aot_bind_loaded_modules(char *why, size_t why_size) {
 
         a->guest_base = m->base;
         a->guest_size = m->size;
+        a->guest_text_lo = m->base + m->text_off;
+        a->guest_text_hi = a->guest_text_lo + m->text_size;
         a->set_base(m->base);
 
         uint64_t lo = 0, hi = 0;
@@ -218,6 +221,14 @@ bool scarlet_aot_bind_loaded_modules(char *why, size_t why_size) {
         a->index_hi = hi;
         a->index = index;
         a->bound = true;
+
+        // GG1 starts in VERIFY_ALWAYS after negotiation. Native AOT stores all
+        // pass through aot_execute.c, so we can move to a real generation and
+        // bump it whenever guest code writes an NSO text range. Each block then
+        // verifies once per generation instead of re-reading its instructions
+        // on every entry.
+        if (a->guard_generation)
+            __atomic_store_n(a->guard_generation, 1u, __ATOMIC_RELEASE);
 
         LOG("[native-aot] bound %-10s guest=%s base=%llx size=%llx index=[%llx,%llx)\n",
             a->name, a->guest_module, (unsigned long long)a->guest_base,
@@ -256,5 +267,20 @@ void scarlet_aot_log_status(void) {
         LOG("[native-aot] %-10s loaded=%d bound=%d ABI=%u features=0x%x base=%llx\n",
             m->name, m->library != 0, m->bound, m->abi, m->features,
             (unsigned long long)m->guest_base);
+    }
+}
+
+void scarlet_aot_note_store(uint64_t address, uint32_t size) {
+    if (!size) return;
+    uint64_t end = address + size;
+    if (end < address) end = UINT64_MAX;
+    for (int i = 0; i < SCARLET_AOT_MODULE_COUNT; ++i) {
+        ScarletAotModule *m = &g_aot[i];
+        if (!m->bound || !m->guard_generation || !m->guest_text_hi) continue;
+        if (end <= m->guest_text_lo || address >= m->guest_text_hi) continue;
+
+        uint32_t old = __atomic_load_n(m->guard_generation, __ATOMIC_RELAXED);
+        uint32_t next = (old == 0 || old >= 0xfffffffeu) ? 1u : old + 1u;
+        __atomic_store_n(m->guard_generation, next, __ATOMIC_RELEASE);
     }
 }
