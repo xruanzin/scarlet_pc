@@ -84,8 +84,14 @@ void rt_hle_profile_report(void) {
 
 // Overrides of recompiled guest functions (by address)
 #define MAX_OVERRIDE 1024
+#define OVERRIDE_TABLE 2048
 static struct { uint64_t addr; HostFn fn; const char *name; } overrides[MAX_OVERRIDE];
+static struct { uint64_t addr; HostFn fn; } override_table[OVERRIDE_TABLE];
 static int override_count;
+
+static unsigned override_hash(uint64_t addr) {
+    return (unsigned)(((addr >> 2) * UINT64_C(11400714819323198485)) >> (64 - 11));
+}
 
 // Host implementations registered by name (runtime/hle/*.c fill this via HLE_FUNC)
 typedef struct { const char *name; HostFn fn; } HleImpl;
@@ -127,6 +133,15 @@ void hle_override(uint64_t addr, HostFn fn, const char *name) {
     overrides[override_count].fn = fn;
     overrides[override_count].name = name;
     override_count++;
+
+    unsigned h = override_hash(addr);
+    while (override_table[h].addr && override_table[h].addr != addr)
+        h = (h + 1) & (OVERRIDE_TABLE - 1);
+    // Preserve the legacy "first registration wins" behavior.
+    if (!override_table[h].addr) {
+        override_table[h].fn = fn;
+        override_table[h].addr = addr;
+    }
 }
 
 // ---- recent-HLE ring. Shared histories outlive their writer threads (TLS does not).
@@ -216,13 +231,32 @@ void rt_hang_report(void) {
 }
 
 static __thread uint64_t unimpl_pc;
-static int unimpl_counts[MAX_HLE];
+static _Atomic uint64_t unimpl_counts[MAX_HLE];
+
 static void hle_unimplemented(Cpu *c) {
     int i = (int)((unimpl_pc - HLE_BASE) / 16);
-    if (unimpl_counts[i]++ < 3)
+    if (i < 0 || i >= hle_count) {
+        FATAL("[hle] invalid unimplemented slot for pc %llx\n", (unsigned long long)unimpl_pc);
+    }
+    uint64_t n = atomic_fetch_add_explicit(&unimpl_counts[i], 1, memory_order_relaxed) + 1;
+    if (n <= 3)
         LOG("[hle] UNIMPLEMENTED %s (x0=%llx x1=%llx lr=%llx) -> returning 0\n", hle_slots[i].name, c->x[0],
             c->x[1], c->x[30]);
     c->x[0] = 0;
+}
+
+uint64_t rt_hle_gap_report(void) {
+    uint64_t total = 0;
+    for (int i = 0; i < hle_count; ++i) {
+        uint64_t n = atomic_exchange_explicit(&unimpl_counts[i], 0, memory_order_relaxed);
+        if (!n) continue;
+        total += n;
+        LOG("[native-gap] HLE %-48s %llu call(s)\n",
+            hle_slots[i].name ? hle_slots[i].name : "?", (unsigned long long)n);
+    }
+    if (total)
+        LOG("[native-gap] HLE total: %llu unimplemented call(s)\n", (unsigned long long)total);
+    return total;
 }
 
 uint64_t guest_sym(const char *name) {
@@ -303,6 +337,10 @@ void dispatch_init(void) {  // (after gamelib_load)
     else memset(exact_tab, 0, EXACT_TAB * sizeof *exact_tab);
     if (!exact_tab) FATAL("cannot allocate exact guest dispatch table\n");
     ntables = 0;
+    if (!g) {
+        LOG("[dispatch] native AOT owns guest lookup; HLE/override dispatch remains active\n");
+        return;
+    }
     for (uint32_t i = 0; i < g->nmods && i < GAMELIB_MAX_MODULES; i++) {
         const GameLibModule *m = &g->mods[i];
         uint64_t n = *m->count;
@@ -341,10 +379,9 @@ GuestFn dispatch_lookup(uint64_t addr) {
     return NULL;
 }
 
-static GuestFn dispatch_slow(Cpu *c, RtCallCache *site) {
-    uint64_t pc = c->pc;
+GuestFn rt_dispatch_host_lookup(Cpu *c, uint64_t pc) {
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
-        rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)
+        rt_unwind_point();
         int i = (int)((pc - HLE_BASE) / 16);
         if (i < hle_count) {
             if (__builtin_expect(hh_enabled, 0)) hhist_push(hle_slots[i].name, c);
@@ -357,8 +394,22 @@ static GuestFn dispatch_slow(Cpu *c, RtCallCache *site) {
             return hle_unimplemented;
         }
     }
-    for (int i = 0; i < override_count; i++)
-        if (overrides[i].addr == pc) return overrides[i].fn;
+    if (pc) {
+        unsigned h = override_hash(pc);
+        for (;;) {
+            uint64_t addr = override_table[h].addr;
+            if (addr == pc) return override_table[h].fn;
+            if (!addr) break;
+            h = (h + 1) & (OVERRIDE_TABLE - 1);
+        }
+    }
+    return NULL;
+}
+
+static GuestFn dispatch_slow(Cpu *c, RtCallCache *site) {
+    uint64_t pc = c->pc;
+    GuestFn host = rt_dispatch_host_lookup(c, pc);
+    if (host) return host;
     GuestFn f = dispatch_lookup(pc);
     if (!f) {
         uint64_t off;
@@ -410,11 +461,18 @@ void rt_dispatch(Cpu *c) {
     __attribute__((musttail)) return f(c);
 }
 
+static RtGuestCallBackend guest_call_backend;
+
+void rt_set_guest_call_backend(RtGuestCallBackend backend) {
+    guest_call_backend = backend;
+}
+
 void guest_call(Cpu *c, uint64_t addr) {
     uint64_t lr = c->x[30];
     c->x[30] = 0;
     c->pc = addr;
-    rt_dispatch(c);
+    if (guest_call_backend) guest_call_backend(c, addr);
+    else rt_dispatch(c);
     c->x[30] = lr;
 }
 

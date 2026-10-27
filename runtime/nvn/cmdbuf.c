@@ -880,7 +880,14 @@ NVN(nvnCommandBufferSetDepthRange) {
     Snap s = snap(c);
     CmdRec *r = record(c, CMD_SET_DEPTH_RANGES, 8, &s);
     r->x[0] = 0; r->x[1] = 1;
-    memcpy(r->extra, s.f, 8);
+    // AArch64 passes the two scalar float arguments in s0/s1 (the low
+    // 32 bits of v0/v1). Snap intentionally stores only x0..x7, so pack
+    // these two FP arguments explicitly like the other scalar-float NVN
+    // commands instead of relying on the removed Snap::f field.
+    float depth[2];
+    memcpy(&depth[0], &c->v[0], sizeof depth[0]);
+    memcpy(&depth[1], &c->v[1], sizeof depth[1]);
+    memcpy(r->extra, depth, sizeof depth);
 }
 NVN(nvnCommandBufferSetBlendColor) { record_copy(c, CMD_SET_BLEND_COLOR, 1, 16); }
 NVN(nvnCommandBufferSetStencilRef) { Snap s = snap(c); CmdRec *r = record(c, CMD_SET_STENCIL, 0, &s); r->x[6] = 0; }

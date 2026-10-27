@@ -22,6 +22,10 @@
 #include "../nvn.h"
 #include "../maxwell/shader.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void vk_device_fault_report(void);
 void vk_pipeline_cache_save(void);  // cache/vk_pipelines.bin (any thread)
 bool vk_builds_pending(void);       // exit must not wait for a cache locked by an active driver compile
@@ -125,3 +129,7 @@ VkShaderModule vk_builtin_shader(const char *name);  // internal shaders (clear,
 
 // ---- device / window (device.c)
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h);
+
+#ifdef __cplusplus
+}
+#endif

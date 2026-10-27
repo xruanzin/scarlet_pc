@@ -18,6 +18,48 @@ endif
 # differs per arch (AArch64 hosts run the guest's FP/SIMD as inline asm, others use the portable C of simd.h), so a
 # cross build has its own generated-<arch>/ and build/<arch>/; SYSROOT is the target's root filesystem (headers, libs).
 GEN      ?= generated
+# Scarlet FSR 3.1: the same FireBurn/FSR-Vulkan portable provider used by the
+# verified legacy path, now linked directly into the native renderer.
+FSR_VK_DIR := third_party/FSR-Vulkan
+FSR114_ROOT := $(FSR_VK_DIR)/upstream/ffx-1.1.4/sdk
+FSR114_GEN_UP := $(FSR_VK_DIR)/generated/ffx-1.1.4/vk/fsr3upscaler
+FSR114_GEN_FG := $(FSR_VK_DIR)/generated/ffx-1.1.4/vk/fsr3framegeneration
+FSR230_GEN_UP := $(FSR_VK_DIR)/generated/ffx-2.3.0/vk/fsr3upscaler-q2-v2
+FSR_C_SRC := \
+    $(FSR_VK_DIR)/src/ffx_vk_portable.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_reflection.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_catalog.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_pipeline.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_bundle.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_descriptor.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr4_v07.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr4_v07_assets.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr4_v07_provider.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr4_v07_schedule.c
+FSR_CPP_SRC := \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr3_portable.cpp \
+    $(FSR114_ROOT)/src/shared/ffx_assert.cpp \
+    $(FSR114_ROOT)/src/shared/ffx_message.cpp \
+    $(FSR114_ROOT)/src/shared/ffx_object_management.cpp \
+    $(FSR114_ROOT)/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp \
+    $(FSR114_ROOT)/src/components/opticalflow/ffx_opticalflow.cpp \
+    $(FSR114_ROOT)/src/components/frameinterpolation/ffx_frameinterpolation.cpp \
+    $(FSR114_ROOT)/src/components/fsr3/ffx_fsr3.cpp \
+    $(FSR114_ROOT)/src/backends/vk/ffx_vk.cpp \
+    $(FSR114_ROOT)/src/backends/shared/ffx_shader_blobs.cpp \
+    $(FSR114_ROOT)/src/backends/shared/blob_accessors/ffx_fsr3upscaler_shaderblobs.cpp \
+    $(FSR114_ROOT)/src/backends/shared/blob_accessors/ffx_frameinterpolation_shaderblobs.cpp \
+    $(FSR114_ROOT)/src/backends/shared/blob_accessors/ffx_opticalflow_shaderblobs.cpp \
+    $(FSR114_ROOT)/src/shared/ffx_breadcrumbs_list.cpp
+FSR_C_OBJ := $(patsubst $(FSR_VK_DIR)/%.c,$(B)/fsr/%.o,$(FSR_C_SRC))
+FSR_CPP_OBJ := $(patsubst $(FSR_VK_DIR)/%.cpp,$(B)/fsr/%.o,$(FSR_CPP_SRC))
+FSR_OBJ := $(FSR_C_OBJ) $(FSR_CPP_OBJ)
+FSR_INC := -I$(FSR_VK_DIR)/include -I$(FSR114_ROOT)/include \
+           -I$(FSR114_ROOT)/src/shared -I$(FSR114_ROOT)/src/components \
+           -I$(FSR114_ROOT)/src/backends/shared -I$(FSR114_ROOT)/src/backends/shared/blob_accessors \
+           -I$(FSR114_GEN_UP) -I$(FSR114_GEN_FG) -I$(FSR230_GEN_UP)
+FSR_DEFS := -DFFX_VK_PORTABLE_HAS_FSR3_UPSCALER=1 -DFFX_FSR3UPSCALER=1 -DFFX_FI=1 -DFFX_OF=1
+
 ifeq ($(PLATFORM),linux)
 HOSTARCH := $(patsubst arm64,aarch64,$(shell uname -m))
 ARCH     ?= $(HOSTARCH)
@@ -33,7 +75,7 @@ endif
 B         ?= build
 DEPS      ?=
 # EXE_NAME: the exe's name (the release's: LetsGoRecomp); the game code library imports from the exe by it
-EXE_NAME  ?= lasrecomp
+EXE_NAME  ?= ScarletPC
 CC       := clang $(CROSS)
 CXX      := clang++ $(CROSS)
 IMGUI    := third_party/imgui
@@ -59,9 +101,11 @@ endif
 GEN_SRC  := $(wildcard $(GEN)/main/*.c) $(wildcard $(GEN)/sdk/*.c) $(wildcard $(GEN)/subsdk0/*.c)
 GEN_OBJ  := $(patsubst %.c,$(B)/obj/%.o,$(patsubst $(GEN)/%,%,$(GEN_SRC))) $(B)/obj/tools/gamelib_entry.o
 RT_SRC   := $(wildcard runtime/*.c) $(wildcard runtime/hle/*.c) $(wildcard runtime/services/*.c) \
+            $(wildcard runtime/scarlet_native/*.c) \
             $(wildcard runtime/nvn/*.c) $(wildcard runtime/nvn/maxwell/*.c) runtime/platform/$(PLATFORM).c
-RT_HDRS  := $(wildcard runtime/*.h) $(wildcard runtime/platform/*.h) $(wildcard runtime/nvn/*.h) \
-            $(wildcard runtime/nvn/maxwell/*.h) $(wildcard runtime/nvn/vulkan/*.h) $(wildcard runtime/ui/*.h)
+RT_HDRS  := $(wildcard runtime/*.h) $(wildcard runtime/platform/*.h) $(wildcard runtime/scarlet_native/*.h) \
+            $(wildcard runtime/nvn/*.h) $(wildcard runtime/nvn/maxwell/*.h) \
+            $(wildcard runtime/nvn/vulkan/*.h) $(wildcard runtime/ui/*.h)
 UI_SRC   := $(wildcard runtime/ui/*.mm)
 UI_OBJ   := $(patsubst runtime/%.mm,$(B)/rt/%.o,$(UI_SRC))
 IMGUI_OBJ := $(B)/imgui/imgui.o $(B)/imgui/imgui_draw.o $(B)/imgui/imgui_tables.o $(B)/imgui/imgui_widgets.o \
@@ -90,6 +134,10 @@ else
 EXE      := $(B)/$(EXE_NAME).exe
 DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
 OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S -DWIN32_LEAN_AND_MEAN -DNOMINMAX
+# FidelityFX 1.1.4 C++ sources use the MSVC secure CRT spelling. Apply the
+# compatibility alias only while compiling C++: putting it on C translation
+# units rewrites MinGW's own swprintf_s declaration in <wchar.h>.
+FSR_CPP_COMPAT := -include runtime/ffx_mingw_compat.h
 GENARCH  ?= -march=x86-64-v3 -mtune=znver2  # x86-v3 compatibility, scheduled for Ryzen 4000G/Zen 2
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
@@ -98,6 +146,7 @@ LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
 BACKEND_OBJ += $(B)/rt/platform/windows_rc.o  # the .exe's icon (Explorer, taskbar)
+
 WINDRES  ?= windres
 IMGUI_OBJ += $(B)/imgui/imgui_impl_vulkan.o
 UIFLAGS  := -x c++ $(OSFLAGS)  # the .mm UI sources are plain C++
@@ -169,7 +218,7 @@ RT_REV_STAMP := $(B)/rt/.rev-$(RT_REV)
 # enable unsafe fast-math; graphics correctness remains governed by the shader
 # translator and guest code.
 RTFLAGS  := -O3 -g $(GENARCH) -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
-CXXFLAGS := -O3 -g $(GENARCH) -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(DEPINC)
+CXXFLAGS := -O3 -g $(GENARCH) -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -I$(FSR_VK_DIR)/include $(DEPINC)
 
 all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))
 
@@ -218,7 +267,15 @@ $(B)/rt/%.o: runtime/%.cpp $(RT_HDRS) $(RT_REV_STAMP)
 # linked to a temp file, then renamed over: a copy of the game still running keeps its (old) file. The temp file keeps
 # the real name (in a folder of its own): on Windows the import library records the name the game code library loads
 # it by.
-$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ)
+$(B)/fsr/%.o: $(FSR_VK_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 $(GENARCH) $(OSFLAGS) $(FSR_DEFS) $(FSR_INC) -c $< -o $@
+
+$(B)/fsr/%.o: $(FSR_VK_DIR)/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) -O2 $(GENARCH) -std=c++17 $(OSFLAGS) $(FSR_DEFS) $(FSR_CPP_COMPAT) $(FSR_INC) -c $< -o $@
+
+$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(FSR_OBJ)
 	@mkdir -p $(dir $@)link
 	$(CXX) -o $(dir $@)link/$(notdir $@) $^ $(LDFLAGS)
 	mv -f $(dir $@)link/$(notdir $@) $@
@@ -255,7 +312,7 @@ gen:
 gen-objs: $(GEN_OBJ)
 
 # Runtime objects only (no generated code, no link): quick compile check
-runtime-objs: $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ)
+runtime-objs: $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(FSR_OBJ)
 
 $(B)/rt/platform/windows_rc.o: runtime/platform/windows.rc docs/icon/icon.ico
 	@mkdir -p $(dir $@)

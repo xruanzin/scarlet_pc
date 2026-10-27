@@ -5,6 +5,8 @@
 #include "hle.h"
 #include "ipc.h"
 
+#include <stdatomic.h>
+
 #ifdef __APPLE__
 extern const ServiceDef __start_services[] __asm__("section$start$__DATA$__services");
 extern const ServiceDef __stop_services[] __asm__("section$end$__DATA$__services");
@@ -16,11 +18,58 @@ __attribute__((section(".svc$a"), used)) static const ServiceDef __start_service
 __attribute__((section(".svc$z"), used)) static const ServiceDef __stop_services[1];
 #endif
 
+typedef struct {
+    char service[48];
+    uint32_t cmd;
+    uint64_t calls;
+} IpcGap;
+
+static pthread_mutex_t g_gap_lock = PTHREAD_MUTEX_INITIALIZER;
+static IpcGap g_gaps[128];
+static int g_ngaps;
+static _Atomic uint64_t g_gap_total;
+
+static void gap_note(const char *service, uint32_t cmd) {
+    atomic_fetch_add_explicit(&g_gap_total, 1, memory_order_relaxed);
+    pthread_mutex_lock(&g_gap_lock);
+    for (int i = 0; i < g_ngaps; ++i) {
+        if (g_gaps[i].cmd == cmd && !strcmp(g_gaps[i].service, service)) {
+            g_gaps[i].calls++;
+            pthread_mutex_unlock(&g_gap_lock);
+            return;
+        }
+    }
+    if (g_ngaps < (int)(sizeof g_gaps / sizeof g_gaps[0])) {
+        IpcGap *g = &g_gaps[g_ngaps++];
+        snprintf(g->service, sizeof g->service, "%s", service ? service : "?");
+        g->cmd = cmd;
+        g->calls = 1;
+    }
+    pthread_mutex_unlock(&g_gap_lock);
+}
+
 static void stub_handler(Service *s, IpcReq *req, IpcResp *resp) {
+    gap_note(s->name, req->cmd);
     LOG("[ipc] STUB %s cmd %u (in %u bytes, x%d a%d b%d c%d) -> ok\n", s->name, req->cmd, req->data_size, req->nx,
         req->na, req->nb, req->nc);
     resp->result = 0;
     resp_size(resp, 0x40);  // zeroed outputs
+}
+
+uint64_t ipc_gap_report(void) {
+    uint64_t total = atomic_exchange_explicit(&g_gap_total, 0, memory_order_relaxed);
+    if (!total) return 0;
+
+    pthread_mutex_lock(&g_gap_lock);
+    for (int i = 0; i < g_ngaps; ++i)
+        LOG("[native-gap] IPC %-32s cmd %-5u %llu call(s)\n",
+            g_gaps[i].service, g_gaps[i].cmd, (unsigned long long)g_gaps[i].calls);
+    memset(g_gaps, 0, sizeof g_gaps);
+    g_ngaps = 0;
+    pthread_mutex_unlock(&g_gap_lock);
+
+    LOG("[native-gap] IPC total: %llu stub call(s)\n", (unsigned long long)total);
+    return total;
 }
 
 Service *service_new(const char *name, ServiceHandler h, void *state) {

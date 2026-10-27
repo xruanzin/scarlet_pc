@@ -1,0 +1,80 @@
+name: Scarlet native runtime CI
+
+on:
+  push:
+    branches:
+      - native/scarlet-runtime-migration
+  pull_request:
+    paths:
+      - 'runtime/scarlet_native/**'
+      - 'runtime/nvn/vulkan/**'
+      - 'runtime/kernel.c'
+      - 'runtime/dispatch.c'
+      - 'runtime/ipc.c'
+      - 'runtime/rt.h'
+      - 'Makefile'
+      - 'tools/scarlet_native_*.ps1'
+      - '.github/workflows/native-runtime-ci.yml'
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Provide the one SDL declaration used by the kernel syntax check
+        run: |
+          mkdir -p .ci-stubs/SDL3
+          cat > .ci-stubs/SDL3/SDL.h <<'EOF'
+          #pragma once
+          int SDL_GetNumLogicalCPUCores(void);
+          EOF
+      - name: Check native AOT bridge and native kernel hot path
+        run: |
+          clang -std=gnu11 -fsyntax-only -Wall -Wextra \
+            -I.ci-stubs -Iruntime -Iruntime/nvn \
+            runtime/scarlet_native/aot_loader.c \
+            runtime/scarlet_native/aot_execute.c \
+            runtime/dispatch.c \
+            runtime/kernel.c
+      - name: Check pinned AOT layout header by itself
+        run: |
+          printf '#include "runtime/scarlet_native/aot_abi.h"\nint main(void){return 0;}\n' > /tmp/aot_abi_check.c
+          clang -std=c11 -fsyntax-only -I. /tmp/aot_abi_check.c
+
+  windows-runtime:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-lld
+            mingw-w64-ucrt-x86_64-sdl3
+            mingw-w64-ucrt-x86_64-ffmpeg
+            mingw-w64-ucrt-x86_64-vulkan-devel
+            mingw-w64-ucrt-x86_64-vulkan-memory-allocator
+            mingw-w64-ucrt-x86_64-shaderc
+            mingw-w64-ucrt-x86_64-spirv-tools
+            mingw-w64-ucrt-x86_64-pkgconf
+      - name: Parse native Windows launch scripts
+        shell: powershell
+        run: |
+          $scripts = @(
+            'tools/scarlet_native_build.ps1',
+            'tools/scarlet_native_run.ps1'
+          )
+          foreach ($script in $scripts) {
+            [void][ScriptBlock]::Create((Get-Content -LiteralPath $script -Raw))
+            Write-Host "parsed $script"
+          }
+
+      - name: Build and link ScarletPC native runtime
+        shell: msys2 {0}
+        run: |
+          make -j2 B=build/native-ci EXE_NAME=ScarletPC build/native-ci/ScarletPC.exe

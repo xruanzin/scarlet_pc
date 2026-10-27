@@ -10,6 +10,8 @@
 #include "settings.h"
 #include "hle.h"
 #include "kernel.h"
+#include "ipc.h"
+#include "scarlet_native/aot.h"
 
 const char *g_romfs_dir;
 uint64_t g_boot_started_ns;
@@ -162,6 +164,17 @@ static void reboot_idle(void) {  // (main thread, while guest threads stop) keep
 static void teardown(void) {
     uint64_t t0 = plat_now_ns();
     kernel_stop_threads(reboot_idle);
+
+    // Native gaps are migration blockers, not normal diagnostics. Their counters
+    // are touched only on a real gap, so keeping this report enabled has no hot
+    // path cost. A clean gameplay run should end with no native-gap lines.
+    uint64_t hle_gaps = rt_hle_gap_report();
+    uint64_t ipc_gaps = ipc_gap_report();
+    if (hle_gaps || ipc_gaps)
+        LOG("[native-gap] run total: %llu unresolved native call(s)\n",
+            (unsigned long long)(hle_gaps + ipc_gaps));
+    scarlet_aot_profile_report();
+    rt_hle_profile_report();
     renderthread_reset();
     backend_clear_window();
     backend_reset();
@@ -202,9 +215,51 @@ static void boot(const char *root) {
         LOG("[package] direct container: ExeFS=%s RomFS=%s image=%s\n", exefs, romfs,
             getenv("LARECOMP_ROMFS_IMAGE") ? getenv("LARECOMP_ROMFS_IMAGE") : "(default)");
 
+    const char *runtime_mode = getenv("SCARLET_RUNTIME");
+    bool native_aot = !runtime_mode || !*runtime_mode || !strcmp(runtime_mode, "native");
+    bool las_runtime = runtime_mode && !strcmp(runtime_mode, "las");
+
     char why[512];
-    if (!gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
+    if (native_aot) {
+        if (!scarlet_aot_load(root, why, sizeof why)) FATAL("%s\n", why);
+        LOG("[runtime] Scarlet Native Runtime (existing AOT ABI)\n");
+
+        // Keep the already-generated LAS game library as a migration safety net
+        // when it is present. It is never consulted on a covered AOT path; only
+        // a missing target/unhandled AOT instruction can enter it. Set
+        // SCARLET_NATIVE_LAS_FALLBACK=0 to prove a run is 100% AOT+native HLE.
+        const char *fallback = getenv("SCARLET_NATIVE_LAS_FALLBACK");
+        const bool allow_las_fallback = !fallback || !*fallback || atoi(fallback) != 0;
+        if (allow_las_fallback && gamelib_present(root)) {
+            if (gamelib_load(root, why, sizeof why))
+                LOG("[runtime] LAS fallback armed for native AOT gaps only\n");
+            else
+                LOG("[runtime] LAS fallback present but unavailable: %s\n", why);
+        } else if (!allow_las_fallback) {
+            LOG("[runtime] LAS fallback disabled; native gaps are fatal\n");
+        } else {
+            LOG("[runtime] no compatible LAS fallback found; native gaps are fatal\n");
+        }
+    } else if (las_runtime) {
+        if (!gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
+        LOG("[runtime] LAS-generated comparison backend\n");
+    } else if (runtime_mode && !strcmp(runtime_mode, "legacy")) {
+        FATAL("SCARLET_RUNTIME=legacy is the suyu fallback and must be launched via "
+              "tools/scarlet_native_run.ps1; this executable is the native runtime\n");
+    } else {
+        FATAL("unknown SCARLET_RUNTIME=%s (use native, las, or legacy via the run script)\n",
+              runtime_mode ? runtime_mode : "");
+    }
+
     loader_load(exefs);
+    if (native_aot) {
+        if (!scarlet_aot_bind_loaded_modules(why, sizeof why)) FATAL("%s\n", why);
+        rt_set_guest_call_backend(scarlet_aot_guest_call);
+        scarlet_aot_log_status();
+    } else {
+        rt_set_guest_call_backend(NULL);
+    }
+
     { extern void settings_load(void); settings_load(); }
     kernel_init();
     dispatch_init();

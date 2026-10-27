@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 
 #include "vk.h"
+#include "scarlet_temporal.h"
 #include "../astc.h"
 #include "../renderer.h"
 #include "../../platform.h"
@@ -443,6 +444,8 @@ void vk_tex_unscale(NvnTexture *t) {
 }
 
 void backend_texture_destroyed(NvnTexture *t) {
+    // Never leave the temporal bridge holding a dead guest texture.
+    scarlet_temporal_forget(t);
     TexBackend *b = t->backend;
     if (b) {
         live_remove(b);
@@ -455,6 +458,7 @@ void backend_texture_destroyed(NvnTexture *t) {
 
 // Reboot (device.c backend_reset; GPU idle): every game texture and its views go.
 void vk_textures_reset(void) {
+    scarlet_temporal_reset();
     int n = g_nlive;
     while (g_nlive > 0) backend_texture_destroyed(g_live[g_nlive - 1]);
     vk_collect_dead();

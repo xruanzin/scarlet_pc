@@ -55,7 +55,16 @@ const char *loader_symbol_at(uint64_t addr, uint64_t *offset);
 typedef void (*HostFn)(Cpu *c);
 void dispatch_init(void);
 GuestFn dispatch_lookup(uint64_t addr);
+// Resolve only native/HLE destinations. AOT execution uses this before its
+// own module lookup so existing service implementations and overrides survive
+// the backend transition.
+GuestFn rt_dispatch_host_lookup(Cpu *c, uint64_t addr);
+
+typedef void (*RtGuestCallBackend)(Cpu *c, uint64_t addr);
+void rt_set_guest_call_backend(RtGuestCallBackend backend);
+
 void rt_hle_profile_report(void);  // interval HLE wall times, when LARECOMP_HLE_PROF is enabled
+uint64_t rt_hle_gap_report(void);   // reports+resets only actual unimplemented calls
 // A generated setjmp site tail-enters this scope; continuation runs while its
 // native jump buffer is live. Guest SDK code still saves/restores guest state.
 void rt_guest_setjmp(Cpu *c, GuestFn setup, GuestFn continuation, uint64_t return_pc);
@@ -74,6 +83,7 @@ KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio
 void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4);
 uint32_t kernel_current_thread_handle(void);
 Cpu *kernel_current_cpu(void);
+void kernel_profile_report(void);
 
 // ---- ipc.c
 typedef struct Service Service;

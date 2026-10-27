@@ -1,6 +1,7 @@
 // A small Horizon kernel: handles, threads, synchronization, memory, and the SVC dispatcher.
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <SDL3/SDL.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -297,6 +298,83 @@ KThread *kernel_current_thread(void) { return t_cur; }
 
 static uint32_t *u32p(uint64_t a) { return (uint32_t *)(uintptr_t)a; }
 
+// Opt-in synchronization profiling. Production play never touches these
+// counters unless SCARLET_NATIVE_PROFILE or LARECOMP_PROF_LOCKS is enabled.
+typedef struct {
+    _Atomic uint64_t mutex_contended;
+    _Atomic uint64_t mutex_spin_handoff;
+    _Atomic uint64_t mutex_blocked;
+    _Atomic uint64_t mutex_wait_ns;
+    _Atomic uint64_t cond_waits;
+    _Atomic uint64_t cond_wait_ns;
+    _Atomic uint64_t arbiter_waits;
+    _Atomic uint64_t arbiter_wait_ns;
+} SyncProfile;
+static SyncProfile g_sync_prof;
+static _Atomic int g_sync_prof_enabled = -1;
+
+static bool sync_profile_enabled(void) {
+    int v = atomic_load_explicit(&g_sync_prof_enabled, memory_order_relaxed);
+    if (v >= 0) return v != 0;
+    const bool enabled = ENV("SCARLET_NATIVE_PROFILE") || ENV("LARECOMP_PROF_LOCKS");
+    int expected = -1;
+    atomic_compare_exchange_strong_explicit(&g_sync_prof_enabled, &expected, enabled ? 1 : 0,
+                                            memory_order_relaxed, memory_order_relaxed);
+    return atomic_load_explicit(&g_sync_prof_enabled, memory_order_relaxed) != 0;
+}
+
+void kernel_profile_report(void) {
+    if (!sync_profile_enabled()) return;
+#define SYNC_TAKE(name) atomic_exchange_explicit(&g_sync_prof.name, 0, memory_order_relaxed)
+    uint64_t contended = SYNC_TAKE(mutex_contended);
+    uint64_t spin = SYNC_TAKE(mutex_spin_handoff);
+    uint64_t blocked = SYNC_TAKE(mutex_blocked);
+    uint64_t mutex_ns = SYNC_TAKE(mutex_wait_ns);
+    uint64_t cv = SYNC_TAKE(cond_waits);
+    uint64_t cv_ns = SYNC_TAKE(cond_wait_ns);
+    uint64_t arb = SYNC_TAKE(arbiter_waits);
+    uint64_t arb_ns = SYNC_TAKE(arbiter_wait_ns);
+#undef SYNC_TAKE
+    if (!contended && !cv && !arb) return;
+    LOG("[native-sync] mutex contended=%llu spin-handoff=%llu blocked=%llu wait=%.3fms "
+        "cv=%llu/%.3fms arbiter=%llu/%.3fms\n",
+        (unsigned long long)contended, (unsigned long long)spin,
+        (unsigned long long)blocked, mutex_ns / 1e6,
+        (unsigned long long)cv, cv_ns / 1e6,
+        (unsigned long long)arb, arb_ns / 1e6);
+}
+
+// Let's Go measured that a Windows sleep/wake is more expensive than the
+// lifetime of many hot guest mutexes. Spin only for a short bounded window,
+// and only by default when the host has enough logical CPUs that the waiter is
+// unlikely to steal the owner's only execution slot.
+#if defined(__x86_64__) || defined(_M_X64)
+#define SCARLET_CPU_RELAX() __builtin_ia32_pause()
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define SCARLET_CPU_RELAX() __asm__ volatile("yield")
+#else
+#define SCARLET_CPU_RELAX() ((void)0)
+#endif
+
+static uint64_t lock_spin_ns(void) {
+    static _Atomic int64_t cached = -1;
+    int64_t value = atomic_load_explicit(&cached, memory_order_acquire);
+    if (value >= 0) return (uint64_t)value;
+
+    const char *e = getenv("SCARLET_LOCK_SPIN_US");
+    if (!e || !*e) e = getenv("LARECOMP_LOCK_SPIN_US");
+    long us = e && *e ? atol(e) : 40;
+    if ((!e || !*e) && SDL_GetNumLogicalCPUCores() < 4) us = 0;
+    if (us < 0) us = 0;
+    if (us > 1000) us = 1000;  // never turn a short fast path into busy waiting
+
+    int64_t ns = (int64_t)us * 1000;
+    int64_t expected = -1;
+    atomic_compare_exchange_strong_explicit(&cached, &expected, ns,
+                                            memory_order_release, memory_order_relaxed);
+    return (uint64_t)atomic_load_explicit(&cached, memory_order_acquire);
+}
+
 // Try to take mutex `m` for `tag`, or mark it contended. Returns true if acquired. Uses CAS so a
 // concurrent user-space unlock (owner storing 0) is never overwritten.
 static bool mutex_acquire_or_mark(uint64_t m, uint32_t tag) {
@@ -410,7 +488,43 @@ static uint32_t svc_arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) 
     t->wait_kind = WAIT_MUTEX;
     t->wait_addr = addr;
     t->wait_tag = tag;
-    uint32_t r = block_current(-1);
+
+    const bool sync_prof = sync_profile_enabled();
+    const uint64_t wait_start = sync_prof ? plat_now_ns() : 0;
+    if (sync_prof)
+        atomic_fetch_add_explicit(&g_sync_prof.mutex_contended, 1, memory_order_relaxed);
+
+    uint32_t r = R_OK;
+    bool handed = false;
+    const uint64_t spin = lock_spin_ns();
+    if (spin) {
+        // mutex_release() hands ownership to one concrete waiter and changes
+        // only that waiter's wait_kind. Watching this thread-local flag avoids
+        // a kernel sleep+wake for locks released within a few microseconds.
+        waitlist_add(t);
+        pthread_mutex_unlock(&g_klock);
+
+        const uint64_t end = plat_now_ns() + spin;
+        while (__atomic_load_n((int *)&t->wait_kind, __ATOMIC_ACQUIRE) != WAIT_NONE &&
+               !g_rt_unwind && plat_now_ns() < end)
+            SCARLET_CPU_RELAX();
+
+        pthread_mutex_lock(&g_klock);
+        waitlist_remove(t);
+        handed = t->wait_kind == WAIT_NONE;
+        r = t->wait_result;
+    }
+
+    if (!handed) {
+        if (sync_prof)
+            atomic_fetch_add_explicit(&g_sync_prof.mutex_blocked, 1, memory_order_relaxed);
+        r = block_current(-1);
+    } else if (sync_prof) {
+        atomic_fetch_add_explicit(&g_sync_prof.mutex_spin_handoff, 1, memory_order_relaxed);
+    }
+    if (sync_prof)
+        atomic_fetch_add_explicit(&g_sync_prof.mutex_wait_ns,
+                                  plat_now_ns() - wait_start, memory_order_relaxed);
     pthread_mutex_unlock(&g_klock);
     return r == R_CANCELLED ? R_OK : r;
 }
@@ -435,7 +549,14 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     t->wait_addr = key;
     t->wait_mutex = mutex;
     t->wait_tag = tag;
+    const bool sync_prof = sync_profile_enabled();
+    const uint64_t wait_start = sync_prof ? plat_now_ns() : 0;
+    if (sync_prof)
+        atomic_fetch_add_explicit(&g_sync_prof.cond_waits, 1, memory_order_relaxed);
     uint32_t r = block_current(timeout);
+    if (sync_prof)
+        atomic_fetch_add_explicit(&g_sync_prof.cond_wait_ns,
+                                  plat_now_ns() - wait_start, memory_order_relaxed);
     // Timed out / cancelled: the mutex is NOT reacquired here. As on the console, the caller does it: the SDK's
     // InternalConditionVariableImplByHorizon::TimedWait calls InternalCriticalSection::Enter on 0xea01 (TimedOut).
     // Reacquiring it here too left the thread owning the mutex and then waiting on itself (Let's Go boot deadlock).
@@ -489,7 +610,14 @@ static uint32_t svc_wait_for_address(uint64_t addr, uint32_t type, int32_t value
     if (timeout == 0) { pthread_mutex_unlock(&g_klock); return R_TIMEOUT; }
     t_cur->wait_kind = WAIT_ARBITER;
     t_cur->wait_addr = addr;
+    const bool sync_prof = sync_profile_enabled();
+    const uint64_t wait_start = sync_prof ? plat_now_ns() : 0;
+    if (sync_prof)
+        atomic_fetch_add_explicit(&g_sync_prof.arbiter_waits, 1, memory_order_relaxed);
     uint32_t r = block_current(timeout);
+    if (sync_prof)
+        atomic_fetch_add_explicit(&g_sync_prof.arbiter_wait_ns,
+                                  plat_now_ns() - wait_start, memory_order_relaxed);
     pthread_mutex_unlock(&g_klock);
     return r;
 }

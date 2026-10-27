@@ -20,6 +20,9 @@
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
+#include "scarlet_fsr3.h"
+#include "scarlet_fsr4.h"
+#include "scarlet_dlss.h"
 #include "../output_scale.h"
 #include "../renderer.h"
 
@@ -69,9 +72,18 @@ static void create_instance(void) {
     LOG("[graphics-backend] requested=%s ICD=%s\n", requested ? requested : "default", icd ? icd : "system");
     Uint32 n_sdl = 0;
     const char *const *sdl_ext = SDL_Vulkan_GetInstanceExtensions(&n_sdl);
-    const char *ext[16];
+    const char *ext[64];
     uint32_t n_ext = 0;
-    for (Uint32 i = 0; i < n_sdl && n_ext < 14; i++) ext[n_ext++] = sdl_ext[i];
+    for (Uint32 i = 0; i < n_sdl && n_ext < 62; i++) ext[n_ext++] = sdl_ext[i];
+    const char *dlss_instance[24];
+    uint32_t n_dlss_instance =
+        scarlet_dlss_instance_extensions(dlss_instance, sizeof dlss_instance / sizeof dlss_instance[0]);
+    for (uint32_t i = 0; i < n_dlss_instance && n_ext < 63; ++i) {
+        bool duplicate = false;
+        for (uint32_t k = 0; k < n_ext; ++k)
+            if (!strcmp(ext[k], dlss_instance[i])) { duplicate = true; break; }
+        if (!duplicate) ext[n_ext++] = dlss_instance[i];
+    }
     bool validate = getenv("LARECOMP_VK_VALIDATION") != NULL;
     if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
@@ -225,7 +237,7 @@ static void create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[16];
+    const char *ext[64];
     bool compat12 = g_vk.api_version < VK_API_VERSION_1_3;
     uint32_t n_ext = 0;
     ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
@@ -283,6 +295,21 @@ static void create_device(void) {
     bool tf = tf_ext && tf_feat.transformFeedback && tf_prop.maxTransformFeedbackBuffers >= 3;
     g_vk.transform_feedback = tf;
     if (tf) ext[n_ext++] = VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME;
+
+    const char *dlss_device[24];
+    uint32_t n_dlss_device = scarlet_dlss_device_extensions(
+        g_vk.inst, g_vk.phys, dlss_device, sizeof dlss_device / sizeof dlss_device[0]);
+    for (uint32_t i = 0; i < n_dlss_device && n_ext < 64; ++i) {
+        if (!has_ext(ep, ne, dlss_device[i])) {
+            LOG("[Scarlet.DLSS] requested device extension unavailable: %s\n", dlss_device[i]);
+            continue;
+        }
+        bool duplicate = false;
+        for (uint32_t k = 0; k < n_ext; ++k)
+            if (!strcmp(ext[k], dlss_device[i])) { duplicate = true; break; }
+        if (!duplicate) ext[n_ext++] = dlss_device[i];
+    }
+
     LOG("[vk] transform feedback: %s (feature=%u, buffers=%u, draw=%u)\n",
         tf ? "enabled" : tf_ext ? "extension present but unusable" : "extension absent",
         tf_feat.transformFeedback, tf_prop.maxTransformFeedbackBuffers, tf_prop.transformFeedbackDraw);
@@ -394,6 +421,7 @@ static void create_device(void) {
     LOG("[graphics-backend] negotiated Vulkan %u.%u (%s commands)\n", VK_API_VERSION_MAJOR(g_vk.api_version),
         VK_API_VERSION_MINOR(g_vk.api_version), compat12 ? "KHR/EXT" : "core");
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
+    if (scarlet_dlss_requested()) scarlet_dlss_initialize();
 
     uint32_t vma_api = g_vk.api_version;
 #if VMA_VULKAN_VERSION < 1004000
@@ -702,13 +730,24 @@ void backend_present(NvnTexture *t) {
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();
+
+    const bool native_dlss = scarlet_dlss_requested();
+    const bool native_fsr3 = scarlet_fsr3_requested();
+    const bool native_fsr4 = scarlet_fsr4_requested();
+    if (native_dlss)
+        b = scarlet_dlss_upscale(b);
+    else if (native_fsr4)
+        b = scarlet_fsr4_upscale(b);
+    else if (native_fsr3)
+        b = scarlet_fsr3_upscale(b);
+
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
-    // Frame interpolation (60 fps, exec.c vk_interp_render): the in-between image now, this frame's own half a frame
-    // later (the period: the game's present rhythm, smoothed).
+    // The old analytical interpolator is kept for non-FSR modes. Never feed
+    // interpolated frames back through FSR temporal history.
     TexBackend *hold = NULL;
     extern bool vk_interp_render(TexBackend *b, TexBackend **hold);
-    bool two = vk_interp_render(b, &hold);
+    bool two = (native_dlss || native_fsr3 || native_fsr4) ? false : vk_interp_render(b, &hold);
     static uint64_t last_present, period = 33333333;
     if (last_present && t0 - last_present > 5000000 && t0 - last_present < 100000000) period = (period * 7 + (t0 - last_present)) / 8;
     last_present = t0;
@@ -956,7 +995,12 @@ static void quick_exit_handler(void) {
     if (trace) LOG("[vk] exit: waiting for the GPU\n");
     if (g_vk.dev) {
         vkDeviceWaitIdle(g_vk.dev);
-        if (trace) LOG("[vk] exit: saving the pipeline cache\n");
+        if (trace) LOG("[vk] exit: saving the pipeline cache/history\n");
+        extern void vk_pipe_history_save(void);
+        vk_pipe_history_save();
+        scarlet_dlss_shutdown();
+        scarlet_fsr4_shutdown();
+        scarlet_fsr3_shutdown();
         vk_pipeline_cache_save();
     }
     if (trace) LOG("[vk] exit: terminating\n");
@@ -1008,6 +1052,7 @@ void backend_reset(void) {
     extern void vk_exec_reset(void);
     vk_textures_reset();
     vk_exec_reset();
+    scarlet_dlss_reset_history();
     g_last_presented = NULL;
 }
 void backend_guest_memory_reset(void) {}  // (exec.c re-imports the heap on first use)

@@ -18,6 +18,7 @@
 #include "storage_ranges.h"
 #include "../indirect.h"
 #include "vk.h"
+#include "scarlet_temporal.h"
 #include "../renderer.h"
 #include "../../settings.h"
 
@@ -65,6 +66,8 @@ static int op_counts_enabled = -1;
 bool g_debug_frame;
 static char stats_text[768];
 void vk_collect_dead(void);
+static void pipe_history_load(void);
+void vk_pipe_history_save(void);
 
 // ================================================================== submissions
 // A submission = optional upload command buffer + the main one, signalling the timeline with its number.
@@ -1230,6 +1233,7 @@ void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
 static void save_pipeline_cache(void *a) {
     (void)a;
     uint64_t t0 = SDL_GetTicksNS();
+    vk_pipe_history_save();
     vk_pipeline_cache_save();
     LOG("[vk] pipeline cache saved (%.0f ms)\n", (SDL_GetTicksNS() - t0) / 1e6);
 }
@@ -1421,6 +1425,7 @@ void vk_exec_init(void) {
         if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &prof_qp) != VK_SUCCESS) prof_qp = VK_NULL_HANDLE;
     }
     st_defaults();
+    pipe_history_load();
 }
 
 void renderer_texture_scale(NvnTexture *t, float *sx, float *sy);
@@ -1773,6 +1778,8 @@ typedef struct {
     VkDescriptorSetLayout set_layout[2];
     VkPipelineLayout layout;
     bool vs_uses_vid;
+    uint16_t prewarm_cursor;
+    bool prewarm_done;
     _Atomic int state;  // 0 building, 1 ready, 2 failed
 } Prog;
 
@@ -2231,6 +2238,161 @@ typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; }
 #define PIPE_TAB 8192
 static struct { uint64_t key; Pipe *pipe; } pipe_tab[PIPE_TAB];
 
+// SSBU-Recomp's production renderer uses a persistent pipeline history so
+// expensive variants can be built before their next first-use draw. Scarlet's
+// PipeKey contains a process-local Prog*, therefore its raw key cannot be
+// persisted. Store stable shader addresses + fixed state with that pointer
+// cleared, then restore the current Prog* when a matching program becomes ready.
+#define PIPE_HIST_MAGIC 0x48504353u /* "SCPH" */
+#define PIPE_HIST_VERSION 1u
+#define PIPE_HIST_MAX 8192u
+#define PIPE_HIST_SLOTS 16384u
+
+typedef struct {
+    uint64_t vs, fs;
+    PipeKey key;  // key.prog is always NULL on disk
+} PipeHistRec;
+
+typedef struct {
+    uint32_t magic, version, key_size, count;
+    uint32_t vendor_id, device_id;
+    uint32_t reserved[2];
+} PipeHistHeader;
+
+static PipeHistRec pipe_hist[PIPE_HIST_MAX];
+static uint32_t pipe_hist_slots[PIPE_HIST_SLOTS]; // 1-based record index
+static uint32_t pipe_hist_count, pipe_hist_loaded;
+static pthread_mutex_t pipe_hist_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool pipe_hist_initialized;
+
+static uint64_t hash_words(uint64_t h, const void *p, size_t n);
+
+static bool pipe_prewarm_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("LARECOMP_PIPE_PREWARM");
+        enabled = !e || atoi(e) != 0;
+    }
+    return enabled != 0;
+}
+
+static uint64_t pipe_hist_hash(uint64_t vs, uint64_t fs, const PipeKey *key) {
+    PipeKey stable = *key;
+    stable.prog = NULL;
+    uint64_t h = hash_words(UINT64_C(0xcbf29ce484222325), &vs, sizeof vs);
+    h = hash_words(h, &fs, sizeof fs);
+    h = hash_words(h, &stable, sizeof stable);
+    return h ? h : 1;
+}
+
+static bool pipe_hist_equal(const PipeHistRec *r, uint64_t vs, uint64_t fs, const PipeKey *key) {
+    if (r->vs != vs || r->fs != fs) return false;
+    PipeKey stable = *key;
+    stable.prog = NULL;
+    return !memcmp(&r->key, &stable, sizeof stable);
+}
+
+static void pipe_hist_index_record(uint32_t index) {
+    PipeHistRec *r = &pipe_hist[index];
+    uint64_t h = pipe_hist_hash(r->vs, r->fs, &r->key);
+    uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PIPE_HIST_SLOTS - 1);
+    while (pipe_hist_slots[slot]) slot = (slot + 1) & (PIPE_HIST_SLOTS - 1);
+    pipe_hist_slots[slot] = index + 1;
+}
+
+static void pipe_history_load(void) {
+    if (pipe_hist_initialized) return;
+    pipe_hist_initialized = true;
+    if (!pipe_prewarm_enabled()) {
+        LOG("[vk-prewarm] disabled (LARECOMP_PIPE_PREWARM=0)\n");
+        return;
+    }
+
+    FILE *f = fopen("cache/scarlet_pipeline_history.bin", "rb");
+    if (!f) return;
+    PipeHistHeader h = {0};
+    bool valid = fread(&h, 1, sizeof h, f) == sizeof h &&
+                 h.magic == PIPE_HIST_MAGIC && h.version == PIPE_HIST_VERSION &&
+                 h.key_size == sizeof(PipeKey) && h.count <= PIPE_HIST_MAX &&
+                 h.vendor_id == g_vk.props.vendorID && h.device_id == g_vk.props.deviceID;
+    if (valid && h.count) {
+        valid = fread(pipe_hist, sizeof(PipeHistRec), h.count, f) == h.count;
+    }
+    fclose(f);
+    if (!valid) {
+        memset(pipe_hist, 0, sizeof pipe_hist);
+        LOG("[vk-prewarm] ignored incompatible pipeline history\n");
+        return;
+    }
+
+    pipe_hist_count = pipe_hist_loaded = h.count;
+    for (uint32_t i = 0; i < pipe_hist_count; ++i) {
+        pipe_hist[i].key.prog = NULL;
+        pipe_hist_index_record(i);
+    }
+    LOG("[vk-prewarm] loaded %u Scarlet pipeline variants for device %04x:%04x\n",
+        pipe_hist_loaded, g_vk.props.vendorID, g_vk.props.deviceID);
+}
+
+static void pipe_history_note(const PipeKey *key) {
+    if (!pipe_prewarm_enabled() || !key || !key->prog) return;
+    uint64_t vs = key->prog->code[0], fs = key->prog->code[1];
+    uint64_t h = pipe_hist_hash(vs, fs, key);
+    uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PIPE_HIST_SLOTS - 1);
+
+    pthread_mutex_lock(&pipe_hist_lock);
+    while (pipe_hist_slots[slot]) {
+        uint32_t index = pipe_hist_slots[slot] - 1;
+        if (index < pipe_hist_count && pipe_hist_equal(&pipe_hist[index], vs, fs, key)) {
+            pthread_mutex_unlock(&pipe_hist_lock);
+            return;
+        }
+        slot = (slot + 1) & (PIPE_HIST_SLOTS - 1);
+    }
+    if (pipe_hist_count < PIPE_HIST_MAX) {
+        uint32_t index = pipe_hist_count++;
+        pipe_hist[index].vs = vs;
+        pipe_hist[index].fs = fs;
+        pipe_hist[index].key = *key;
+        pipe_hist[index].key.prog = NULL;
+        pipe_hist_slots[slot] = index + 1;
+    }
+    pthread_mutex_unlock(&pipe_hist_lock);
+}
+
+void vk_pipe_history_save(void) {
+    if (!pipe_prewarm_enabled() || !pipe_hist_initialized) return;
+
+    pthread_mutex_lock(&pipe_hist_lock);
+    uint32_t count = pipe_hist_count;
+    if (!count) {
+        pthread_mutex_unlock(&pipe_hist_lock);
+        return;
+    }
+
+    mkdir("cache", 0755);
+    const char *tmp = "cache/scarlet_pipeline_history.bin.tmp";
+    FILE *f = fopen(tmp, "wb");
+    if (f) {
+        PipeHistHeader h = {
+            .magic = PIPE_HIST_MAGIC, .version = PIPE_HIST_VERSION,
+            .key_size = sizeof(PipeKey), .count = count,
+            .vendor_id = g_vk.props.vendorID, .device_id = g_vk.props.deviceID,
+        };
+        bool ok = fwrite(&h, 1, sizeof h, f) == sizeof h &&
+                  fwrite(pipe_hist, sizeof(PipeHistRec), count, f) == count;
+        if (fflush(f) != 0) ok = false;
+        fclose(f);
+        if (ok) {
+            remove("cache/scarlet_pipeline_history.bin");
+            rename(tmp, "cache/scarlet_pipeline_history.bin");
+        } else {
+            remove(tmp);
+        }
+    }
+    pthread_mutex_unlock(&pipe_hist_lock);
+}
+
 // 8 bytes a step (PipeKey is ~700 bytes, hashed per draw); in-memory tables only - hmix values are compared with
 // stored constants (fragment-shader hashes) and must not change.
 static uint64_t hash_words(uint64_t h, const void *p, size_t n) {
@@ -2325,6 +2487,42 @@ static void build_pipeline(void *arg) {
     atomic_fetch_add(&stat_compiles, 1);
     if (r == VK_SUCCESS) atomic_fetch_add(&new_pipes, 1);
     atomic_store(&pp->state, r == VK_SUCCESS ? 1 : 2);
+}
+
+// Queue a few historical variants after the current draw's required pipeline
+// has already entered the FIFO. This makes prewarm opportunistic on CPU-bound
+// APUs instead of allowing it to delay the frame currently being rendered.
+static void pipe_history_prewarm(Prog *pr, uint64_t current_hash) {
+    if (!pipe_prewarm_enabled() || !pipe_hist_loaded || !pr || pr->prewarm_done) return;
+
+    unsigned queued = 0;
+    uint32_t i = pr->prewarm_cursor;
+    for (; i < pipe_hist_loaded && queued < 4; ++i) {
+        const PipeHistRec *r = &pipe_hist[i];
+        if (r->vs != pr->code[0] || r->fs != pr->code[1]) continue;
+
+        PipeKey k = r->key;
+        k.prog = pr;
+        uint64_t ph = hash_words(UINT64_C(0xcbf29ce484222325), &k, sizeof k);
+        if (!ph) ph = 1;
+        if (ph == current_hash) continue;
+
+        uint32_t slot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
+        while (pipe_tab[slot].key && pipe_tab[slot].key != ph)
+            slot = (slot + 1) & (PIPE_TAB - 1);
+        if (pipe_tab[slot].pipe) continue;
+
+        Pipe *pp = calloc(1, sizeof *pp);
+        if (!pp) break;
+        pp->k = k;
+        pp->hash = ph;
+        pipe_tab[slot].key = ph;
+        pipe_tab[slot].pipe = pp;
+        run_job(build_pipeline, pp);
+        queued++;
+    }
+    pr->prewarm_cursor = (uint16_t)(i > UINT16_MAX ? UINT16_MAX : i);
+    if (i >= pipe_hist_loaded || i >= UINT16_MAX) pr->prewarm_done = true;
 }
 
 // ================================================================== feedback snapshots (renderer.m resolve_feedback)
@@ -2906,6 +3104,7 @@ static void surface_cache_reset(void);
 // address (the old Prog / Pipe objects are leaked, so pipeline keys holding their pointers can't collide), compute
 // programs, shared copies - and the heap import: its pages are replaced (re-imported on first use).
 void vk_exec_reset(void) {
+    vk_pipe_history_save();
     memset(prog_tab, 0, sizeof prog_tab);
     memset(pipe_tab, 0, sizeof pipe_tab);
     surface_cache_reset();
@@ -3772,10 +3971,13 @@ static void draw_(CmdRec *r, bool indexed) {
     if (!pp) {
         pp = calloc(1, sizeof *pp);
         pp->k = k;
+        pp->hash = ph;
         pipe_tab[pslot].key = ph;
         pipe_tab[pslot].pipe = pp;
-        run_job(build_pipeline, pp);
+        pipe_history_note(&k);
+        run_job(build_pipeline, pp); // required by this draw: always FIFO-first
     }
+    pipe_history_prewarm(pr, ph);
     wait_built(&pp->state, "pipeline", pr->code[0], pr->code[1]);
     if (atomic_load(&pp->state) != 1) { SKIP(5 + (atomic_load(&pp->state) > 1)); return; }
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe);
@@ -5047,6 +5249,14 @@ static void exec_list(uint64_t handle, int depth) {
             st.rt.depth = (NvnTexture *)(uintptr_t)rt->depth;
             st.rt.dview = rt->dview;
             st.rt.has_dview = rt->has_dview;
+
+            // Capture Scarlet's true temporal scene pair in the native renderer.
+            // It remains retained across later post-processing/UI passes just as
+            // in the verified legacy bridge, but no video_core object is involved.
+            scarlet_temporal_observe(st.rt.color, st.rt.cview, st.rt.has_cview,
+                                     st.rt.ncolor, st.rt.depth, &st.rt.dview,
+                                     st.rt.has_dview != 0);
+
             static int always = -1;
             if (always < 0) always = getenv("LARECOMP_VK_PASS_RESTART") != NULL;
             if (always || memcmp(&prev, &st.rt, sizeof prev)) st.rt_dirty = true;
