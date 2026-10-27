@@ -2521,7 +2521,9 @@ if (-not $scarletSwapchainText.Contains('[Scarlet.Perf] adaptive 60 Hz present m
         if ($scarletSwapchainText.Contains($includeAnchor)) {
             $scarletSwapchainText = $scarletSwapchainText.Replace(
                 $includeAnchor,
-                $includeAnchor + [Environment]::NewLine + '#include <cstdlib>'
+                $includeAnchor + [Environment]::NewLine +
+                '#include <cstdlib>' + [Environment]::NewLine +
+                '#include <cstring>'
             )
         } else {
             throw 'Scarlet runtime overlay: vk_swapchain include anchor missing'
