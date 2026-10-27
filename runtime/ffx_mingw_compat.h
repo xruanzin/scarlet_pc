@@ -6,6 +6,10 @@
 // alias. Keeping this outside third_party avoids modifying the FSR submodule.
 #if defined(_WIN32) && !defined(_MSC_VER)
 #include <wchar.h>
+#ifdef __cplusplus
+#include <new>
+#include <math.h>
+#endif
 #ifndef swprintf_s
 #define swprintf_s swprintf
 #endif
