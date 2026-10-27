@@ -135,7 +135,7 @@ OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S 
 # FidelityFX 1.1.4 C++ sources use the MSVC secure CRT spelling. Apply the
 # compatibility alias only while compiling C++: putting it on C translation
 # units rewrites MinGW's own swprintf_s declaration in <wchar.h>.
-FSR_CPP_COMPAT := -Dswprintf_s=swprintf
+FSR_CPP_COMPAT := -include runtime/ffx_mingw_compat.h
 GENARCH  ?= -march=x86-64-v3 -mtune=znver2  # x86-v3 compatibility, scheduled for Ryzen 4000G/Zen 2
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
