@@ -43,18 +43,6 @@ if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
     exit $LASTEXITCODE
 }
 
-# DLSS/NGX still needs to negotiate Vulkan instance/device extensions before
-# the native VkDevice is created. Preserve the existing working bridge instead
-# of silently downgrading a user who explicitly selected DLSS.
-if ($Runtime -eq 'native' -and
-    [string]::Equals($env:SCARLET_UPSCALER, 'dlss', [StringComparison]::OrdinalIgnoreCase)) {
-    Write-Warning 'Native NGX device-extension integration is not migrated yet; preserving DLSS through the legacy runtime for this launch.'
-    $legacy = Join-Path $PSScriptRoot 'scarlet_independent_run.ps1'
-    $args = @{}
-    if (-not [string]::IsNullOrWhiteSpace($GamePath)) { $args.GamePath = $GamePath }
-    & $legacy @args
-    exit $LASTEXITCODE
-}
 
 $exe = Join-Path $repoRoot 'build\native\ScarletPC.exe'
 if ($Build -or -not (Test-Path $exe -PathType Leaf)) {

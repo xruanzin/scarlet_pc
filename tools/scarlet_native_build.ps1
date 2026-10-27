@@ -127,10 +127,9 @@ else {
     Write-Warning 'AOT directory not found. The EXE was built, but native boot needs the four existing AOT DLLs in build\native\aot.'
 }
 
-# Reuse an already-built optional NGX bridge if one exists. The current native
-# renderer does not consume it yet, but keeping the binary beside ScarletPC.exe
-# avoids losing the user's working DLSS payload while device-extension migration
-# is completed.
+# Reuse an already-built optional NGX bridge if one exists. The native renderer
+# loads it dynamically only when SCARLET_UPSCALER=dlss; AMD/non-DLSS runs never
+# load NVIDIA code.
 foreach ($dlssStage in @(
     (Join-Path $repoRoot 'build\scarlet-dlss-bridge\stage'),
     (Join-Path $repoRoot 'dist\ScarletPC-Independent')
