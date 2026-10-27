@@ -112,7 +112,8 @@ if (-not $blockRegex.IsMatch($runText)) {
 
 $timedCall = @'
 $1const bool scarlet_chain_sample =
-$1    kScarletChainTimeProbe && ((++g_scarlet_chain_probe_seq & 63ULL) == 0);
+$1    kScarletChainTimeProbe && SampleWindowOpen() &&
+$1    ((++g_scarlet_chain_probe_seq & 63ULL) == 0);
 $1const u64 scarlet_chain_start_pc = scarlet_chain_sample ? impl->ctx.pc : 0;
 $1const int scarlet_chain_start_budget = scarlet_chain_sample ? impl->ctx.chain_budget : 0;
 $1const u64 scarlet_chain_start_ns = scarlet_chain_sample ? ScarletChainProbeNow() : 0;
