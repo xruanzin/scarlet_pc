@@ -5671,28 +5671,30 @@ $scarletArmRecompText = $scarletArmRecompText.Replace(
 [IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
 Write-Host '[Scarlet PC] CPU hot path: AOT long slices=1024 + inline SVC 0x10.' -ForegroundColor DarkGray
 
-# Production gameplay hot path: remove diagnostic serialization from the
+# Production gameplay hot path: remove diagnostic bookkeeping from the
 # hottest AOT/SVC paths and avoid full host re-entry when a serviced SVC resumes
 # on the same guest thread/core. Diagnostics remain opt-in through
 # SCARLET_RECOMP_COVERAGE=1.
 $scarletArmRecompPath = Join-Path $SourceDir 'src\core\arm\recomp\arm_recomp.cpp'
 $scarletArmRecompText = [IO.File]::ReadAllText($scarletArmRecompPath)
 
-if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] sampled SVC histogram')) {
-    $recordSvcOld = @'
+if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] production SVC telemetry gate')) {
+    $recordSvcMutexOld = @'
     void RecordSvc(u32 num) {
         std::scoped_lock lk{hist_lock};
         ++svc_numbers[num];
     }
 '@
-    $recordSvcNew = @'
+    $recordSvcAtomicOld = @'
     void RecordSvc(u32 num) {
-        // [Scarlet.Perf] sampled SVC histogram
-        // Full per-SVC accounting used to take hist_lock for every guest SVC.
-        // Scarlet issues thousands of synchronization SVCs per second across
-        // multiple guest cores, turning diagnostic telemetry into a global
-        // serialization point. Keep exact accounting only when explicitly
-        // requested; normal gameplay performs no histogram bookkeeping at all.
+        if (num < svc_numbers.size()) {
+            svc_numbers[num].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+'@
+    $recordSvcMutexNew = @'
+    void RecordSvc(u32 num) {
+        // [Scarlet.Perf] production SVC telemetry gate
         static const bool full_coverage = [] {
             const char* value = std::getenv("SCARLET_RECOMP_COVERAGE");
             return value && *value && *value != '0';
@@ -5704,12 +5706,38 @@ if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] sampled SVC histogram'))
         ++svc_numbers[num];
     }
 '@
-    if (-not $scarletArmRecompText.Contains($recordSvcOld.Trim())) {
-        throw 'Scarlet runtime overlay: RecordSvc hot-path anchor missing'
+    $recordSvcAtomicNew = @'
+    void RecordSvc(u32 num) {
+        // [Scarlet.Perf] production SVC telemetry gate
+        // The preserved runtime already uses lock-free atomic counters. Even
+        // those still cause cross-core cache-line traffic at Scarlet's SVC
+        // frequency, so keep them completely off during normal gameplay.
+        static const bool full_coverage = [] {
+            const char* value = std::getenv("SCARLET_RECOMP_COVERAGE");
+            return value && *value && *value != '0';
+        }();
+        if (!full_coverage) {
+            return;
+        }
+        if (num < svc_numbers.size()) {
+            svc_numbers[num].fetch_add(1, std::memory_order_relaxed);
+        }
     }
-    $scarletArmRecompText =
-        $scarletArmRecompText.Replace($recordSvcOld.Trim(), $recordSvcNew.Trim())
-    Write-Host '[Scarlet PC] Removed per-SVC global telemetry lock from gameplay hot path.' -ForegroundColor Green
+'@
+
+    if ($scarletArmRecompText.Contains($recordSvcAtomicOld.Trim())) {
+        $scarletArmRecompText =
+            $scarletArmRecompText.Replace($recordSvcAtomicOld.Trim(),
+                                          $recordSvcAtomicNew.Trim())
+        Write-Host '[Scarlet PC] Disabled lock-free SVC coverage counters during gameplay.' -ForegroundColor Green
+    } elseif ($scarletArmRecompText.Contains($recordSvcMutexOld.Trim())) {
+        $scarletArmRecompText =
+            $scarletArmRecompText.Replace($recordSvcMutexOld.Trim(),
+                                          $recordSvcMutexNew.Trim())
+        Write-Host '[Scarlet PC] Disabled legacy SVC coverage bookkeeping during gameplay.' -ForegroundColor Green
+    } else {
+        throw 'Scarlet runtime overlay: unsupported RecordSvc shape in preserved runtime'
+    }
 }
 
 if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] thread-local early dispatch logging')) {
