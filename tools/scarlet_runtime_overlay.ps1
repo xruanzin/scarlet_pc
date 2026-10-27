@@ -1564,15 +1564,14 @@ s32 NormalizeSwapInterval(f32* out_speed_scale, s32 swap_interval) {
     }
 
     const char* target_env = std::getenv("SCARLET_TARGET_FPS");
-    const int target_fps = target_env && *target_env ? std::atoi(target_env) : 30;
+    const int target_fps = target_env && *target_env ? std::atoi(target_env) : 60;
 
-    // Scarlet targets 30 FPS on a 60 Hz display by presenting every other
-    // vertical blank (swap interval 2). Keep that native pacing for the stable
-    // mode instead of lowering the emulated VI clock itself.
-    if (target_fps <= 30 && swap_interval == 1) {
+    // Keep the display/VI clock at 60 Hz. The normal Scarlet PC mode is
+    // uncapped-to-60: remove the game's native every-other-vblank cap.
+    // A 30 FPS cap remains available only when the user explicitly requests 30.
+    if (target_fps == 30 && swap_interval == 1) {
         swap_interval = 2;
     } else if (target_fps >= 60 && swap_interval == 2) {
-        // Explicit 60 FPS mode: remove the game's native every-other-vblank cap.
         swap_interval = 1;
     }
 
@@ -1673,15 +1672,12 @@ s32 NormalizeSwapInterval(f32* out_speed_scale, s32 swap_interval) {
     }
 
     const char* target_env = std::getenv("SCARLET_TARGET_FPS");
-    const int target_fps = target_env && *target_env ? std::atoi(target_env) : 30;
+    const int target_fps = target_env && *target_env ? std::atoi(target_env) : 60;
 
-    // Scarlet targets 30 FPS on a 60 Hz display by presenting every other
-    // vertical blank (swap interval 2). Keep that native pacing for the stable
-    // mode instead of lowering the emulated VI clock itself.
-    if (target_fps <= 30 && swap_interval == 1) {
+    // Normal mode is uncapped-to-60. Keep 30 only as an explicit fallback.
+    if (target_fps == 30 && swap_interval == 1) {
         swap_interval = 2;
     } else if (target_fps >= 60 && swap_interval == 2) {
-        // Explicit 60 FPS mode: remove the game's native every-other-vblank cap.
         swap_interval = 1;
     }
 
@@ -1693,8 +1689,8 @@ Replace-Literal 'src\core\hle\service\nvnflinger\hardware_composer.cpp' $old.Tri
 # Keep the emulated display/VI clock at the Switch-native 60 Hz. Scarlet's
 # 30 FPS mode is represented by swap interval 2; changing the VI clock itself
 # to 30 Hz makes interval 2 behave like 15 FPS and adds avoidable timing skew.
-# SCARLET_TARGET_FPS only selects native 30 (interval 2) versus unlocked 60
-# (interval 1).
+# SCARLET_TARGET_FPS defaults to unlocked 60 (interval 1). Native 30
+# (interval 2) remains available only when explicitly requested.
 $old = @'
 #include "common/settings.h"
 '@
