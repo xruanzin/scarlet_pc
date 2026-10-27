@@ -2506,6 +2506,108 @@ $new = @'
 '@
 Replace-Literal 'src\video_core\vulkan_common\vulkan_device.cpp' $old.Trim() $new.Trim()
 
+
+# Scarlet PC 60 Hz presentation policy. At a 60 FPS target, prefer MAILBOX so
+# a missed vblank does not quantize presentation down to 30/20/15 FPS. If
+# MAILBOX is unavailable, FIFO_RELAXED is the next best option; FIFO remains
+# the final compatibility fallback. 30 FPS mode retains the runtime's normal
+# present-mode selection.
+$scarletSwapchainPath = Join-Path $SourceDir 'src\video_core\renderer_vulkan\vk_swapchain.cpp'
+$scarletSwapchainText = [IO.File]::ReadAllText($scarletSwapchainPath)
+
+if (-not $scarletSwapchainText.Contains('[Scarlet.Perf] adaptive 60 Hz present mode')) {
+    if (-not $scarletSwapchainText.Contains('#include <cstdlib>')) {
+        $includeAnchor = '#include <array>'
+        if ($scarletSwapchainText.Contains($includeAnchor)) {
+            $scarletSwapchainText = $scarletSwapchainText.Replace(
+                $includeAnchor,
+                $includeAnchor + [Environment]::NewLine + '#include <cstdlib>'
+            )
+        } else {
+            throw 'Scarlet runtime overlay: vk_swapchain include anchor missing'
+        }
+    }
+
+    $presentPattern =
+        '(?s)(static\s+VkPresentModeKHR\s+ChooseSwapPresentMode\s*\(\s*bool\s+has_imm\s*,\s*' +
+        'bool\s+has_mailbox\s*,\s*bool\s+has_fifo_relaxed\s*\)\s*\{)'
+    $presentRegex = [regex]::new(
+        $presentPattern,
+        [Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    if (-not $presentRegex.IsMatch($scarletSwapchainText)) {
+        throw 'Scarlet runtime overlay: ChooseSwapPresentMode anchor missing'
+    }
+
+    $presentInsert = @'
+$1
+    // [Scarlet.Perf] adaptive 60 Hz present mode
+    // MAILBOX still presents on vblank, but unlike strict FIFO it does not
+    // force the producer to wait for each presentation slot. This prevents
+    // missed-vblank stair-steps such as ~30 -> ~20 FPS on a 60 Hz display.
+    const char* target_env = std::getenv("SCARLET_TARGET_FPS");
+    const int target_fps = target_env && *target_env ? std::atoi(target_env) : 60;
+    const char* present_env = std::getenv("SCARLET_PRESENT_MODE");
+
+    if (present_env && *present_env) {
+        if (std::strcmp(present_env, "fifo") == 0) {
+            return VK_PRESENT_MODE_FIFO_KHR;
+        }
+        if (std::strcmp(present_env, "fifo_relaxed") == 0 && has_fifo_relaxed) {
+            return VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+        }
+        if (std::strcmp(present_env, "mailbox") == 0 && has_mailbox) {
+            return VK_PRESENT_MODE_MAILBOX_KHR;
+        }
+        if (std::strcmp(present_env, "immediate") == 0 && has_imm) {
+            return VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
+    }
+
+    if (target_fps >= 60) {
+        if (has_mailbox) {
+            return VK_PRESENT_MODE_MAILBOX_KHR;
+        }
+        if (has_fifo_relaxed) {
+            return VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+        }
+    }
+'@
+    $scarletSwapchainText = $presentRegex.Replace(
+        $scarletSwapchainText,
+        $presentInsert.TrimEnd(),
+        1
+    )
+
+    # Log the selected mode and actual image count so the next test proves the
+    # runtime is not silently falling back to strict FIFO/double buffering.
+    $imageCountPattern =
+        '(?m)^([ \t]*)image_count\s*=\s*static_cast<u32>\(images\.size\(\)\)\s*;'
+    $imageCountRegex = [regex]::new(
+        $imageCountPattern,
+        [Text.RegularExpressions.RegexOptions]::Multiline
+    )
+    if ($imageCountRegex.IsMatch($scarletSwapchainText)) {
+        $imageCountInsert = @'
+$1image_count = static_cast<u32>(images.size());
+$1LOG_INFO(Render_Vulkan,
+$1         "[Scarlet.Perf] Swapchain present={} images={}",
+$1         present_mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" :
+$1         present_mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "fifo_relaxed" :
+$1         present_mode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate" : "fifo",
+$1         image_count);
+'@
+        $scarletSwapchainText = $imageCountRegex.Replace(
+            $scarletSwapchainText,
+            $imageCountInsert.TrimEnd(),
+            1
+        )
+    }
+
+    [IO.File]::WriteAllText($scarletSwapchainPath, $scarletSwapchainText, $utf8)
+    Write-Host '[Scarlet PC] Adaptive 60 Hz present mode applied (mailbox > fifo_relaxed > fifo).' -ForegroundColor Green
+}
+
 # FidelityFX frame-generation swapchain plumbing.
 $old = @'
     VkResult Present(const VkPresentInfoKHR& present_info) const noexcept {
@@ -5733,7 +5835,7 @@ if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast rejec
     // sleep/wake round-trip. SCARLET_SYNC_SPIN=0 disables this experiment.
     static const int scarlet_sync_spin = [] {
         const char* e = std::getenv("SCARLET_SYNC_SPIN");
-        int v = (e && *e) ? std::atoi(e) : 32;
+        int v = (e && *e) ? std::atoi(e) : 0;
         if (v < 0) v = 0;
         if (v > 256) v = 256;
         return v;
@@ -5787,7 +5889,7 @@ if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast rejec
 
     static const int scarlet_sync_spin = [] {
         const char* e = std::getenv("SCARLET_SYNC_SPIN");
-        int v = (e && *e) ? std::atoi(e) : 32;
+        int v = (e && *e) ? std::atoi(e) : 0;
         if (v < 0) v = 0;
         if (v > 256) v = 256;
         return v;
@@ -5899,7 +6001,7 @@ if (-not $scarletArbiterText.Contains('[Scarlet.Perf] short address wait spin'))
     }
     static const int scarlet_sync_spin = [] {
         const char* e = std::getenv("SCARLET_SYNC_SPIN");
-        int v = (e && *e) ? std::atoi(e) : 32;
+        int v = (e && *e) ? std::atoi(e) : 0;
         if (v < 0) v = 0;
         if (v > 256) v = 256;
         return v;
@@ -5943,7 +6045,7 @@ if (-not $scarletArbiterText.Contains('[Scarlet.Perf] short address wait spin'))
     }
     static const int scarlet_sync_spin = [] {
         const char* e = std::getenv("SCARLET_SYNC_SPIN");
-        int v = (e && *e) ? std::atoi(e) : 32;
+        int v = (e && *e) ? std::atoi(e) : 0;
         if (v < 0) v = 0;
         if (v > 256) v = 256;
         return v;
@@ -5981,7 +6083,7 @@ if (-not $scarletArbiterText.Contains('[Scarlet.Perf] short address wait spin'))
                 "#include <cstdlib>" + [Environment]::NewLine + $scarletArbiterText
         }
         [IO.File]::WriteAllText($scarletArbiterPath, $scarletArbiterText, $utf8)
-        Write-Host '[Scarlet PC] Short address-wait spin applied (default 32 polls).' -ForegroundColor Green
+        Write-Host '[Scarlet PC] Short address-wait spin available (default off; SCARLET_SYNC_SPIN enables it).' -ForegroundColor Green
     }
 }
 
