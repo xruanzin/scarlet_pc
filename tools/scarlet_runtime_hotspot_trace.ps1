@@ -15,7 +15,16 @@ if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
 
 $text = [IO.File]::ReadAllText($path)
 if ($text.Contains('[Scarlet.HotspotTrace] targeted ARM64 dump')) {
-    Write-Host '[Scarlet PC] Hotspot trace already applied.' -ForegroundColor DarkGray
+    # FastIncremental preserves a source tree even after a failed compile. The
+    # first tracer revision used a non-existent GuestContextView::sp member;
+    # repair that stale transformed source in-place before deciding it is done.
+    if ($text.Contains('impl->ctx.sp')) {
+        $text = $text.Replace('impl->ctx.sp', 'impl->ctx.x[31]')
+        [IO.File]::WriteAllText($path, $text, $utf8)
+        Write-Host '[Scarlet PC] Hotspot trace: repaired preserved SP access to x[31].' -ForegroundColor Green
+    } else {
+        Write-Host '[Scarlet PC] Hotspot trace already applied.' -ForegroundColor DarkGray
+    }
     exit 0
 }
 
