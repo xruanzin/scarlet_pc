@@ -3,10 +3,13 @@
 // This is deliberately renderer-owned: no suyu Scheduler, MemoryAllocator,
 // TextureCache, or video_core object participates. FSR records compute commands
 // into the same ordered Vulkan command buffer used by the native render thread.
+// C++ <atomic> must be parsed before vk.h/nvn.h can expose C11 stdatomic
+// compatibility macros through the renderer headers (notably on MinGW/Clang).
+#include <atomic>
+
 #include "scarlet_fsr3.h"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>

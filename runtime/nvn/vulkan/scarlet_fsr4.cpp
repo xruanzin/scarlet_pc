@@ -20,8 +20,12 @@
 #include <vector>
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
@@ -292,8 +296,9 @@ bool create_provider(uint32_t out_w, uint32_t out_h, int wanted) {
     }
     g.context_ok = true;
     g.preset = wanted;
-    LOG("[Scarlet.FSR4] native v07 INT8 provider ready model=%s tier=%u output=%ux%u\n",
-        ffxFsr4ModelPresetName(model_preset(wanted)), assets.tier, out_w, out_h);
+    LOG("[Scarlet.FSR4] native v07 INT8 provider ready model=%s tier=%s output=%ux%u\n",
+        ffxFsr4ModelPresetName(model_preset(wanted)),
+        assets.tier ? assets.tier : "unknown", out_w, out_h);
     return true;
 }
 
