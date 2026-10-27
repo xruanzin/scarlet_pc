@@ -7,6 +7,9 @@ on:
   pull_request:
     paths:
       - 'runtime/scarlet_native/**'
+      - 'runtime/gamesetup.*'
+      - 'runtime/ui/**'
+      - 'tools/test_native_aot_loader.py'
       - 'runtime/nvn/vulkan/**'
       - 'runtime/kernel.c'
       - 'runtime/dispatch.c'
@@ -36,6 +39,8 @@ jobs:
             runtime/scarlet_native/aot_execute.c \
             runtime/dispatch.c \
             runtime/kernel.c
+      - name: Execute native AOT loader and boundary regression tests
+        run: python3 tools/test_native_aot_loader.py
       - name: Check pinned AOT layout header by itself
         run: |
           printf '#include "runtime/scarlet_native/aot_abi.h"\nint main(void){return 0;}\n' > /tmp/aot_abi_check.c
