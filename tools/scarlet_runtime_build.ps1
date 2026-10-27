@@ -239,6 +239,7 @@ if (-not [string]::IsNullOrWhiteSpace($IconPath)) {
     $overlayArgs.IconPath = $IconPath
 }
 & (Join-Path $PSScriptRoot 'scarlet_runtime_overlay.ps1') @overlayArgs
+& (Join-Path $PSScriptRoot 'scarlet_runtime_fps_overlay.ps1') -SourceDir $SourceDir
 & (Join-Path $PSScriptRoot 'scarlet_runtime_sync_fastpaths.ps1') -SourceDir $SourceDir
 & (Join-Path $PSScriptRoot 'scarlet_runtime_frame_probe.ps1') -SourceDir $SourceDir
 & (Join-Path $PSScriptRoot 'scarlet_runtime_hotspot_sampler.ps1') -SourceDir $SourceDir
@@ -324,6 +325,11 @@ else {
     & cmake @configure
     if ($LASTEXITCODE -ne 0) { throw 'Scarlet runtime CMake configure failed.' }
 }
+
+# Repair any locally-preserved temporal-profiler patch after every overlay
+# has run. This is intentionally right before compilation so local Codex-only
+# instrumentation cannot reintroduce CommandList::size() afterwards.
+& (Join-Path $PSScriptRoot 'scarlet_runtime_gpu_profiler_repair.ps1') -SourceDir $SourceDir
 
 $buildLog = Join-Path $BuildDir 'scarlet_runtime_build.log'
 Write-Host '[Scarlet PC] Building runtime...' -ForegroundColor Cyan
