@@ -145,4 +145,128 @@ if ($arm -ne $before) {
     [IO.File]::WriteAllText($armPath, $arm, $utf8)
 }
 
+
+
+# ---------------------------------------------------------------------------
+# Let's Go Recomp mutex tactic: short spin before a contended ArbitrateLock
+# sleeps in the kernel. Their adopted Windows path uses 40 us by default.
+# ---------------------------------------------------------------------------
+$scarletCondPath = Join-Path $SourceDir 'src\core\hle\kernel\k_condition_variable.cpp'
+$scarletCondText = [IO.File]::ReadAllText($scarletCondPath)
+
+if (-not $scarletCondText.Contains('[Scarlet.Perf] LetsGo mutex spin')) {
+    if (-not $scarletCondText.Contains('#include <chrono>')) {
+        $includeAnchor = '#include "core/arm/exclusive_monitor.h"'
+        if (-not $scarletCondText.Contains($includeAnchor)) {
+            throw 'Scarlet ports parity: condition-variable include anchor missing'
+        }
+        $includeBlock = @'
+#include <chrono>
+#include <cstdlib>
+#if defined(_M_X64) || defined(__x86_64__)
+#include <immintrin.h>
+#endif
+
+#include "core/arm/exclusive_monitor.h"
+'@.Trim()
+        $scarletCondText = $scarletCondText.Replace($includeAnchor, $includeBlock)
+    }
+
+    $helperAnchor = 'class ThreadQueueImplForKConditionVariableWaitForAddress final'
+    if (-not $scarletCondText.Contains($helperAnchor)) {
+        throw 'Scarlet ports parity: WaitForAddress queue anchor missing'
+    }
+
+    $helper = @'
+// [Scarlet.Perf] LetsGo mutex spin
+u64 ScarletMutexSpinNs() {
+    static const u64 value = [] {
+        const char* env = std::getenv("SCARLET_LOCK_SPIN_US");
+        long us = env ? std::strtol(env, nullptr, 10) : 40;
+        if (us < 0) {
+            us = 0;
+        }
+        if (us > 200) {
+            us = 200;
+        }
+        return static_cast<u64>(us) * 1000ULL;
+    }();
+    return value;
+}
+
+inline void ScarletMutexCpuRelax() {
+#if defined(_M_X64) || defined(__x86_64__)
+    _mm_pause();
+#else
+    std::this_thread::yield();
+#endif
+}
+
+bool ScarletSpinUntilMutexChanges(KernelCore& kernel, KProcessAddress address,
+                                  u32 expected_tag) {
+    if (LockTrace::Enabled()) {
+        return false;
+    }
+
+    const u64 spin_ns = ScarletMutexSpinNs();
+    if (spin_ns == 0) {
+        return false;
+    }
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::nanoseconds(spin_ns);
+
+    do {
+        u32 current{};
+        if (!ReadFromUser(kernel, std::addressof(current), address)) {
+            return false;
+        }
+        if (current != expected_tag) {
+            return true;
+        }
+        ScarletMutexCpuRelax();
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    return false;
+}
+
+'@
+    $scarletCondText =
+        $scarletCondText.Replace($helperAnchor, $helper + $helperAnchor)
+
+    $waitAnchor = @'
+KThread* cur_thread = GetCurrentThreadPointer(kernel);
+    ThreadQueueImplForKConditionVariableWaitForAddress wait_queue(kernel);
+
+    // Wait for the address.
+    KThread* owner_thread{};
+'@.Trim()
+
+    $waitReplacement = @'
+KThread* cur_thread = GetCurrentThreadPointer(kernel);
+    ThreadQueueImplForKConditionVariableWaitForAddress wait_queue(kernel);
+
+    // [Scarlet.Perf] LetsGo mutex spin
+    const u32 scarlet_expected_tag = handle | Svc::HandleWaitMask;
+    if (ScarletSpinUntilMutexChanges(kernel, addr, scarlet_expected_tag) &&
+        !cur_thread->IsTerminationRequested()) {
+        R_SUCCEED();
+    }
+
+    // Wait for the address.
+    KThread* owner_thread{};
+'@.Trim()
+
+    if (-not $scarletCondText.Contains($waitAnchor)) {
+        throw 'Scarlet ports parity: WaitForAddress body anchor missing'
+    }
+    $scarletCondText = $scarletCondText.Replace($waitAnchor, $waitReplacement)
+
+    [IO.File]::WriteAllText($scarletCondPath, $scarletCondText, $utf8)
+    Write-Host '[Scarlet PC] LetsGo-style mutex spin enabled: 40 us default, kernel fallback preserved.' -ForegroundColor Green
+} else {
+    Write-Host '[Scarlet PC] LetsGo-style mutex spin already installed.' -ForegroundColor DarkGray
+}
+
+
 Write-Host '[Scarlet PC] Native-port runtime parity active: 16K slices + cached dispatch + lean telemetry.' -ForegroundColor Green
