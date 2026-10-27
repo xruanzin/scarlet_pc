@@ -10,6 +10,9 @@
 extern "C" {
 #endif
 
+// File-only probe for the launcher. Does not load or execute DLL code.
+bool scarlet_aot_present(const char *game_root);
+
 // Load and validate scarlet-rtld/main/multimedia/sdk AOT DLLs without running
 // guest code. This is idempotent across in-process game reboots.
 bool scarlet_aot_load(const char *game_root, char *why, size_t why_size);

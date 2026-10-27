@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "../paths.h"
 #include "../rt.h"
@@ -26,22 +27,16 @@ static void set_error(char *why, size_t n, const char *fmt, const char *a) {
     if (why && n) snprintf(why, n, fmt, a ? a : "");
 }
 
-#ifdef _WIN32
-
-static FARPROC symbol(ScarletAotLibrary lib, const char *name) {
-    return GetProcAddress(lib, name);
-}
-
 static bool file_exists(const char *path) {
-    DWORD a = GetFileAttributesA(path);
-    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
 static bool find_image(const char *game_root, const char *filename, char *out, size_t n) {
     const char *dir = getenv("SCARLET_AOT_DIR");
     if (dir && *dir) {
         snprintf(out, n, "%s/%s", dir, filename);
-        if (file_exists(out)) return true;
+        return file_exists(out); // An explicit bundle must not mix with another version.
     }
 
     char rel[256];
@@ -55,6 +50,19 @@ static bool find_image(const char *game_root, const char *filename, char *out, s
 
     snprintf(out, n, "aot/%s", filename);
     return file_exists(out);
+}
+
+bool scarlet_aot_present(const char *game_root) {
+    char path[1200];
+    for (int i = 0; i < SCARLET_AOT_MODULE_COUNT; ++i)
+        if (!find_image(game_root, g_aot[i].filename, path, sizeof path)) return false;
+    return true;
+}
+
+#ifdef _WIN32
+
+static FARPROC symbol(ScarletAotLibrary lib, const char *name) {
+    return GetProcAddress(lib, name);
 }
 
 #define LOAD_REQUIRED(m, field, type, symname) do {                                      \
@@ -165,9 +173,25 @@ static bool load_one(ScarletAotModule *m, const char *game_root, char *why, size
 #endif
 
 bool scarlet_aot_load(const char *game_root, char *why, size_t why_size) {
+    char discard[512];
+    if (!why || !why_size) { why = discard; why_size = sizeof discard; }
+    why[0] = '\0';
     if (g_loaded) return true;
-    for (int i = 0; i < SCARLET_AOT_MODULE_COUNT; ++i)
-        if (!load_one(&g_aot[i], game_root, why, why_size)) return false;
+    for (int i = 0; i < SCARLET_AOT_MODULE_COUNT; ++i) {
+        if (load_one(&g_aot[i], game_root, why, why_size)) continue;
+        // A failed handshake must not leave a partly loaded image set behind.
+        // Preserve the diagnostic while releasing every DLL acquired so far.
+        for (int j = i; j >= 0; --j) {
+            ScarletAotModule *m = &g_aot[j];
+#ifdef _WIN32
+            if (m->library) FreeLibrary(m->library);
+#endif
+            const char *name = m->name, *filename = m->filename, *guest = m->guest_module;
+            memset(m, 0, sizeof *m);
+            m->name = name; m->filename = filename; m->guest_module = guest;
+        }
+        return false;
+    }
     g_loaded = true;
     return true;
 }
@@ -179,6 +203,12 @@ static Module *guest_module(const char *name) {
 }
 
 bool scarlet_aot_bind_loaded_modules(char *why, size_t why_size) {
+    char discard[512];
+    if (!why || !why_size) { why = discard; why_size = sizeof discard; }
+    why[0] = '\0';
+    // Invalidate the whole previous binding before inspecting any module.
+    // A failed rebind must never leave ready() true with old guest addresses.
+    for (int i = 0; i < SCARLET_AOT_MODULE_COUNT; ++i) g_aot[i].bound = false;
     if (!g_loaded) {
         set_error(why, why_size, "%s", "AOT modules have not been loaded");
         return false;
@@ -212,8 +242,10 @@ bool scarlet_aot_bind_loaded_modules(char *why, size_t why_size) {
 
         uint64_t lo = 0, hi = 0;
         ScarletAotBlockFn *index = NULL;
-        if (!a->index_fn(&lo, &hi, &index) || !index || hi <= lo) {
-            snprintf(why, why_size, "%s: direct AOT index unavailable after set_base",
+        if (!a->index_fn(&lo, &hi, &index) || !index || hi <= lo ||
+            (lo & 3) || (hi & 3) || lo < m->base ||
+            hi - m->base > m->size) {
+            snprintf(why, why_size, "%s: invalid or unavailable AOT index after set_base",
                      a->filename);
             return false;
         }
