@@ -26,6 +26,7 @@ if ($Runtime -eq 'legacy') {
     $args = @{}
     if (-not [string]::IsNullOrWhiteSpace($GamePath)) { $args.GamePath = $GamePath }
     if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) { $args.UpdatePath = $UpdatePath }
+    if ($DlcPath.Count) { $args.DlcPath = $DlcPath }
     & $legacy @args
     exit $LASTEXITCODE
 }
@@ -34,11 +35,18 @@ if ($Runtime -eq 'legacy') {
 # require BKTR/patch overlay semantics that have not been migrated yet. Never
 # ignore an explicitly requested update: preserve the known-working legacy
 # path until the native overlay service replaces it.
-if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
-    Write-Warning 'Native BKTR/update overlay is not migrated yet; preserving update support through the legacy runtime for this launch.'
+if (-not [string]::IsNullOrWhiteSpace($UpdatePath) -or $DlcPath.Count) {
+    if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
+        Write-Warning 'Native BKTR/update overlay is not migrated yet; preserving update support through the legacy runtime for this launch.'
+    }
+    if ($DlcPath.Count) {
+        Write-Warning 'Native DLC content overlay is not migrated yet; preserving DLC support through the legacy runtime for this launch.'
+    }
     $legacy = Join-Path $PSScriptRoot 'scarlet_independent_run.ps1'
-    $args = @{ UpdatePath = $UpdatePath }
+    $args = @{}
     if (-not [string]::IsNullOrWhiteSpace($GamePath)) { $args.GamePath = $GamePath }
+    if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) { $args.UpdatePath = $UpdatePath }
+    if ($DlcPath.Count) { $args.DlcPath = $DlcPath }
     & $legacy @args
     exit $LASTEXITCODE
 }
