@@ -5765,10 +5765,617 @@ if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] thread-local early dispa
 }
 
 if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] hot sync SVC resume')) {
-    $runThreadOld = @'
-HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
-    // A context switch voids any outstanding reservation. A thread preempted
+    $runThreadPattern =
+        '(?m)^HaltReason\s+ArmRecomp::RunThread\s*\(\s*Kernel::KThread\*\s*thread\s*\)\s*\{\s*
+
+    $refreshOld = '    impl->RefreshPageTable();'
+    $refreshNew = @'
+    if (!scarlet_hot_sync_resume) {
+        impl->RefreshPageTable();
+    }
+'@.TrimEnd()
+    $refreshIndex = $scarletArmRecompText.IndexOf($refreshOld, $scarletArmRecompText.IndexOf('[Scarlet.Perf] hot sync SVC resume'))
+    if ($refreshIndex -lt 0) {
+        throw 'Scarlet runtime overlay: ArmRecomp RefreshPageTable anchor missing'
+    }
+    $scarletArmRecompText = $scarletArmRecompText.Remove($refreshIndex, $refreshOld.Length).Insert($refreshIndex, $refreshNew)
+
+    $fpOld = @'
+    if (fpx_active) {
+        RepairFpEnv("entry");
+    }
 '@
+    $fpNew = @'
+    if (fpx_active && !scarlet_hot_sync_resume) {
+        RepairFpEnv("entry");
+    }
+'@
+    $fpIndex = $scarletArmRecompText.IndexOf($fpOld.Trim(), $scarletArmRecompText.IndexOf('[Scarlet.Perf] hot sync SVC resume'))
+    if ($fpIndex -lt 0) {
+        throw 'Scarlet runtime overlay: ArmRecomp FP entry anchor missing'
+    }
+    $scarletArmRecompText = $scarletArmRecompText.Remove($fpIndex, $fpOld.Trim().Length).Insert($fpIndex, $fpNew.Trim())
+    Write-Host '[Scarlet PC] Enabled lightweight same-thread resume for synchronization SVCs.' -ForegroundColor Green
+}
+
+
+# Disable periodic coverage/report file I/O in the production gameplay path.
+if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] no periodic coverage I/O during gameplay')) {
+    $scarletPeriodicOld = @'
+        if ((seen & 0x3FFFFULL) == 0x3FFFFULL) {
+            WriteRecompCoverageFile(FormatRecompCoverage());
+            // Time-limited inside; teardown is not guaranteed, as above.
+            RecompGaps::Flush(true, false);
+        }
+'@
+    $scarletPeriodicNew = @'
+        // [Scarlet.Perf] no periodic coverage I/O during gameplay
+        static const bool scarlet_periodic_coverage = [] {
+            const char* value = std::getenv("SCARLET_RECOMP_COVERAGE");
+            return value && *value && *value != '0';
+        }();
+        if (scarlet_periodic_coverage &&
+            (seen & 0x3FFFFULL) == 0x3FFFFULL) {
+            WriteRecompCoverageFile(FormatRecompCoverage());
+            RecompGaps::Flush(true, false);
+        }
+'@
+    if ($scarletArmRecompText.Contains($scarletPeriodicOld.Trim())) {
+        $scarletArmRecompText =
+            $scarletArmRecompText.Replace($scarletPeriodicOld.Trim(),
+                                          $scarletPeriodicNew.Trim())
+        Write-Host '[Scarlet PC] Disabled periodic recomp coverage I/O for gameplay.' -ForegroundColor Green
+    }
+}
+
+[IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
+
+$scarletPhysicalCorePath = Join-Path $SourceDir 'src\core\hle\kernel\physical_core.cpp'
+$scarletPhysicalCoreText = [IO.File]::ReadAllText($scarletPhysicalCorePath)
+if (-not $scarletPhysicalCoreText.Contains('[Scarlet.Perf] resume serviced SVC in-place')) {
+    $svcReturnPattern =
+        '(?s)(if\s*\(\s*supervisor_call\s*\)\s*\{\s*(?://[^\r\n]*\r?\n\s*)?' +
+        'Svc::Call\s*\(\s*system\s*,\s*interface->GetSvcNumber\(\)\s*\)\s*;)\s*' +
+        'return\s*;\s*\}'
+    $svcReturnRegex = [regex]::new(
+        $svcReturnPattern,
+        [Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    if (-not $svcReturnRegex.IsMatch($scarletPhysicalCoreText)) {
+        throw 'Scarlet runtime overlay: semantic PhysicalCore SVC return block missing'
+    }
+    $svcReturnNew = @'
+$1
+
+            // [Scarlet.Perf] resume serviced SVC in-place
+            // Most Scarlet SVCs are synchronization calls. If the kernel
+            // serviced the call and resumed this exact guest thread on this
+            // exact physical core, continue immediately instead of unwinding
+            // through CpuManager and rebuilding the PhysicalCore run context.
+            // Blocking/migrating/interrupted calls still take the stock path.
+            if (&kernel.CurrentPhysicalCore() == this &&
+                GetCurrentThreadPointer(kernel) == thread &&
+                !IsInterrupted()) {
+                continue;
+            }
+            return;
+        }
+'@
+    $scarletPhysicalCoreText = $svcReturnRegex.Replace(
+        $scarletPhysicalCoreText,
+        $svcReturnNew.TrimEnd(),
+        1
+    )
+    [IO.File]::WriteAllText($scarletPhysicalCorePath, $scarletPhysicalCoreText, $utf8)
+    Write-Host '[Scarlet PC] Same-core SVC resume avoids full CpuManager unwind.' -ForegroundColor Green
+}
+
+
+
+
+# Scarlet synchronization hot paths. Preserve the exact slow path whenever
+# contention exists; skip the global scheduler lock only when userspace proves
+# there is nobody to wake.
+$scarletCondPath = Join-Path $SourceDir 'src\core\hle\kernel\k_condition_variable.cpp'
+$scarletCondText = [IO.File]::ReadAllText($scarletCondPath)
+
+if (-not $scarletCondText.Contains('[Scarlet.Perf] uncontended mutex unlock fast path')) {
+    $scarletCondClassAnchor = 'class ThreadQueueImplForKConditionVariableWaitForAddress final'
+    $scarletUnlockHelper = @'
+// [Scarlet.Perf] uncontended mutex unlock fast path
+bool TryUnlockNoWaiters(KernelCore& kernel, KProcessAddress address) {
+    auto& monitor = GetCurrentProcess(kernel).GetExclusiveMonitor();
+    const auto current_core = kernel.CurrentPhysicalCoreIndex();
+
+    // Read the exact lock word through the guest exclusive monitor. If the
+    // wait-mask is already present, the slow scheduler path must choose the next
+    // owner. If another core adds contention after this read, our exclusive
+    // store fails and we fall back as well.
+    const u32 current =
+        monitor.ExclusiveRead32(current_core, GetInteger(address));
+    if ((current & Svc::HandleWaitMask) != 0) {
+        monitor.ClearExclusive(current_core);
+        return false;
+    }
+
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return monitor.ExclusiveWrite32(current_core, GetInteger(address), 0);
+}
+
+'@
+    if (-not $scarletCondText.Contains($scarletCondClassAnchor)) {
+        throw 'Scarlet runtime overlay: condition-variable class anchor missing'
+    }
+    $scarletCondText =
+        $scarletCondText.Replace($scarletCondClassAnchor,
+                                 $scarletUnlockHelper + $scarletCondClassAnchor)
+
+    # Insert the uncontended unlock fast path structurally. Incremental trees can
+    # have diagnostics/comments inserted between the signature and scheduler path.
+    if (-not $scarletCondText.Contains('TryUnlockNoWaiters(kernel, addr)')) {
+        $scarletSignalAddrPattern =
+            '(?s)(Result KConditionVariable::SignalToAddress\(KernelCore& kernel, KProcessAddress addr\)\s*\{\s*' +
+            'KThread\*\s+owner_thread\s*=\s*GetCurrentThreadPointer\(kernel\);)'
+        $scarletSignalAddrRegex = [regex]::new(
+            $scarletSignalAddrPattern,
+            [Text.RegularExpressions.RegexOptions]::Singleline
+        )
+        $scarletSignalAddrMatch = $scarletSignalAddrRegex.Match($scarletCondText)
+        if (-not $scarletSignalAddrMatch.Success) {
+            throw 'Scarlet runtime overlay: semantic SignalToAddress anchor missing'
+        }
+        $scarletSignalAddrInsert = @'
+
+    // Most Scarlet mutex unlocks are uncontended. Avoid taking the global
+    // scheduler lock when the guest lock word proves that no waiter exists.
+    // Lock-trace mode deliberately keeps the full path for diagnostics.
+    if (!LockTrace::Enabled() && TryUnlockNoWaiters(kernel, addr)) {
+        R_SUCCEED();
+    }
+'@
+        $scarletCondText = $scarletSignalAddrRegex.Replace(
+            $scarletCondText,
+            '$1' + $scarletSignalAddrInsert,
+            1
+        )
+        Write-Host '[Scarlet PC] Added uncontended mutex unlock fast path.' -ForegroundColor DarkGray
+    }
+
+    # Same approach for condition-variable signaling: inject immediately after
+    # the function signature regardless of surrounding comments/formatting.
+    if (-not $scarletCondText.Contains('has_waiter_flag == 0')) {
+        $scarletCvSignalPattern =
+            '(void KConditionVariable::Signal\(u64 cv_key, s32 count\)\s*\{)'
+        $scarletCvSignalRegex = [regex]::new($scarletCvSignalPattern)
+        $scarletCvSignalMatch = $scarletCvSignalRegex.Match($scarletCondText)
+        if (-not $scarletCvSignalMatch.Success) {
+            throw 'Scarlet runtime overlay: semantic condition-variable Signal anchor missing'
+        }
+        $scarletCvSignalInsert = @'
+
+    // Scarlet's userspace CV word is set to 1 before a waiter is inserted while
+    // holding the scheduler lock, and cleared when the last waiter leaves. A
+    // zero therefore linearizes this signal before any concurrent new waiter
+    // and lets the common no-waiter case avoid the scheduler lock entirely.
+    u32 has_waiter_flag{};
+    if (ReadFromUser(m_system.Kernel(), std::addressof(has_waiter_flag), cv_key) &&
+        has_waiter_flag == 0) {
+        return;
+    }
+'@
+        $scarletCondText = $scarletCvSignalRegex.Replace(
+            $scarletCondText,
+            '$1' + $scarletCvSignalInsert,
+            1
+        )
+        Write-Host '[Scarlet PC] Added no-waiter CV signal fast path.' -ForegroundColor DarkGray
+    }
+
+    [IO.File]::WriteAllText($scarletCondPath, $scarletCondText, $utf8)
+    Write-Host '[Scarlet PC] Sync fast paths: uncontended mutex/CV signals avoid scheduler lock.' -ForegroundColor DarkGray
+}
+
+# Inline SVC 0x10 never reaches HLE, so do not inflate the "SVCs to HLE" total.
+$scarletArmRecompPath = Join-Path $SourceDir 'src\core\arm\recomp\arm_recomp.cpp'
+$scarletArmRecompText = [IO.File]::ReadAllText($scarletArmRecompPath)
+$scarletInlineSvcOld = @'
+            if (svc_number == 0x10) {
+                g_counters.svc_calls.fetch_add(1, std::memory_order_relaxed);
+                g_counters.RecordSvc(svc_number);
+'@
+$scarletInlineSvcNew = @'
+            if (svc_number == 0x10) {
+                // Count in the per-SVC histogram, but not in "SVCs to HLE":
+                // this call is completed entirely inside ArmRecomp.
+                g_counters.RecordSvc(svc_number);
+'@
+if ($scarletArmRecompText.Contains($scarletInlineSvcOld.Trim())) {
+    $scarletArmRecompText =
+        $scarletArmRecompText.Replace($scarletInlineSvcOld.Trim(),
+                                      $scarletInlineSvcNew.Trim())
+    [IO.File]::WriteAllText($scarletArmRecompPath, $scarletArmRecompText, $utf8)
+    Write-Host '[Scarlet PC] Coverage now excludes inline SVC 0x10 from HLE transitions.' -ForegroundColor DarkGray
+}
+
+
+# Address-arbiter fast rejects. The slow path is unchanged whenever a wait can
+# really happen; only provably-failed conditions skip the global scheduler lock.
+$scarletArbiterPath = Join-Path $SourceDir 'src\core\hle\kernel\k_address_arbiter.cpp'
+$scarletArbiterText = [IO.File]::ReadAllText($scarletArbiterPath)
+
+if (-not $scarletArbiterText.Contains('#include <cstdlib>')) {
+    $scarletArbiterText =
+        "#include <cstdlib>" + [Environment]::NewLine + $scarletArbiterText
+}
+
+if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast reject')) {
+    # Incremental-safe structural insertion for WaitIfLessThan.
+    if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast reject less')) {
+        $scarletWaitLessPattern =
+            '(?s)(Result KAddressArbiter::WaitIfLessThan\(uint64_t addr, s32 value, bool decrement, s64 timeout\)\s*\{.*?' +
+            'KThread\*\s+cur_thread\s*=\s*GetCurrentThreadPointer\(system\.Kernel\(\)\);)'
+        $scarletWaitLessRegex = [regex]::new(
+            $scarletWaitLessPattern,
+            [Text.RegularExpressions.RegexOptions]::Singleline
+        )
+        $scarletWaitLessMatch = $scarletWaitLessRegex.Match($scarletArbiterText)
+        if (-not $scarletWaitLessMatch.Success) {
+            throw 'Scarlet runtime overlay: semantic WaitIfLessThan fast-reject anchor missing'
+        }
+        $scarletWaitLessInsert = @'
+
+    // [Scarlet.Perf] address-arbiter fast reject less
+    // [Scarlet.Perf] short address wait spin
+    // Preserve termination precedence from the original slow path.
+    if (cur_thread->IsTerminationRequested()) {
+        R_THROW(ResultTerminationRequested);
+    }
+
+    // Short producer/consumer hand-offs are common in Scarlet. Give the other
+    // guest core a tiny bounded window to change the word before taking the
+    // global scheduler lock. If the predicate becomes false, linearizing the
+    // SVC here is equivalent to the original locked re-check and avoids a
+    // sleep/wake round-trip. SCARLET_SYNC_SPIN=0 disables this experiment.
+    static const int scarlet_sync_spin = [] {
+        const char* e = std::getenv("SCARLET_SYNC_SPIN");
+        int v = (e && *e) ? std::atoi(e) : 0;
+        if (v < 0) v = 0;
+        if (v > 256) v = 256;
+        return v;
+    }();
+
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr)) {
+        if (fast_value >= value) {
+            R_THROW(ResultInvalidState);
+        }
+        for (int i = 0; i < scarlet_sync_spin; ++i) {
+            s32 spin_value{};
+            if (!ReadFromUser(system.Kernel(), std::addressof(spin_value), addr)) {
+                break;
+            }
+            if (spin_value >= value) {
+                R_THROW(ResultInvalidState);
+            }
+        }
+    }
+'@
+        $scarletArbiterText = $scarletWaitLessRegex.Replace(
+            $scarletArbiterText,
+            '$1' + $scarletWaitLessInsert,
+            1
+        )
+        Write-Host '[Scarlet PC] Added WaitIfLessThan scheduler-lock fast reject.' -ForegroundColor DarkGray
+    }
+
+    # Incremental-safe structural insertion for WaitIfEqual.
+    if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast reject equal')) {
+        $scarletWaitEqualPattern =
+            '(?s)(Result KAddressArbiter::WaitIfEqual\(uint64_t addr, s32 value, s64 timeout\)\s*\{.*?' +
+            'KThread\*\s+cur_thread\s*=\s*GetCurrentThreadPointer\(system\.Kernel\(\)\);)'
+        $scarletWaitEqualRegex = [regex]::new(
+            $scarletWaitEqualPattern,
+            [Text.RegularExpressions.RegexOptions]::Singleline
+        )
+        $scarletWaitEqualMatch = $scarletWaitEqualRegex.Match($scarletArbiterText)
+        if (-not $scarletWaitEqualMatch.Success) {
+            throw 'Scarlet runtime overlay: semantic WaitIfEqual fast-reject anchor missing'
+        }
+        $scarletWaitEqualInsert = @'
+
+    // [Scarlet.Perf] address-arbiter fast reject equal
+    // [Scarlet.Perf] short address wait spin
+    // Preserve termination precedence from the original slow path.
+    if (cur_thread->IsTerminationRequested()) {
+        R_THROW(ResultTerminationRequested);
+    }
+
+    static const int scarlet_sync_spin = [] {
+        const char* e = std::getenv("SCARLET_SYNC_SPIN");
+        int v = (e && *e) ? std::atoi(e) : 0;
+        if (v < 0) v = 0;
+        if (v > 256) v = 256;
+        return v;
+    }();
+
+    // A mismatched value means this wait must fail. For equal candidates, poll
+    // briefly before entering the scheduler; a producer that changes the word
+    // during this bounded window turns the expensive wait into the same
+    // ResultInvalidState the original locked path would return.
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr)) {
+        if (fast_value != value) {
+            R_THROW(ResultInvalidState);
+        }
+        for (int i = 0; i < scarlet_sync_spin; ++i) {
+            s32 spin_value{};
+            if (!ReadFromUser(system.Kernel(), std::addressof(spin_value), addr)) {
+                break;
+            }
+            if (spin_value != value) {
+                R_THROW(ResultInvalidState);
+            }
+        }
+    }
+'@
+        $scarletArbiterText = $scarletWaitEqualRegex.Replace(
+            $scarletArbiterText,
+            '$1' + $scarletWaitEqualInsert,
+            1
+        )
+        Write-Host '[Scarlet PC] Added WaitIfEqual scheduler-lock fast reject.' -ForegroundColor DarkGray
+    }
+
+    # Conditional signal variants: reject only proven userspace mismatches before
+    # acquiring the scheduler lock. Matching values retain the exact old path.
+    if (-not $scarletArbiterText.Contains('[Scarlet.Perf] signal increment fast reject')) {
+        $scarletSignalIncPattern =
+            '(Result KAddressArbiter::SignalAndIncrementIfEqual\(uint64_t addr, s32 value, s32 count\)\s*\{)'
+        $scarletSignalIncRegex = [regex]::new($scarletSignalIncPattern)
+        if ($scarletSignalIncRegex.IsMatch($scarletArbiterText)) {
+            $scarletSignalIncInsert = @'
+
+    // [Scarlet.Perf] signal increment fast reject
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
+        fast_value != value) {
+        R_THROW(ResultInvalidState);
+    }
+'@
+            $scarletArbiterText = $scarletSignalIncRegex.Replace(
+                $scarletArbiterText,
+                '$1' + $scarletSignalIncInsert,
+                1
+            )
+        }
+    }
+
+    if (-not $scarletArbiterText.Contains('[Scarlet.Perf] signal modify fast reject')) {
+        $scarletSignalModifyPattern =
+            '(Result KAddressArbiter::SignalAndModifyByWaitingCountIfEqual\(uint64_t addr, s32 value, s32 count\)\s*\{)'
+        $scarletSignalModifyRegex = [regex]::new($scarletSignalModifyPattern)
+        if ($scarletSignalModifyRegex.IsMatch($scarletArbiterText)) {
+            $scarletSignalModifyInsert = @'
+
+    // [Scarlet.Perf] signal modify fast reject
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
+        fast_value != value) {
+        R_THROW(ResultInvalidState);
+    }
+'@
+            $scarletArbiterText = $scarletSignalModifyRegex.Replace(
+                $scarletArbiterText,
+                '$1' + $scarletSignalModifyInsert,
+                1
+            )
+        }
+    }
+
+    [IO.File]::WriteAllText($scarletArbiterPath, $scarletArbiterText, $utf8)
+    Write-Host '[Scarlet PC] Address-arbiter fast rejects avoid unnecessary scheduler locks.' -ForegroundColor DarkGray
+}
+
+# FastIncremental may preserve the older one-read fast rejects. Upgrade those
+# in-place so this performance experiment does not require deleting the runtime
+# source tree.
+if (-not $scarletArbiterText.Contains('[Scarlet.Perf] short address wait spin')) {
+    $oldLessRuntime = @'
+    // [Scarlet.Perf] address-arbiter fast reject less
+    // Preserve termination precedence from the original slow path.
+    if (cur_thread->IsTerminationRequested()) {
+        R_THROW(ResultTerminationRequested);
+    }
+
+    // If the userspace predicate is already false, this call cannot enqueue.
+    // Matching candidates still enter the original scheduler-locked path and
+    // are revalidated there before any decrement or sleep.
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
+        fast_value >= value) {
+        R_THROW(ResultInvalidState);
+    }
+'@
+    $newLessRuntime = @'
+    // [Scarlet.Perf] address-arbiter fast reject less
+    // [Scarlet.Perf] short address wait spin
+    if (cur_thread->IsTerminationRequested()) {
+        R_THROW(ResultTerminationRequested);
+    }
+    static const int scarlet_sync_spin = [] {
+        const char* e = std::getenv("SCARLET_SYNC_SPIN");
+        int v = (e && *e) ? std::atoi(e) : 0;
+        if (v < 0) v = 0;
+        if (v > 256) v = 256;
+        return v;
+    }();
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr)) {
+        if (fast_value >= value) {
+            R_THROW(ResultInvalidState);
+        }
+        for (int i = 0; i < scarlet_sync_spin; ++i) {
+            s32 spin_value{};
+            if (!ReadFromUser(system.Kernel(), std::addressof(spin_value), addr)) {
+                break;
+            }
+            if (spin_value >= value) {
+                R_THROW(ResultInvalidState);
+            }
+        }
+    }
+'@
+    $oldEqRuntime = @'
+    // [Scarlet.Perf] address-arbiter fast reject equal
+    // Preserve termination precedence from the original slow path.
+    if (cur_thread->IsTerminationRequested()) {
+        R_THROW(ResultTerminationRequested);
+    }
+
+    // A mismatched value means this wait must fail. Equal candidates continue
+    // through the original scheduler-locked path and are rechecked there.
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr) &&
+        fast_value != value) {
+        R_THROW(ResultInvalidState);
+    }
+'@
+    $newEqRuntime = @'
+    // [Scarlet.Perf] address-arbiter fast reject equal
+    // [Scarlet.Perf] short address wait spin
+    if (cur_thread->IsTerminationRequested()) {
+        R_THROW(ResultTerminationRequested);
+    }
+    static const int scarlet_sync_spin = [] {
+        const char* e = std::getenv("SCARLET_SYNC_SPIN");
+        int v = (e && *e) ? std::atoi(e) : 0;
+        if (v < 0) v = 0;
+        if (v > 256) v = 256;
+        return v;
+    }();
+    s32 fast_value{};
+    if (ReadFromUser(system.Kernel(), std::addressof(fast_value), addr)) {
+        if (fast_value != value) {
+            R_THROW(ResultInvalidState);
+        }
+        for (int i = 0; i < scarlet_sync_spin; ++i) {
+            s32 spin_value{};
+            if (!ReadFromUser(system.Kernel(), std::addressof(spin_value), addr)) {
+                break;
+            }
+            if (spin_value != value) {
+                R_THROW(ResultInvalidState);
+            }
+        }
+    }
+'@
+    $changedSpin = $false
+    if ($scarletArbiterText.Contains($oldLessRuntime.Trim())) {
+        $scarletArbiterText =
+            $scarletArbiterText.Replace($oldLessRuntime.Trim(), $newLessRuntime.Trim())
+        $changedSpin = $true
+    }
+    if ($scarletArbiterText.Contains($oldEqRuntime.Trim())) {
+        $scarletArbiterText =
+            $scarletArbiterText.Replace($oldEqRuntime.Trim(), $newEqRuntime.Trim())
+        $changedSpin = $true
+    }
+    if ($changedSpin) {
+        if (-not $scarletArbiterText.Contains('#include <cstdlib>')) {
+            $scarletArbiterText =
+                "#include <cstdlib>" + [Environment]::NewLine + $scarletArbiterText
+        }
+        [IO.File]::WriteAllText($scarletArbiterPath, $scarletArbiterText, $utf8)
+        Write-Host '[Scarlet PC] Short address-wait spin available (default off; SCARLET_SYNC_SPIN enables it).' -ForegroundColor Green
+    }
+}
+
+
+# Process-wide CV wait hot path (SVC 0x1C). The scheduler lock is still held
+# exactly as before for atomic unlock+sleep semantics, but avoid owner waiter-list
+# traversal/priority work when the guest mutex word proves there are no waiters.
+$scarletCondPath = Join-Path $SourceDir 'src\core\hle\kernel\k_condition_variable.cpp'
+$scarletCondText = [IO.File]::ReadAllText($scarletCondPath)
+
+if (-not $scarletCondText.Contains('[Scarlet.Perf] CV wait uncontended unlock fast path')) {
+    $scarletCvWaitOld = @'
+        // Update the value and process for the next owner.
+        {
+            // Remove waiter thread.
+            bool has_waiters{};
+            KThread* next_owner_thread =
+                cur_thread->RemoveUserWaiterByKey(m_system.Kernel(), std::addressof(has_waiters), addr);
+
+            // Update for the next owner thread.
+            u32 next_value{};
+            if (next_owner_thread != nullptr) {
+                // Get the next tag value.
+                next_value = next_owner_thread->GetAddressKeyValue();
+                if (has_waiters) {
+                    next_value |= Svc::HandleWaitMask;
+                }
+
+                // Wake up the next owner.
+                next_owner_thread->EndWait(m_system.Kernel(), ResultSuccess);
+            }
+'@
+    $scarletCvWaitNew = @'
+        // Update the value and process for the next owner.
+        {
+            // [Scarlet.Perf] CV wait uncontended unlock fast path
+            // A waiter can only enter the owner's kernel waiter list after
+            // setting HandleWaitMask while holding this same scheduler lock.
+            // If the guest word has no wait mask here, there is no waiter-list
+            // entry to search/remove and the next mutex value is necessarily 0.
+            u32 lock_word{};
+            const bool lock_read_ok =
+                ReadFromUser(m_system.Kernel(), std::addressof(lock_word), addr);
+            const bool mutex_has_waiters =
+                !lock_read_ok || (lock_word & Svc::HandleWaitMask) != 0;
+
+            bool has_waiters{};
+            KThread* next_owner_thread = nullptr;
+            u32 next_value{};
+
+            if (mutex_has_waiters) {
+                next_owner_thread =
+                    cur_thread->RemoveUserWaiterByKey(
+                        m_system.Kernel(), std::addressof(has_waiters), addr);
+
+                if (next_owner_thread != nullptr) {
+                    next_value = next_owner_thread->GetAddressKeyValue();
+                    if (has_waiters) {
+                        next_value |= Svc::HandleWaitMask;
+                    }
+
+                    next_owner_thread->EndWait(m_system.Kernel(), ResultSuccess);
+                }
+            }
+'@
+    if ($scarletCondText.Contains($scarletCvWaitOld.Trim())) {
+        $scarletCondText =
+            $scarletCondText.Replace($scarletCvWaitOld.Trim(), $scarletCvWaitNew.Trim())
+
+        [IO.File]::WriteAllText($scarletCondPath, $scarletCondText, $utf8)
+        Write-Host '[Scarlet PC] CV wait fast path skips waiter-list traversal on uncontended mutexes.' -ForegroundColor DarkGray
+    } else {
+        # FastIncremental intentionally preserves the already-patched runtime tree.
+        # Older Scarlet CPU/sync experiments can leave this semantic block in a
+        # different but valid form. Do not abort the entire quick update merely
+        # because this optional micro-optimization cannot be re-applied literally.
+        Write-Host '[Scarlet PC] Quick overlay: CV wait owner-transfer block already differs; preserving existing runtime path.' -ForegroundColor DarkGray
+    }
+}
+
+Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
+
+    $runThreadRegex = [regex]::new(
+        $runThreadPattern,
+        [Text.RegularExpressions.RegexOptions]::Multiline
+    )
+    if (-not $runThreadRegex.IsMatch($scarletArmRecompText)) {
+        throw 'Scarlet runtime overlay: semantic ArmRecomp RunThread signature missing'
+    }
     $runThreadNew = @'
 HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
     // [Scarlet.Perf] hot sync SVC resume
@@ -5784,14 +6391,12 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          scarlet_resume_svc == 0x1B || scarlet_resume_svc == 0x1C ||
          scarlet_resume_svc == 0x1D || scarlet_resume_svc == 0x34 ||
          scarlet_resume_svc == 0x35);
-
-    // A context switch voids any outstanding reservation. A thread preempted
 '@
-    if (-not $scarletArmRecompText.Contains($runThreadOld.Trim())) {
-        throw 'Scarlet runtime overlay: ArmRecomp RunThread anchor missing'
-    }
-    $scarletArmRecompText =
-        $scarletArmRecompText.Replace($runThreadOld.Trim(), $runThreadNew.Trim())
+    $scarletArmRecompText = $runThreadRegex.Replace(
+        $scarletArmRecompText,
+        $runThreadNew.TrimEnd(),
+        1
+    )
 
     $refreshOld = '    impl->RefreshPageTable();'
     $refreshNew = @'
