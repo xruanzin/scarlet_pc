@@ -5765,36 +5765,69 @@ if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] thread-local early dispa
 }
 
 if (-not $scarletArmRecompText.Contains('[Scarlet.Perf] hot sync SVC resume')) {
-    $runThreadPattern =
-        '(?m)^HaltReason\s+ArmRecomp::RunThread\s*\(\s*Kernel::KThread\*\s*thread\s*\)\s*\{\s*
+    $runThreadSignature = 'HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {'
+    $runThreadIndex = $scarletArmRecompText.IndexOf($runThreadSignature)
+    if ($runThreadIndex -lt 0) {
+        throw 'Scarlet runtime overlay: ArmRecomp RunThread signature missing'
+    }
+
+    $runThreadInsert = @'
+
+    // [Scarlet.Perf] hot sync SVC resume
+    // pending_svc remains set until the dispatch loop clears it. On same-thread
+    // re-entry after a synchronization SVC, the process page table cannot have
+    // changed, so skip rebuilding the fastmem view. Mapping-related SVCs retain
+    // the full refresh path.
+    const bool scarlet_same_thread = impl->last_thread == thread;
+    const u32 scarlet_resume_svc = static_cast<u32>(impl->ctx.pending_svc);
+    const bool scarlet_hot_sync_resume =
+        scarlet_same_thread &&
+        (scarlet_resume_svc == 0x18 || scarlet_resume_svc == 0x1A ||
+         scarlet_resume_svc == 0x1B || scarlet_resume_svc == 0x1C ||
+         scarlet_resume_svc == 0x1D || scarlet_resume_svc == 0x34 ||
+         scarlet_resume_svc == 0x35);
+'@
+    $runThreadInsertAt = $runThreadIndex + $runThreadSignature.Length
+    $scarletArmRecompText =
+        $scarletArmRecompText.Insert($runThreadInsertAt, $runThreadInsert)
+
+    $hotMarkerIndex =
+        $scarletArmRecompText.IndexOf('[Scarlet.Perf] hot sync SVC resume')
 
     $refreshOld = '    impl->RefreshPageTable();'
+    $refreshIndex = $scarletArmRecompText.IndexOf($refreshOld, $hotMarkerIndex)
+    if ($refreshIndex -lt 0) {
+        throw 'Scarlet runtime overlay: ArmRecomp RefreshPageTable anchor missing'
+    }
     $refreshNew = @'
     if (!scarlet_hot_sync_resume) {
         impl->RefreshPageTable();
     }
-'@.TrimEnd()
-    $refreshIndex = $scarletArmRecompText.IndexOf($refreshOld, $scarletArmRecompText.IndexOf('[Scarlet.Perf] hot sync SVC resume'))
-    if ($refreshIndex -lt 0) {
-        throw 'Scarlet runtime overlay: ArmRecomp RefreshPageTable anchor missing'
-    }
-    $scarletArmRecompText = $scarletArmRecompText.Remove($refreshIndex, $refreshOld.Length).Insert($refreshIndex, $refreshNew)
+'@
+    $scarletArmRecompText =
+        $scarletArmRecompText.Remove($refreshIndex, $refreshOld.Length)
+    $scarletArmRecompText =
+        $scarletArmRecompText.Insert($refreshIndex, $refreshNew.TrimEnd())
 
     $fpOld = @'
     if (fpx_active) {
         RepairFpEnv("entry");
     }
 '@
-    $fpNew = @'
+    $fpIndex =
+        $scarletArmRecompText.IndexOf($fpOld.Trim(), $hotMarkerIndex)
+    if ($fpIndex -ge 0) {
+        $fpNew = @'
     if (fpx_active && !scarlet_hot_sync_resume) {
         RepairFpEnv("entry");
     }
 '@
-    $fpIndex = $scarletArmRecompText.IndexOf($fpOld.Trim(), $scarletArmRecompText.IndexOf('[Scarlet.Perf] hot sync SVC resume'))
-    if ($fpIndex -lt 0) {
-        throw 'Scarlet runtime overlay: ArmRecomp FP entry anchor missing'
+        $scarletArmRecompText =
+            $scarletArmRecompText.Remove($fpIndex, $fpOld.Trim().Length)
+        $scarletArmRecompText =
+            $scarletArmRecompText.Insert($fpIndex, $fpNew.Trim())
     }
-    $scarletArmRecompText = $scarletArmRecompText.Remove($fpIndex, $fpOld.Trim().Length).Insert($fpIndex, $fpNew.Trim())
+
     Write-Host '[Scarlet PC] Enabled lightweight same-thread resume for synchronization SVCs.' -ForegroundColor Green
 }
 
