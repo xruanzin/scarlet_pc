@@ -18,6 +18,7 @@
 #include "storage_ranges.h"
 #include "../indirect.h"
 #include "vk.h"
+#include "scarlet_temporal.h"
 #include "../renderer.h"
 #include "../../settings.h"
 
@@ -5246,6 +5247,14 @@ static void exec_list(uint64_t handle, int depth) {
             st.rt.depth = (NvnTexture *)(uintptr_t)rt->depth;
             st.rt.dview = rt->dview;
             st.rt.has_dview = rt->has_dview;
+
+            // Capture Scarlet's true temporal scene pair in the native renderer.
+            // It remains retained across later post-processing/UI passes just as
+            // in the verified legacy bridge, but no video_core object is involved.
+            scarlet_temporal_observe(st.rt.color, st.rt.cview, st.rt.has_cview,
+                                     st.rt.ncolor, st.rt.depth, &st.rt.dview,
+                                     st.rt.has_dview != 0);
+
             static int always = -1;
             if (always < 0) always = getenv("LARECOMP_VK_PASS_RESTART") != NULL;
             if (always || memcmp(&prev, &st.rt, sizeof prev)) st.rt_dirty = true;
