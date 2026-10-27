@@ -74,7 +74,7 @@ jobs:
             Write-Host "parsed $script"
           }
 
-      - name: Compile Scarlet native runtime, renderer and FidelityFX provider
+      - name: Build and link ScarletPC native runtime
         shell: msys2 {0}
         run: |
-          make -j2 B=build/native-ci EXE_NAME=ScarletPC runtime-objs
+          make -j2 B=build/native-ci EXE_NAME=ScarletPC build/native-ci/ScarletPC.exe
