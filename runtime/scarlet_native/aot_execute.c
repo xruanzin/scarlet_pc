@@ -371,6 +371,7 @@ void scarlet_aot_guest_call(Cpu *cpu, uint64_t address) {
                 last_report = now;
                 scarlet_aot_profile_report();
                 rt_hle_profile_report();
+                kernel_profile_report();
             }
         }
     }

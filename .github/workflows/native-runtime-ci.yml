@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - native/scarlet-runtime-migration
+      - native/aot-launcher-validation
   pull_request:
     paths:
       - 'runtime/scarlet_native/**'

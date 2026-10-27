@@ -6,6 +6,7 @@ param(
 
     [string]$GamePath,
     [string]$UpdatePath,
+    [string[]]$DlcPath = @(),
 
     [ValidateRange(1, 32)]
     [int]$Jobs = 4,
@@ -26,6 +27,7 @@ if ($Runtime -eq 'legacy') {
     $args = @{}
     if (-not [string]::IsNullOrWhiteSpace($GamePath)) { $args.GamePath = $GamePath }
     if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) { $args.UpdatePath = $UpdatePath }
+    if ($DlcPath.Count) { $args.DlcPath = $DlcPath }
     & $legacy @args
     exit $LASTEXITCODE
 }
@@ -34,14 +36,22 @@ if ($Runtime -eq 'legacy') {
 # require BKTR/patch overlay semantics that have not been migrated yet. Never
 # ignore an explicitly requested update: preserve the known-working legacy
 # path until the native overlay service replaces it.
-if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
-    Write-Warning 'Native BKTR/update overlay is not migrated yet; preserving update support through the legacy runtime for this launch.'
+if (-not [string]::IsNullOrWhiteSpace($UpdatePath) -or $DlcPath.Count) {
+    if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
+        Write-Warning 'Native BKTR/update overlay is not migrated yet; preserving update support through the legacy runtime for this launch.'
+    }
+    if ($DlcPath.Count) {
+        Write-Warning 'Native DLC content overlay is not migrated yet; preserving DLC support through the legacy runtime for this launch.'
+    }
     $legacy = Join-Path $PSScriptRoot 'scarlet_independent_run.ps1'
-    $args = @{ UpdatePath = $UpdatePath }
+    $args = @{}
     if (-not [string]::IsNullOrWhiteSpace($GamePath)) { $args.GamePath = $GamePath }
+    if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) { $args.UpdatePath = $UpdatePath }
+    if ($DlcPath.Count) { $args.DlcPath = $DlcPath }
     & $legacy @args
     exit $LASTEXITCODE
 }
+
 
 $exe = Join-Path $repoRoot 'build\native\ScarletPC.exe'
 if ($Build -or -not (Test-Path $exe -PathType Leaf)) {
@@ -122,12 +132,9 @@ try {
 
     $launch = @()
     if ($NoLauncher) { $launch += '--play' }
-    # Start-Process joins ArgumentList with spaces, so preserve a root such as
-    # C:\Users\Player\Pokemon Scarlet as one argument. Keep a drive root's
-    # trailing separator by doubling trailing backslashes before the quote.
+    # Start-Process joins ArgumentList; keep the selected path as one argument.
     if ($resolvedRoot.Contains('"')) { throw 'Invalid quote in game path.' }
-    $quotedRoot = [regex]::Replace($resolvedRoot, '(\\+)$', '$1$1')
-    $launch += ('"' + $quotedRoot + '"')
+    $quotedRoot = [regex]::Replace($resolvedRoot, '(\\+)
 
     $p = Start-Process -FilePath $exe -ArgumentList $launch -WorkingDirectory $repoRoot -PassThru -Wait
     if ($p.ExitCode -ne 0) {
@@ -151,4 +158,30 @@ finally {
         try { Wait-Process -Id $packageMountPid -Timeout 5 -ErrorAction SilentlyContinue } catch {}
     }
     if ($null -eq $oldHleProfile) { Remove-Item Env:LARECOMP_HLE_PROF -ErrorAction SilentlyContinue } else { $env:LARECOMP_HLE_PROF = $oldHleProfile }
+}
+, '$1$1')
+    $launch += ('"' + $quotedRoot + '"')
+
+    $p = Start-Process -FilePath $exe -ArgumentList $launch -WorkingDirectory $repoRoot -PassThru -Wait
+    if ($p.ExitCode -ne 0) {
+        throw "Scarlet Native Runtime exited with code $($p.ExitCode)"
+    }
+}
+finally {
+    if ($null -eq $oldRuntime) { Remove-Item Env:SCARLET_RUNTIME -ErrorAction SilentlyContinue } else { $env:SCARLET_RUNTIME = $oldRuntime }
+    if ($null -eq $oldProfile) { Remove-Item Env:SCARLET_NATIVE_PROFILE -ErrorAction SilentlyContinue } else { $env:SCARLET_NATIVE_PROFILE = $oldProfile }
+    if ($null -eq $oldLauncher) { Remove-Item Env:LARECOMP_NO_LAUNCHER -ErrorAction SilentlyContinue } else { $env:LARECOMP_NO_LAUNCHER = $oldLauncher }
+    if ($null -eq $oldExeFs) { Remove-Item Env:LARECOMP_EXEFS_DIR -ErrorAction SilentlyContinue } else { $env:LARECOMP_EXEFS_DIR = $oldExeFs }
+    if ($null -eq $oldRomFsDir) { Remove-Item Env:LARECOMP_ROMFS_DIR -ErrorAction SilentlyContinue } else { $env:LARECOMP_ROMFS_DIR = $oldRomFsDir }
+    if ($null -eq $oldRomFsImage) { Remove-Item Env:LARECOMP_ROMFS_IMAGE -ErrorAction SilentlyContinue } else { $env:LARECOMP_ROMFS_IMAGE = $oldRomFsImage }
+    if ($null -eq $oldPackageStream) { Remove-Item Env:LARECOMP_PACKAGE_STREAM -ErrorAction SilentlyContinue } else { $env:LARECOMP_PACKAGE_STREAM = $oldPackageStream }
+    if ($null -eq $oldSvcProfile) { Remove-Item Env:LARECOMP_PROF_SVC -ErrorAction SilentlyContinue } else { $env:LARECOMP_PROF_SVC = $oldSvcProfile }
+    if ($null -eq $oldVkProfile) { Remove-Item Env:LARECOMP_VK_PROF -ErrorAction SilentlyContinue } else { $env:LARECOMP_VK_PROF = $oldVkProfile }
+    if ($null -eq $oldCommandCounts) { Remove-Item Env:LARECOMP_COMMAND_COUNTS -ErrorAction SilentlyContinue } else { $env:LARECOMP_COMMAND_COUNTS = $oldCommandCounts }
+    if ($null -eq $oldFrameCsv) { Remove-Item Env:LARECOMP_FRAME_CSV -ErrorAction SilentlyContinue } else { $env:LARECOMP_FRAME_CSV = $oldFrameCsv }
+    if ($packageMountPid) {
+        Stop-Process -Id $packageMountPid -Force -ErrorAction SilentlyContinue
+        try { Wait-Process -Id $packageMountPid -Timeout 5 -ErrorAction SilentlyContinue } catch {}
+    }
+    if (-not $Profile) { Remove-Item Env:LARECOMP_HLE_PROF -ErrorAction SilentlyContinue }
 }

@@ -127,6 +127,25 @@ else {
     Write-Warning 'AOT directory not found. The EXE was built, but native boot needs the four existing AOT DLLs in build\native\aot.'
 }
 
+# Reuse an already-built optional NGX bridge if one exists. The native renderer
+# loads it dynamically only when SCARLET_UPSCALER=dlss; AMD/non-DLSS runs never
+# load NVIDIA code.
+foreach ($dlssStage in @(
+    (Join-Path $repoRoot 'build\scarlet-dlss-bridge\stage'),
+    (Join-Path $repoRoot 'dist\ScarletPC-Independent')
+)) {
+    if (Test-Path (Join-Path $dlssStage 'ScarletDlssBridge.dll') -PathType Leaf) {
+        foreach ($name in @('ScarletDlssBridge.dll','nvngx_dlss.dll','NVIDIA-DLSS-LICENSE.txt')) {
+            $src = Join-Path $dlssStage $name
+            if (Test-Path $src -PathType Leaf) {
+                Copy-Item $src (Join-Path $buildDir $name) -Force
+            }
+        }
+        Write-Host "[native] Preserved optional DLSS bridge payload from $dlssStage" -ForegroundColor DarkGreen
+        break
+    }
+}
+
 # The dependency prefix produced by the existing Makefile contains the runtime
 # DLLs. Copy them next to ScarletPC.exe; Vulkan itself remains the system loader.
 $depBin = Join-Path $deps 'bin'

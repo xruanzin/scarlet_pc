@@ -1,5 +1,6 @@
 param(
     [string]$SdkRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'third_party\NVIDIA-DLSS'),
+    [string]$VulkanInclude,
     [string]$RuntimeSource = (Join-Path (Split-Path $PSScriptRoot -Parent) 'third_party\scarlet-runtime-src'),
     [string]$BuildDir = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build\scarlet-dlss-bridge')
 )
@@ -10,9 +11,25 @@ Set-StrictMode -Version Latest
 $repoRoot = Split-Path $PSScriptRoot -Parent
 & (Join-Path $PSScriptRoot 'scarlet_fetch_dlss.ps1') -Destination $SdkRoot
 
-$vulkanInclude = Join-Path $RuntimeSource 'externals\Vulkan-Headers\include'
-if (-not (Test-Path (Join-Path $vulkanInclude 'vulkan\vulkan.h') -PathType Leaf)) {
-    throw 'Vulkan-Headers were not found in the Scarlet runtime source. Build/fetch the runtime first.'
+if ([string]::IsNullOrWhiteSpace($VulkanInclude)) {
+    if (-not [string]::IsNullOrWhiteSpace($env:VULKAN_SDK) -and
+        (Test-Path (Join-Path $env:VULKAN_SDK 'Include\vulkan\vulkan.h') -PathType Leaf)) {
+        $VulkanInclude = Join-Path $env:VULKAN_SDK 'Include'
+    }
+    else {
+        # Transitional fallback for existing developer checkouts. The native
+        # runtime itself does not use or link this tree; it is only a header
+        # source when a standalone Vulkan SDK is not installed yet.
+        $legacyHeaders = Join-Path $RuntimeSource 'externals\Vulkan-Headers\include'
+        if (Test-Path (Join-Path $legacyHeaders 'vulkan\vulkan.h') -PathType Leaf) {
+            $VulkanInclude = $legacyHeaders
+            Write-Warning 'Using legacy runtime Vulkan-Headers only for the optional DLSS bridge build. Install the Vulkan SDK to remove this build-time fallback.'
+        }
+    }
+}
+if ([string]::IsNullOrWhiteSpace($VulkanInclude) -or
+    -not (Test-Path (Join-Path $VulkanInclude 'vulkan\vulkan.h') -PathType Leaf)) {
+    throw 'Vulkan-Headers were not found. Install the Vulkan SDK or pass -VulkanInclude <...\Include>.'
 }
 
 $source = Join-Path $repoRoot 'runtime\nvidia'
@@ -30,7 +47,7 @@ if ($cmakeHelp -match 'Visual Studio 18 2026') {
 Write-Host '[Scarlet PC] Configuring optional NVIDIA DLSS bridge...' -ForegroundColor Cyan
 $configure = @('-S', $source, '-B', $BuildDir) + $generator + @(
     "-DDLSS_SDK_ROOT=$($SdkRoot.Replace('\','/'))",
-    "-DVULKAN_INCLUDE=$($vulkanInclude.Replace('\','/'))"
+    "-DVULKAN_INCLUDE=$($VulkanInclude.Replace('\','/'))"
 )
 & cmake @configure
 if ($LASTEXITCODE -ne 0) { throw 'Scarlet DLSS bridge CMake configure failed.' }
