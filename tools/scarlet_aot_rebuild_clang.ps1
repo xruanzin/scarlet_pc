@@ -121,6 +121,52 @@ Write-Host "[Scarlet PC] Export: $export" -ForegroundColor DarkGray
 Write-Host "[Scarlet PC] Compiler: $clangVersion" -ForegroundColor Green
 Write-Host "[Scarlet PC] AOT compile jobs: $Jobs" -ForegroundColor DarkGray
 
+# Ryzen 5 4600G is Zen 2. The AOT images execute tens of millions of translated
+# guest blocks per second, so compile them for the actual host instead of the
+# generic x86-64 baseline. Keep strict floating-point behavior: no fast-math.
+$scarletCpuFlags = @('/O2', '/Oi', '/Gy', '/DNDEBUG', '-march=znver2', '-mtune=znver2')
+$scarletCpuStrategy = 'Zen2 /O2 + native ISA scheduling'
+
+# Verify the selected clang-cl accepts the target flags before rebuilding the
+# very large generated modules. Older clang builds can lack znver2 tuning; in
+# that case fall back to AVX2 rather than failing halfway through the build.
+$probeDir = Join-Path $env:TEMP 'scarlet-aot-clang-probe'
+New-Item -ItemType Directory -Force -Path $probeDir | Out-Null
+$probeC = Join-Path $probeDir 'probe.c'
+$probeObj = Join-Path $probeDir 'probe.obj'
+'int scarlet_probe(int x) { return x * 3 + 1; }' | Set-Content $probeC -Encoding ASCII
+
+$previousEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & $clang /nologo /c @scarletCpuFlags $probeC ("/Fo{0}" -f $probeObj) 2>&1 | Out-Null
+    $probeExit = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $previousEap
+}
+
+if ($probeExit -ne 0) {
+    $scarletCpuFlags = @('/O2', '/Oi', '/Gy', '/DNDEBUG', '/arch:AVX2')
+    $scarletCpuStrategy = 'AVX2 /O2 fallback'
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $clang /nologo /c @scarletCpuFlags $probeC ("/Fo{0}" -f $probeObj) 2>&1 | Out-Null
+        $probeExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousEap
+    }
+    if ($probeExit -ne 0) {
+        throw 'clang-cl rejected both the Zen2 and AVX2 AOT optimization profiles.'
+    }
+}
+
+Remove-Item $probeC,$probeObj -Force -ErrorAction SilentlyContinue
+$scarletCFlagsRelease = ($scarletCpuFlags -join ' ')
+$scarletLinkFlagsRelease = '/OPT:REF /OPT:ICF'
+Write-Host "[Scarlet PC] AOT CPU target: $scarletCpuStrategy" -ForegroundColor Green
+Write-Host "[Scarlet PC] AOT C flags: $scarletCFlagsRelease" -ForegroundColor DarkGray
+
 $modules = @(
     [pscustomobject]@{ Name = 'main'; Dll = 'recompiled_image.dll'; Target = 'recompiled_image' },
     [pscustomobject]@{ Name = 'rtld'; Dll = 'recompiled_rtld.dll'; Target = 'recompiled_rtld' },
@@ -138,7 +184,7 @@ foreach ($module in $modules) {
         throw "Generated AOT project is missing for $($module.Name): $sourceDir"
     }
 
-    $buildDir = Join-Path $sourceDir 'build-clang'
+    $buildDir = Join-Path $sourceDir 'build-clang-zen2'
     if ($Fresh -and (Test-Path $buildDir -PathType Container)) {
         Remove-Item $buildDir -Recurse -Force
     }
@@ -152,7 +198,7 @@ foreach ($module in $modules) {
     }
 
     Write-Host ''
-    Write-Host "[Scarlet PC] Configuring AOT $($module.Name) with clang-cl /O2..." -ForegroundColor Cyan
+    Write-Host "[Scarlet PC] Configuring AOT $($module.Name) with $scarletCpuStrategy..." -ForegroundColor Cyan
     $configureArgs = @(
         '-G', 'Ninja',
         '-S', $sourceDir,
@@ -161,7 +207,9 @@ foreach ($module in $modules) {
         '-DRECOMP_BUILD_STATIC_LIB=OFF',
         "-DRECOMP_JOBS=$Jobs",
         "-DCMAKE_C_COMPILER=$clang",
-        "-DCMAKE_MAKE_PROGRAM=$ninja"
+        "-DCMAKE_MAKE_PROGRAM=$ninja",
+        "-DCMAKE_C_FLAGS_RELEASE=$scarletCFlagsRelease",
+        "-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=$scarletLinkFlagsRelease"
     )
     & $cmake @configureArgs
     if ($LASTEXITCODE -ne 0) { throw "CMake configure failed for $($module.Name) with exit code $LASTEXITCODE" }
@@ -194,7 +242,7 @@ foreach ($module in $modules) {
     title_id = '0100A3D008C5C000'
     architecture = 'x86-64'
     backend = 'Static/Hybrid AOT shared modules'
-    compiler_strategy = 'clang-cl /O2 performance rebuild'
+    compiler_strategy = $scarletCpuStrategy
     compiler = $clangVersion
     compiler_path = $clang
     export_root = $export
