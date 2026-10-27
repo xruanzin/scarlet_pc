@@ -87,3 +87,7 @@ typedef struct { const char *name; ServiceHandler handler; } ServiceDef;
     __attribute__((used, section(SERVICE_SECTION))) static const ServiceDef                 \
         HLE_CAT(svc_def_, __LINE__) = {sname, fn};                                          \
     static void fn(Service *s, IpcReq *req, IpcResp *resp)
+
+/* Native migration diagnostics. Counting costs nothing on implemented service
+   calls; only an actual logging-stub request enters the gap tracker. */
+uint64_t ipc_gap_report(void);

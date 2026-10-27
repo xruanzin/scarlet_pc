@@ -10,6 +10,7 @@
 #include "settings.h"
 #include "hle.h"
 #include "kernel.h"
+#include "ipc.h"
 #include "scarlet_native/aot.h"
 
 const char *g_romfs_dir;
@@ -163,6 +164,17 @@ static void reboot_idle(void) {  // (main thread, while guest threads stop) keep
 static void teardown(void) {
     uint64_t t0 = plat_now_ns();
     kernel_stop_threads(reboot_idle);
+
+    // Native gaps are migration blockers, not normal diagnostics. Their counters
+    // are touched only on a real gap, so keeping this report enabled has no hot
+    // path cost. A clean gameplay run should end with no native-gap lines.
+    uint64_t hle_gaps = rt_hle_gap_report();
+    uint64_t ipc_gaps = ipc_gap_report();
+    if (hle_gaps || ipc_gaps)
+        LOG("[native-gap] run total: %llu unresolved native call(s)\n",
+            (unsigned long long)(hle_gaps + ipc_gaps));
+    scarlet_aot_profile_report();
+    rt_hle_profile_report();
     renderthread_reset();
     backend_clear_window();
     backend_reset();

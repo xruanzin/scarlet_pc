@@ -64,6 +64,7 @@ typedef void (*RtGuestCallBackend)(Cpu *c, uint64_t addr);
 void rt_set_guest_call_backend(RtGuestCallBackend backend);
 
 void rt_hle_profile_report(void);  // interval HLE wall times, when LARECOMP_HLE_PROF is enabled
+uint64_t rt_hle_gap_report(void);   // reports+resets only actual unimplemented calls
 // A generated setjmp site tail-enters this scope; continuation runs while its
 // native jump buffer is live. Guest SDK code still saves/restores guest state.
 void rt_guest_setjmp(Cpu *c, GuestFn setup, GuestFn continuation, uint64_t return_pc);

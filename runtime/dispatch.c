@@ -231,13 +231,32 @@ void rt_hang_report(void) {
 }
 
 static __thread uint64_t unimpl_pc;
-static int unimpl_counts[MAX_HLE];
+static _Atomic uint64_t unimpl_counts[MAX_HLE];
+
 static void hle_unimplemented(Cpu *c) {
     int i = (int)((unimpl_pc - HLE_BASE) / 16);
-    if (unimpl_counts[i]++ < 3)
+    if (i < 0 || i >= hle_count) {
+        FATAL("[hle] invalid unimplemented slot for pc %llx\n", (unsigned long long)unimpl_pc);
+    }
+    uint64_t n = atomic_fetch_add_explicit(&unimpl_counts[i], 1, memory_order_relaxed) + 1;
+    if (n <= 3)
         LOG("[hle] UNIMPLEMENTED %s (x0=%llx x1=%llx lr=%llx) -> returning 0\n", hle_slots[i].name, c->x[0],
             c->x[1], c->x[30]);
     c->x[0] = 0;
+}
+
+uint64_t rt_hle_gap_report(void) {
+    uint64_t total = 0;
+    for (int i = 0; i < hle_count; ++i) {
+        uint64_t n = atomic_exchange_explicit(&unimpl_counts[i], 0, memory_order_relaxed);
+        if (!n) continue;
+        total += n;
+        LOG("[native-gap] HLE %-48s %llu call(s)\n",
+            hle_slots[i].name ? hle_slots[i].name : "?", (unsigned long long)n);
+    }
+    if (total)
+        LOG("[native-gap] HLE total: %llu unimplemented call(s)\n", (unsigned long long)total);
+    return total;
 }
 
 uint64_t guest_sym(const char *name) {
