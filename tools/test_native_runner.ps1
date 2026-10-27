@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 
 $source = Join-Path $PSScriptRoot 'scarlet_native_run.ps1'
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('Scarlet Runner Test ' + [guid]::NewGuid())
-$script:capture = $null
+$capture = @{ Process = $null }
 $names = @('SCARLET_RUNTIME','SCARLET_NATIVE_PROFILE','LARECOMP_NO_LAUNCHER',
     'LARECOMP_HLE_PROF','LARECOMP_EXEFS_DIR','LARECOMP_ROMFS_DIR','LARECOMP_ROMFS_IMAGE',
     'LARECOMP_PACKAGE_STREAM','LARECOMP_PROF_SVC','LARECOMP_VK_PROF',
@@ -20,7 +20,7 @@ function Assert-Runner([bool]$Condition, [string]$Message) {
 function Start-Process {
     param([string]$FilePath, [string[]]$ArgumentList, [string]$WorkingDirectory,
         [switch]$PassThru, [switch]$Wait)
-    $script:capture = @{
+    $capture.Process = @{
         File = $FilePath
         Arguments = @($ArgumentList)
         Directory = $WorkingDirectory
@@ -43,13 +43,13 @@ try {
 
     foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, 'test-before', 'Process') }
     & $runner -Runtime native -GamePath $game -Profile -NoLauncher
-    Assert-Runner ($null -ne $script:capture) 'Runner did not reach process creation.'
-    Assert-Runner ($script:capture.Runtime -eq 'native') 'Wrong runtime selected.'
-    Assert-Runner ($script:capture.Profile -eq '1' -and $script:capture.Hle -eq '1') 'Profiling was not enabled in child environment.'
-    Assert-Runner ($script:capture.Arguments.Count -eq 2) 'Unexpected process arguments.'
-    Assert-Runner ($script:capture.Arguments[0] -eq '--play') 'NoLauncher was ignored.'
-    Assert-Runner ($script:capture.Arguments[1] -eq ('"' + $game + '"')) 'Path with spaces was not quoted.'
-    Assert-Runner ($script:capture.FrameCsv -eq (Join-Path $temp 'build\native\profile\frames.csv')) 'Incorrect profile output.'
+    Assert-Runner ($null -ne $capture.Process) 'Runner did not reach process creation.'
+    Assert-Runner ($capture.Process.Runtime -eq 'native') 'Wrong runtime selected.'
+    Assert-Runner ($capture.Process.Profile -eq '1' -and $capture.Process.Hle -eq '1') 'Profiling was not enabled in child environment.'
+    Assert-Runner ($capture.Process.Arguments.Count -eq 2) 'Unexpected process arguments.'
+    Assert-Runner ($capture.Process.Arguments[0] -eq '--play') 'NoLauncher was ignored.'
+    Assert-Runner ($capture.Process.Arguments[1] -eq ('"' + $game + '"')) 'Path with spaces was not quoted.'
+    Assert-Runner ($capture.Process.FrameCsv -eq (Join-Path $temp 'build\native\profile\frames.csv')) 'Incorrect profile output.'
     foreach ($name in $names) {
         Assert-Runner ([Environment]::GetEnvironmentVariable($name, 'Process') -eq 'test-before') "Environment leaked: $name"
     }
