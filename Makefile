@@ -31,11 +31,13 @@ FSR_C_SRC := \
     $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_catalog.c \
     $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_pipeline.c \
     $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_bundle.c \
-    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_descriptor.c
+    $(FSR_VK_DIR)/src/ffx_vk_fsr3_3_1_5_descriptor.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr4_v07.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr4_v07_assets.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr4_v07_provider.c \
+    $(FSR_VK_DIR)/src/ffx_vk_fsr4_v07_schedule.c
 FSR_CPP_SRC := \
     $(FSR_VK_DIR)/src/ffx_vk_fsr3_portable.cpp \
-    $(FSR_VK_DIR)/src/ffx_vk_fsr4_v07.cpp \
-    $(FSR_VK_DIR)/src/ffx_vk_fsr4_v07_assets.cpp \
     $(FSR114_ROOT)/src/shared/ffx_assert.cpp \
     $(FSR114_ROOT)/src/shared/ffx_message.cpp \
     $(FSR114_ROOT)/src/shared/ffx_object_management.cpp \
