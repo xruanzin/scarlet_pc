@@ -5707,4 +5707,76 @@ if (-not $scarletArbiterText.Contains('[Scarlet.Perf] address-arbiter fast rejec
     Write-Host '[Scarlet PC] Address-arbiter fast rejects avoid unnecessary scheduler locks.' -ForegroundColor DarkGray
 }
 
+
+# Process-wide CV wait hot path (SVC 0x1C). The scheduler lock is still held
+# exactly as before for atomic unlock+sleep semantics, but avoid owner waiter-list
+# traversal/priority work when the guest mutex word proves there are no waiters.
+$scarletCondPath = Join-Path $SourceDir 'src\core\hle\kernel\k_condition_variable.cpp'
+$scarletCondText = [IO.File]::ReadAllText($scarletCondPath)
+
+if (-not $scarletCondText.Contains('[Scarlet.Perf] CV wait uncontended unlock fast path')) {
+    $scarletCvWaitOld = @'
+        // Update the value and process for the next owner.
+        {
+            // Remove waiter thread.
+            bool has_waiters{};
+            KThread* next_owner_thread =
+                cur_thread->RemoveUserWaiterByKey(m_system.Kernel(), std::addressof(has_waiters), addr);
+
+            // Update for the next owner thread.
+            u32 next_value{};
+            if (next_owner_thread != nullptr) {
+                // Get the next tag value.
+                next_value = next_owner_thread->GetAddressKeyValue();
+                if (has_waiters) {
+                    next_value |= Svc::HandleWaitMask;
+                }
+
+                // Wake up the next owner.
+                next_owner_thread->EndWait(m_system.Kernel(), ResultSuccess);
+            }
+'@
+    $scarletCvWaitNew = @'
+        // Update the value and process for the next owner.
+        {
+            // [Scarlet.Perf] CV wait uncontended unlock fast path
+            // A waiter can only enter the owner's kernel waiter list after
+            // setting HandleWaitMask while holding this same scheduler lock.
+            // If the guest word has no wait mask here, there is no waiter-list
+            // entry to search/remove and the next mutex value is necessarily 0.
+            u32 lock_word{};
+            const bool lock_read_ok =
+                ReadFromUser(m_system.Kernel(), std::addressof(lock_word), addr);
+            const bool mutex_has_waiters =
+                lock_read_ok && (lock_word & Svc::HandleWaitMask) != 0;
+
+            bool has_waiters{};
+            KThread* next_owner_thread = nullptr;
+            u32 next_value{};
+
+            if (mutex_has_waiters) {
+                next_owner_thread =
+                    cur_thread->RemoveUserWaiterByKey(
+                        m_system.Kernel(), std::addressof(has_waiters), addr);
+
+                if (next_owner_thread != nullptr) {
+                    next_value = next_owner_thread->GetAddressKeyValue();
+                    if (has_waiters) {
+                        next_value |= Svc::HandleWaitMask;
+                    }
+
+                    next_owner_thread->EndWait(m_system.Kernel(), ResultSuccess);
+                }
+            }
+'@
+    if (-not $scarletCondText.Contains($scarletCvWaitOld.Trim())) {
+        throw 'Scarlet runtime overlay: CV wait owner-transfer block missing'
+    }
+    $scarletCondText =
+        $scarletCondText.Replace($scarletCvWaitOld.Trim(), $scarletCvWaitNew.Trim())
+
+    [IO.File]::WriteAllText($scarletCondPath, $scarletCondText, $utf8)
+    Write-Host '[Scarlet PC] CV wait fast path skips waiter-list traversal on uncontended mutexes.' -ForegroundColor DarkGray
+}
+
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
