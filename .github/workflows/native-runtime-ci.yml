@@ -84,6 +84,10 @@ jobs:
             Write-Host "parsed $script"
           }
 
+      - name: Test native Windows runner without game files
+        shell: powershell
+        run: ./tools/test_native_runner.ps1
+
       - name: Build and link ScarletPC native runtime
         shell: msys2 {0}
         run: |
