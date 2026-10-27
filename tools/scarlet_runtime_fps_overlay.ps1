@@ -45,35 +45,32 @@ if (-not $pass.Contains('[Scarlet.FPS] presentation overlay')) {
         throw 'Scarlet FPS overlay: WindowAdaptPass layer_count anchor missing'
     }
     $drawInsert = @'
-\${indent}// [Scarlet.FPS] presentation overlay
-\${indent}// Enabled by default. Set SCARLET_FPS_OVERLAY=0 to hide it.
-\${indent}static const bool scarlet_fps_overlay = [] {
-\${indent}    const char* value = std::getenv("SCARLET_FPS_OVERLAY");
-\${indent}    return value == nullptr || *value == '\0' || *value != '0';
-\${indent}}();
+${indent}// [Scarlet.FPS] presentation overlay
+${indent}// Enabled by default. Set SCARLET_FPS_OVERLAY=0 to hide it.
+${indent}static const bool scarlet_fps_overlay = [] {
+${indent}    const char* value = std::getenv("SCARLET_FPS_OVERLAY");
+${indent}    return value == nullptr || *value == '\0' || *value != '0';
+${indent}}();
 
-\${indent}static thread_local auto scarlet_fps_window_start = std::chrono::steady_clock::now();
-\${indent}static thread_local u32 scarlet_fps_frames = 0;
-\${indent}static thread_local f32 scarlet_fps_value = 0.0f;
-\${indent}++scarlet_fps_frames;
-\${indent}const auto scarlet_fps_now = std::chrono::steady_clock::now();
-\${indent}const auto scarlet_fps_elapsed =
-\${indent}    std::chrono::duration<f32>(scarlet_fps_now - scarlet_fps_window_start).count();
-\${indent}if (scarlet_fps_elapsed >= 0.25f) {
-\${indent}    scarlet_fps_value =
-\${indent}        static_cast<f32>(scarlet_fps_frames) / scarlet_fps_elapsed;
-\${indent}    scarlet_fps_frames = 0;
-\${indent}    scarlet_fps_window_start = scarlet_fps_now;
-\${indent}}
+${indent}static thread_local auto scarlet_fps_window_start = std::chrono::steady_clock::now();
+${indent}static thread_local u32 scarlet_fps_frames = 0;
+${indent}static thread_local f32 scarlet_fps_value = 0.0f;
+${indent}++scarlet_fps_frames;
+${indent}const auto scarlet_fps_now = std::chrono::steady_clock::now();
+${indent}const auto scarlet_fps_elapsed =
+${indent}    std::chrono::duration<f32>(scarlet_fps_now - scarlet_fps_window_start).count();
+${indent}if (scarlet_fps_elapsed >= 0.25f) {
+${indent}    scarlet_fps_value =
+${indent}        static_cast<f32>(scarlet_fps_frames) / scarlet_fps_elapsed;
+${indent}    scarlet_fps_frames = 0;
+${indent}    scarlet_fps_window_start = scarlet_fps_now;
+${indent}}
 
-\${indent}const size_t layer_count = configs.size();
+${indent}const size_t layer_count = configs.size();
 '@
     $pass = $drawRegex.Replace(
         $pass,
-        {
-            param($m)
-            return $drawInsert.Replace('\${indent}', $m.Groups['indent'].Value).TrimEnd()
-        },
+        $drawInsert.TrimEnd(),
         1
     )
 
@@ -89,7 +86,7 @@ if (-not $pass.Contains('[Scarlet.FPS] presentation overlay')) {
         throw 'Scarlet FPS overlay: ConfigureDraw semantic anchor missing'
     }
     $configureInsert = @'
-\${call}
+${call}
 
         // The third matrix column multiplies guest vertex Z (always zero).
         // Reuse it as fragment-stage metadata without growing push constants.
