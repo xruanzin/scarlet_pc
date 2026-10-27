@@ -1517,6 +1517,122 @@ Replace-Literal 'src\__PRODUCT___cmd\native_status.h' 'out += " | F12 Controls";
 # at the HLE compositor boundary, preserving the AOT guest text byte-for-byte.
 Replace-Literal 'src\core\hle\service\nvnflinger\hardware_composer.cpp' '#include <optional>' "#include <optional>`n#include <cstdlib>"
 
+# Migrate the already-transformed FastIncremental pacing path from the
+# previous 60-only overlay. This lets the new native-30 mode apply without
+# deleting the preserved runtime source tree.
+$scarletHwcPath = Join-Path $SourceDir 'src\core\hle\service\nvnflinger\hardware_composer.cpp'
+$scarletHwcText = [IO.File]::ReadAllText($scarletHwcPath)
+$scarletLegacySwapPacing = @'
+s32 NormalizeSwapInterval(f32* out_speed_scale, s32 swap_interval) {
+    if (swap_interval <= 0) {
+        if (out_speed_scale) {
+            *out_speed_scale = 2.f * static_cast<f32>(1 - swap_interval);
+        }
+        swap_interval = 1;
+    }
+
+    if (swap_interval >= 5) {
+        if (out_speed_scale) {
+            *out_speed_scale = static_cast<f32>(swap_interval) / 100.f;
+        }
+        swap_interval = 1;
+    }
+
+    const char* target_env = std::getenv("SCARLET_TARGET_FPS");
+    const int target_fps = target_env && *target_env ? std::atoi(target_env) : 60;
+    if (target_fps >= 60 && swap_interval == 2) {
+        swap_interval = 1;
+    }
+
+    return swap_interval;
+}
+'@
+$scarletStableSwapPacing = @'
+s32 NormalizeSwapInterval(f32* out_speed_scale, s32 swap_interval) {
+    if (swap_interval <= 0) {
+        if (out_speed_scale) {
+            *out_speed_scale = 2.f * static_cast<f32>(1 - swap_interval);
+        }
+        swap_interval = 1;
+    }
+
+    if (swap_interval >= 5) {
+        if (out_speed_scale) {
+            *out_speed_scale = static_cast<f32>(swap_interval) / 100.f;
+        }
+        swap_interval = 1;
+    }
+
+    const char* target_env = std::getenv("SCARLET_TARGET_FPS");
+    const int target_fps = target_env && *target_env ? std::atoi(target_env) : 30;
+
+    // Scarlet targets 30 FPS on a 60 Hz display by presenting every other
+    // vertical blank (swap interval 2). Keep that native pacing for the stable
+    // mode instead of lowering the emulated VI clock itself.
+    if (target_fps <= 30 && swap_interval == 1) {
+        swap_interval = 2;
+    } else if (target_fps >= 60 && swap_interval == 2) {
+        // Explicit 60 FPS mode: remove the game's native every-other-vblank cap.
+        swap_interval = 1;
+    }
+
+    return swap_interval;
+}
+'@
+if ($scarletHwcText.Contains($scarletLegacySwapPacing.Trim()) -and
+    -not $scarletHwcText.Contains($scarletStableSwapPacing.Trim())) {
+    $scarletHwcText =
+        $scarletHwcText.Replace($scarletLegacySwapPacing.Trim(),
+                                $scarletStableSwapPacing.Trim())
+    [IO.File]::WriteAllText($scarletHwcPath, $scarletHwcText, $utf8)
+    Write-Host '[Scarlet PC] Migrated preserved swap pacing to native 30/60 mode.' -ForegroundColor Green
+}
+
+$scarletConductorPath = Join-Path $SourceDir 'src\core\hle\service\vi\conductor.cpp'
+$scarletConductorText = [IO.File]::ReadAllText($scarletConductorPath)
+$scarletLegacyViPacing = @'
+namespace {
+
+int ScarletTargetFps() {
+    static const int target = [] {
+        const char* value = std::getenv("SCARLET_TARGET_FPS");
+        int fps = value && *value ? std::atoi(value) : 60;
+        return std::clamp(fps, 30, 240);
+    }();
+    return target;
+}
+
+std::chrono::nanoseconds ScarletFrameNs() {
+    return std::chrono::nanoseconds{1000000000 / ScarletTargetFps()};
+}
+
+} // namespace
+'@
+$scarletStableViPacing = @'
+namespace {
+
+constexpr int ScarletDisplayHz() {
+    return 60;
+}
+
+std::chrono::nanoseconds ScarletFrameNs() {
+    return std::chrono::nanoseconds{1000000000 / ScarletDisplayHz()};
+}
+
+} // namespace
+'@
+if ($scarletConductorText.Contains($scarletLegacyViPacing.Trim()) -and
+    -not $scarletConductorText.Contains($scarletStableViPacing.Trim())) {
+    $scarletConductorText =
+        $scarletConductorText.Replace($scarletLegacyViPacing.Trim(),
+                                      $scarletStableViPacing.Trim())
+    $scarletConductorText = $scarletConductorText.Replace(
+        'static_cast<f32>(ScarletTargetFps()) / static_cast<f32>(m_swap_interval);',
+        'static_cast<f32>(ScarletDisplayHz()) / static_cast<f32>(m_swap_interval);')
+    [IO.File]::WriteAllText($scarletConductorPath, $scarletConductorText, $utf8)
+    Write-Host '[Scarlet PC] Migrated preserved VI pacing to fixed 60 Hz display clock.' -ForegroundColor Green
+}
+
 $old = @'
 s32 NormalizeSwapInterval(f32* out_speed_scale, s32 swap_interval) {
     if (swap_interval <= 0) {
