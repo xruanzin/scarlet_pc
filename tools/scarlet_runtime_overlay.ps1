@@ -5748,7 +5748,7 @@ if (-not $scarletCondText.Contains('[Scarlet.Perf] CV wait uncontended unlock fa
             const bool lock_read_ok =
                 ReadFromUser(m_system.Kernel(), std::addressof(lock_word), addr);
             const bool mutex_has_waiters =
-                lock_read_ok && (lock_word & Svc::HandleWaitMask) != 0;
+                !lock_read_ok || (lock_word & Svc::HandleWaitMask) != 0;
 
             bool has_waiters{};
             KThread* next_owner_thread = nullptr;
