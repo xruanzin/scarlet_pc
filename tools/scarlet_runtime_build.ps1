@@ -239,11 +239,16 @@ if (-not [string]::IsNullOrWhiteSpace($IconPath)) {
     $overlayArgs.IconPath = $IconPath
 }
 & (Join-Path $PSScriptRoot 'scarlet_runtime_overlay.ps1') @overlayArgs
+& (Join-Path $PSScriptRoot 'scarlet_runtime_fps_overlay.ps1') -SourceDir $SourceDir
 & (Join-Path $PSScriptRoot 'scarlet_runtime_sync_fastpaths.ps1') -SourceDir $SourceDir
 & (Join-Path $PSScriptRoot 'scarlet_runtime_frame_probe.ps1') -SourceDir $SourceDir
 & (Join-Path $PSScriptRoot 'scarlet_runtime_hotspot_sampler.ps1') -SourceDir $SourceDir
 & (Join-Path $PSScriptRoot 'scarlet_runtime_hotspot_trace.ps1') -SourceDir $SourceDir
 & (Join-Path $PSScriptRoot 'scarlet_runtime_chain_time_probe.ps1') -SourceDir $SourceDir
+
+# A locally-preserved profiling layer may run after these public overlays.
+# Always repair its CommandList size accounting immediately before compiling.
+& (Join-Path $PSScriptRoot 'scarlet_runtime_gpu_profiler_repair.ps1') -SourceDir $SourceDir
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
