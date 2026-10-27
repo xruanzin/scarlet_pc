@@ -331,6 +331,7 @@ int main(int argc, char **argv) {
         if (title) {  // start screen: resolution, fullscreen, anti-aliasing, translation, keys (runtime/ui/launcher_lg.mm)
             extern void launcher_lg_run(const char *root);
             launcher_lg_run(root);
+            if (setup_state() == SETUP_DONE) root = "extracted";
         }
         {  // (runtime/fnhook.c: the runtime's hooks, in the address tables of the known builds)
             extern void rt_fnhook_set_build(int build);

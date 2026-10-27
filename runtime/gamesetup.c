@@ -16,6 +16,7 @@
 
 #include "gamebuild.h"
 #include "gamelib.h"
+#include "scarlet_native/aot.h"
 #include "hle.h"
 #include "paths.h"
 #include "platform.h"
@@ -100,9 +101,27 @@ const char *game_name(const char *exefs) {
     return id == TITLE_SCARLET ? "Scarlet" : NULL;
 }
 
-bool setup_ready(void) {
-    return game_ok(ROOT "/exefs") && is_file(ROOT "/romfs.bin") && gamelib_present(ROOT);
+static bool native_mode(void) {
+    const char *mode = getenv("SCARLET_RUNTIME");
+    return !mode || !*mode || !strcmp(mode, "native");
 }
+
+bool setup_ready_at(const char *root) {
+    char exefs[1200], romfs[1200], image[1200];
+    const char *mapped = getenv("LARECOMP_EXEFS_DIR");
+    snprintf(exefs, sizeof exefs, "%s", mapped && *mapped ? mapped : "");
+    if (!exefs[0]) snprintf(exefs, sizeof exefs, "%s/exefs", root);
+    mapped = getenv("LARECOMP_ROMFS_DIR");
+    if (mapped && *mapped) snprintf(romfs, sizeof romfs, "%s", mapped);
+    else snprintf(romfs, sizeof romfs, "%s/romfs", root);
+    mapped = getenv("LARECOMP_ROMFS_IMAGE");
+    if (mapped && *mapped) snprintf(image, sizeof image, "%s", mapped);
+    else snprintf(image, sizeof image, "%s/romfs.bin", root);
+    return game_ok(exefs) && (is_file(image) || is_dir(romfs)) &&
+           (native_mode() ? scarlet_aot_present(root) : gamelib_present(root));
+}
+
+bool setup_ready(void) { return setup_ready_at(ROOT); }
 
 typedef struct { char exefs[1024], romfs[1024], romfs_bin[1024]; bool package; } Found;
 
@@ -158,6 +177,14 @@ static void build_progress(double f, const char *step) {
 }
 
 static bool build_code(void) {
+    if (native_mode()) {
+        // Native execution consumes the four existing ArmRecomp images.
+        // Never invoke the LAS generator as an implicit setup/recovery step.
+        if (scarlet_aot_present(ROOT)) return true;
+        LOG("[setup] missing native AOT DLLs; set SCARLET_AOT_DIR or install the four images in aot/\n");
+        g_state = SETUP_FAIL_AOT;
+        return false;
+    }
     if (!gamebuild_available()) { g_state = SETUP_FAIL_TOOLS; return false; }
     int cores = SDL_GetNumLogicalCPUCores(), ram_gb = SDL_GetSystemRAM() / 1024;
     GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1};
