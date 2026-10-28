@@ -21,6 +21,7 @@ on:
       - 'runtime/rt.h'
       - 'Makefile'
       - 'tools/scarlet_native_*.ps1'
+      - 'tools/scarlet_prepare_update.ps1'
       - '.github/workflows/native-runtime-ci.yml'
 
 concurrency:
@@ -37,7 +38,9 @@ jobs:
         run: |
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_build.ps1 -Raw))
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_run.ps1 -Raw))
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_prepare_update.ps1 -Raw))
           ./tools/test_native_runner.ps1
+          ./tools/test_native_update.ps1
 
   syntax:
     runs-on: ubuntu-latest

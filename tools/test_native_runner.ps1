@@ -28,6 +28,8 @@ function Start-Process {
         Profile = $env:SCARLET_NATIVE_PROFILE
         Hle = $env:LARECOMP_HLE_PROF
         FrameCsv = $env:LARECOMP_FRAME_CSV
+        ExeFs = $env:LARECOMP_EXEFS_DIR
+        RomFs = $env:LARECOMP_ROMFS_IMAGE
     }
     return [pscustomobject]@{ ExitCode = 0 }
 }
@@ -64,6 +66,20 @@ try {
     & $runner -Runtime native -GameRoot $game -Profile -NoLauncher
     foreach ($name in $names) {
         Assert-Runner ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name, 'Process'))) "Environment not removed: $name"
+    }
+    # Update selection must prepare native data, not call the legacy runner.
+    $fakePrepare = @'
+param($PackagePath,$UpdatePath,$KeysPath,$HactoolPath,$CacheRoot)
+if ($UpdatePath -ne 'update.nsp' -or $KeysPath -ne 'keys') { throw 'Preparation arguments lost.' }
+Write-Output $CacheRoot
+'@
+    $fakePrepare | Set-Content (Join-Path $temp 'tools\scarlet_prepare_update.ps1')
+    & $runner -Runtime native -GamePath 'base.nsp' -UpdatePath 'update.nsp' -KeysPath 'keys' -CacheRoot $game
+    Assert-Runner ($capture.Process.Runtime -eq 'native') 'Update selected legacy runtime.'
+    Assert-Runner ($capture.Process.ExeFs -eq (Join-Path $game 'exefs')) 'Prepared ExeFS not passed.'
+    Assert-Runner ($capture.Process.RomFs -eq (Join-Path $game 'romfs.bin')) 'Prepared RomFS not passed.'
+    foreach ($name in $names) {
+        Assert-Runner ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name, 'Process'))) "Update environment leaked: $name"
     }
     Write-Host 'Native runner: default DLC, spaced path, profiler propagation and restoration passed.'
 }
