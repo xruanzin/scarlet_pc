@@ -379,7 +379,7 @@ foreach ($rights in @($tickets.Keys.Keys)) {
  $allTitleKeys[$rights] = $tickets.Keys[$rights]
 }
 if ($allTitleKeys.Count -gt 0) {
- $script:ticketHome = New-ScarletTemporaryKeyHome -Keys $allTitleKeys
+ $script:ticketHome = New-ScarletTemporaryKeyHome -Keys $allTitleKeys -BaseDirectory $work
  Write-Host ("[native-update] Chaves de ticket locais prontas: {0} Rights ID(s) (inclui {1} do NSP)." -f $allTitleKeys.Count,$ticketKeysAdded) -ForegroundColor DarkGray
 } else {
  Write-Warning '[native-update] Nenhum ticket comum ou title.keys local encontrado. Program NCAs protegidos por Rights ID nao poderao ser extraidos.'
