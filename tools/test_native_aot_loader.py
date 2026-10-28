@@ -123,8 +123,19 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
     c->x[0]++; c->tpidr = 0x8765; c->v[1] = (__uint128_t)456 << 64; ++svc_seen;
 }
 static void host_hle(Cpu *c) { c->x[0]++; c->v[2] = (__uint128_t)789 << 64; ++hle_seen; }
+static uint64_t override_pc;
+static int preflights, full_host_lookups, override_seen;
+static void host_override(Cpu *c) { assert(c->pc == override_pc); c->x[0] += 10; ++override_seen; }
+bool rt_dispatch_host_has_pc(uint64_t pc) {
+    ++preflights;
+    return pc == HLE_BASE || (override_pc && pc == override_pc);
+}
 GuestFn rt_dispatch_host_lookup(Cpu *c, uint64_t pc) {
-    (void)c; return pc == HLE_BASE ? host_hle : NULL;
+    ++full_host_lookups;
+    (void)c;
+    if (pc == HLE_BASE) return host_hle;
+    if (override_pc && pc == override_pc) return host_override;
+    return NULL;
 }
 static void empty(void) {
     assert(!scarlet_aot_ready());
@@ -190,7 +201,17 @@ int main(void) {
     scarlet_aot_guest_call(&cpu, g_modules[0].base);
     assert(step == 3 && svc_seen == 1 && hle_seen == 1 && cpu.pc == 0);
     assert(cpu.x[0] == 44 && cpu.sp == 0x12340000 && (uint64_t)(cpu.v[2] >> 64) == 789);
-    puts("native AOT: rollback, ABI, binding, cross-module execution, SVC, HLE, registers passed");
+    // Three AOT slices (including a cross-module jump) needed only one
+    // full Cpu lookup: the real HLE call. No guest-only slice may marshal
+    // the Cpu state simply to decide whether an HLE override exists.
+    assert(preflights == 4 && full_host_lookups == 1);
+    override_pc = g_modules[0].base;
+    cpu.x[30] = 0;
+    cpu.x[0] = 50;
+    scarlet_aot_guest_call(&cpu, override_pc);
+    assert(step == 3 && override_seen == 1 && cpu.x[0] == 60);
+    assert(full_host_lookups == 2 && preflights == 5);
+    puts("native AOT: ABI, cross-module chaining, SVC, HLE, override and lazy Cpu marshaling passed");
 }
 '''
 
