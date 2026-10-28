@@ -13,6 +13,8 @@ param(
     [string]$NstoolPath,
     [string]$AotManifestPath,
     [string]$UpdateCacheRoot,
+    [string]$BuildRoot,
+    [string]$AotDir,
 
     [ValidateRange(1, 32)]
     [int]$Jobs = 4,
@@ -28,6 +30,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
+. (Join-Path $PSScriptRoot 'scarlet_native_paths.ps1')
 
 if ($Runtime -eq 'legacy') {
     Write-Host '[runtime] legacy suyu fallback' -ForegroundColor Yellow
@@ -53,9 +56,12 @@ if ($DlcPath.Count) {
     exit $LASTEXITCODE
 }
 
-$exe = Join-Path $repoRoot 'build\native\ScarletPC.exe'
-if ($Build -or -not (Test-Path $exe -PathType Leaf)) {
-    & (Join-Path $PSScriptRoot 'scarlet_native_build.ps1') -Jobs $Jobs
+$buildDir = Resolve-ScarletNativeBuildRoot -BuildRoot $BuildRoot
+$exe = Join-Path $buildDir 'ScarletPC.exe'
+if ($Build -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+    $nativeBuildArgs = @{ Jobs = $Jobs; BuildRoot = $buildDir }
+    if ($AotDir) { $nativeBuildArgs.AotDir = $AotDir }
+    & (Join-Path $PSScriptRoot 'scarlet_native_build.ps1') @nativeBuildArgs
 }
 if (-not (Test-Path $exe -PathType Leaf)) {
     throw 'Native ScarletPC.exe is missing after build.'
@@ -121,6 +127,8 @@ elseif (Test-Path (Join-Path $repoRoot $GameRoot) -PathType Container) {
 }
 
 $oldRuntime = $env:SCARLET_RUNTIME
+$oldDataRoot = $env:LARECOMP_DATA_ROOT
+$oldAotDir = $env:SCARLET_AOT_DIR
 $oldUpscaler = $env:SCARLET_UPSCALER
 $oldProfile = $env:SCARLET_NATIVE_PROFILE
 $oldLauncher = $env:LARECOMP_NO_LAUNCHER
@@ -135,6 +143,17 @@ $oldCommandCounts = $env:LARECOMP_COMMAND_COUNTS
 $oldFrameCsv = $env:LARECOMP_FRAME_CSV
 try {
     $env:SCARLET_RUNTIME = $Runtime
+    # The runtime changes to its data root and writes shader caches, saves,
+    # profiler output and logs there. The D: build location is authoritative
+    # unless the user intentionally selected another data root.
+    if ([string]::IsNullOrWhiteSpace($env:LARECOMP_DATA_ROOT)) {
+        $env:LARECOMP_DATA_ROOT = $buildDir
+    }
+    $aotCandidate = if ($AotDir) { $AotDir } else { Join-Path $buildDir 'aot' }
+    if ([string]::IsNullOrWhiteSpace($env:SCARLET_AOT_DIR) -and
+        (Test-Path -LiteralPath $aotCandidate -PathType Container)) {
+        $env:SCARLET_AOT_DIR = [IO.Path]::GetFullPath($aotCandidate)
+    }
     if ($Upscaler -ne 'current') {
         # 'spatial' selects the existing native SMAA/FSR1 presentation path;
         # this is a temporal selector, not a forced no-scaling switch.
@@ -160,20 +179,8 @@ try {
         Write-Host ("[package] RomFS: {0}" -f $env:LARECOMP_ROMFS_IMAGE) -ForegroundColor DarkGray
     }
     if ($Profile) {
-        $profileDir = Join-Path $repoRoot 'build\native\profile'
-        # When the system volume is full, keep frame/profiler output beside
-        # the prepared update rather than failing to write on C:.
-        if ($packageMount -and
-            $packageMount.PSObject.Properties.Name -contains 'CacheRoot' -and
-            $packageMount.CacheRoot) {
-            $cacheDrive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot([string]$packageMount.CacheRoot))
-            $systemDrive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($repoRoot))
-            if ($cacheDrive.IsReady -and $systemDrive.IsReady -and
-                $systemDrive.AvailableFreeSpace -lt 512MB) {
-                $profileDir = Join-Path (Split-Path ([string]$packageMount.CacheRoot) -Parent) 'profile'
-                Write-Warning ("[profile] Unidade do projeto sem espaco; gravando perfis em {0}" -f $profileDir)
-            }
-        }
+        # Keep the profiler beside the native executable, not on the full C:.
+        $profileDir = Join-Path $buildDir 'profile'
         New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
         $env:SCARLET_NATIVE_PROFILE = '1'
         $env:LARECOMP_HLE_PROF = '1'
@@ -195,13 +202,15 @@ try {
     $quotedRoot = [regex]::Replace($resolvedRoot, '(\\+)$', '$1$1')
     $launch += ('"' + $quotedRoot + '"')
 
-    $p = Start-Process -FilePath $exe -ArgumentList $launch -WorkingDirectory $repoRoot -PassThru -Wait
+    $p = Start-Process -FilePath $exe -ArgumentList $launch -WorkingDirectory $buildDir -PassThru -Wait
     if ($p.ExitCode -ne 0) {
         throw "Scarlet Native Runtime exited with code $($p.ExitCode)"
     }
 }
 finally {
     if ($null -eq $oldRuntime) { Remove-Item Env:SCARLET_RUNTIME -ErrorAction SilentlyContinue } else { $env:SCARLET_RUNTIME = $oldRuntime }
+    if ($null -eq $oldDataRoot) { Remove-Item Env:LARECOMP_DATA_ROOT -ErrorAction SilentlyContinue } else { $env:LARECOMP_DATA_ROOT = $oldDataRoot }
+    if ($null -eq $oldAotDir) { Remove-Item Env:SCARLET_AOT_DIR -ErrorAction SilentlyContinue } else { $env:SCARLET_AOT_DIR = $oldAotDir }
     if ($null -eq $oldUpscaler) { Remove-Item Env:SCARLET_UPSCALER -ErrorAction SilentlyContinue } else { $env:SCARLET_UPSCALER = $oldUpscaler }
     if ($null -eq $oldProfile) { Remove-Item Env:SCARLET_NATIVE_PROFILE -ErrorAction SilentlyContinue } else { $env:SCARLET_NATIVE_PROFILE = $oldProfile }
     if ($null -eq $oldLauncher) { Remove-Item Env:LARECOMP_NO_LAUNCHER -ErrorAction SilentlyContinue } else { $env:LARECOMP_NO_LAUNCHER = $oldLauncher }
