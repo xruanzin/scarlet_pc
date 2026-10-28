@@ -78,6 +78,10 @@ jobs:
         run: |
           clang -std=gnu11 -Wall -Wextra -Werror -Iruntime -Iruntime/nvn -o /tmp/scarlet-rt-targets tools/test_native_rt_targets.c
           /tmp/scarlet-rt-targets
+      - name: Verify original-guest graphics reference switch
+        run: |
+          clang -std=c11 -Wall -Wextra -Werror -o /tmp/scarlet-graphics-reference tools/test_native_graphics_reference.c
+          /tmp/scarlet-graphics-reference
 
       - name: Execute native AOT loader and boundary regression tests
         run: |
