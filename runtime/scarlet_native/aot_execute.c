@@ -294,21 +294,26 @@ void scarlet_aot_guest_call(Cpu *cpu, uint64_t address) {
     while (g.pc) {
         rt_unwind_point();
 
-        // Existing native imports and overrides remain authoritative. This is
-        // checked at host boundaries; module-local AOT chaining stays hot.
-        aot_to_cpu(&g, cpu);
-        GuestFn host = rt_dispatch_host_lookup(cpu, g.pc);
-        if (host) {
-            uint64_t t0 = prof ? plat_now_ns() : 0;
-            cpu->pc = g.pc;
-            host(cpu);
-            if (prof) {
-                atomic_fetch_add_explicit(&g_prof.hle_calls, 1, memory_order_relaxed);
-                atomic_fetch_add_explicit(&g_prof.hle_ns, plat_now_ns() - t0, memory_order_relaxed);
+        // Existing native HLE and overrides stay authoritative even when
+        // their PCs overlap a compiled AOT module. The PC-only preflight
+        // avoids copying 31 GPRs and the entire SIMD/FP state on ordinary
+        // AOT-to-AOT slices; Cpu state is synchronized only for host calls,
+        // SVC, the LAS fallback and when leaving this guest call.
+        if (rt_dispatch_host_has_pc(g.pc)) {
+            aot_to_cpu(&g, cpu);
+            GuestFn host = rt_dispatch_host_lookup(cpu, g.pc);
+            if (host) {
+                uint64_t t0 = prof ? plat_now_ns() : 0;
+                cpu->pc = g.pc;
+                host(cpu);
+                if (prof) {
+                    atomic_fetch_add_explicit(&g_prof.hle_calls, 1, memory_order_relaxed);
+                    atomic_fetch_add_explicit(&g_prof.hle_ns, plat_now_ns() - t0, memory_order_relaxed);
+                }
+                cpu_to_aot(cpu, &g);
+                g.pc = g.x[30];  // native HLE implements a guest function call
+                continue;
             }
-            cpu_to_aot(cpu, &g);
-            g.pc = g.x[30];  // native HLE implements a guest function call
-            continue;
         }
 
         ScarletAotModule *m = scarlet_aot_find_pc(g.pc);
