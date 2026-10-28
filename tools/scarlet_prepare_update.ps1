@@ -434,8 +434,11 @@ function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
  foreach ($nca in $ncas) {
   if (Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe -Recurse -Force }
   New-Item -ItemType Directory -Force -Path $probe | Out-Null
+  # Do NOT use --basenca while detecting the update ExeFS.
+  # It is only needed for BKTR RomFS reconstruction, not for the update's
+  # independently encrypted Program NCA ExeFS. Supplying a base NCA for
+  # every Meta/Control/Manual NCA can make hactool fail before classification.
   $hactoolArgs = @('-k',$keys,'--disablekeywarns','--suppresskeys','-t','nca','--xcontenttype=program')
-  if ($baseNca) { $hactoolArgs += "--basenca=$baseNca" }
   $hactoolArgs += @("--exefsdir=$probe",$nca.FullName)
   $probeOutput = Join-Path $work 'last-hactool-probe.log'
   $code = Run-Hactool -arguments $hactoolArgs -allowFailure $true -capturePath $probeOutput
@@ -447,13 +450,14 @@ function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
   if ($info -match 'Invalid NCA header!') { $invalidHeaders++ }
   if ($code -ne 0) {
    $ncaFailed++
-   if ($kind -eq 'Program') {
-    Write-Warning ("[native-update] Program NCA {0}: hactool exit={1}; main.npdm nao extraido." -f $nca.Name,$code)
+   # Surface bounded metadata for *all* failed update NCAs, including an
+   # unknown kind: early failures may prevent hactool from printing its type.
+   if ($kind -eq 'Program' -or $type -eq 'update') {
+    Write-Warning ("[native-update] NCA {0}: tipo={1}, hactool exit={2}; ExeFS nao extraido." -f $nca.Name,$kind,$code)
     foreach ($reason in @(Get-HactoolSafeErrors $info)) {
      Write-Warning ("[native-update] Causa informada pelo hactool: {0}" -f $reason)
     }
     Show-NativeWriteFailure -hactoolOutput $info -targetDirectory $probe
-    Write-Host ("[native-update] Diagnostico deste NCA: {0}" -f $probeOutput) -ForegroundColor DarkGray
    }
    continue
   }
@@ -499,8 +503,9 @@ $baseNca = Find-ProgramNca $baseDir
 if (-not $baseNca) {
  throw "Program NCA do Scarlet na base nao extraido. Consulte a mensagem de erro do hactool acima. NSP e tickets ja foram encontrados; preserve a pasta .work. Log: $log"
 }
+Write-Host '[native-update] Identificando update ExeFS sem --basenca; BKTR sera aplicado depois...' -ForegroundColor Cyan
 $patchNca = Find-ProgramNca $updateDir $baseNca $expectedMain
-if (-not $patchNca) { throw "Update 4.0.0 (main $expectedMain) nao encontrado. Verifique build IDs e log: $log" }
+if (-not $patchNca) { throw "Update 4.0.0 (main $expectedMain) nao identificado sem --basenca. Consulte diagnosticos dos NCAs da atualizacao; cache .work preservado. Log: $log" }
 
 Write-Host '[native-update] Aplicando patch BKTR com --basenca...' -ForegroundColor Cyan
 $exeFs = Join-Path $assembled 'exefs'
