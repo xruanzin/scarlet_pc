@@ -255,7 +255,24 @@ if (Test-Path -LiteralPath $OutputRoot) {
 # robocopy can resume a partially copied directory after interruption.
 if ($usingDefaultD -and (Test-Path -LiteralPath ($legacyOutputRoot + '.work') -PathType Container)) {
  $oldWork = $legacyOutputRoot + '.work'
- if (-not (Test-Path -LiteralPath $work -PathType Container)) {
+ # After a successful migration, do not recopy all NCAs on every launch.
+ # Compare cached NCA/ticket file lengths without reading key material.
+ $copyNeeded = $true
+ if (Test-Path -LiteralPath $work -PathType Container) {
+  $copyNeeded = $false
+  $sourceParts = @(Get-ChildItem -LiteralPath $oldWork -Recurse -File | Where-Object { $_.Extension -in @('.nca','.tik') })
+  foreach ($part in $sourceParts) {
+   $relative = $part.FullName.Substring($oldWork.Length).TrimStart('\')
+   $target = Join-Path $work $relative
+   if (-not (Test-Path -LiteralPath $target -PathType Leaf) -or
+       (Get-Item -LiteralPath $target).Length -ne $part.Length) {
+    $copyNeeded = $true
+    break
+   }
+  }
+  if ($sourceParts.Count -eq 0) { $copyNeeded = $true }
+ }
+ if ($copyNeeded -and -not (Test-Path -LiteralPath $work -PathType Container)) {
   $size = (Get-ChildItem -LiteralPath $oldWork -File -Recurse | Measure-Object -Property Length -Sum).Sum
   if ($null -eq $size) { $size = 0 }
   $drive = [IO.DriveInfo]::new('D:\')
@@ -265,14 +282,18 @@ if ($usingDefaultD -and (Test-Path -LiteralPath ($legacyOutputRoot + '.work') -P
    throw ("Espaco insuficiente em D: para transferir o cache e extrair o RomFS: livre={0:N1} GiB, minimo estimado={1:N1} GiB. O cache original em C: foi preservado." -f ($drive.AvailableFreeSpace / 1GB),($needed / 1GB))
   }
  }
- New-Item -ItemType Directory -Force -Path $work | Out-Null
- Write-Host '[native-update] Transferindo NCAs existentes de C: para D: (preservando a copia original)...' -ForegroundColor Cyan
- & robocopy.exe $oldWork $work /E /R:1 /W:1 /XJ /NFL /NDL /NJH /NJS /NP | Out-Null
- $copyStatus = $LASTEXITCODE
- if ($copyStatus -ge 8) {
-  throw "Transferencia do cache para D: falhou (robocopy exit $copyStatus). Copia em C: preservada. Verifique espaco livre/permissoes e execute novamente."
+ if ($copyNeeded) {
+  New-Item -ItemType Directory -Force -Path $work | Out-Null
+  Write-Host '[native-update] Transferindo NCAs existentes de C: para D: (preservando a copia original)...' -ForegroundColor Cyan
+  & robocopy.exe $oldWork $work /E /R:1 /W:1 /XJ /NFL /NDL /NJH /NJS /NP | Out-Null
+  $copyStatus = $LASTEXITCODE
+  if ($copyStatus -ge 8) {
+   throw "Transferencia do cache para D: falhou (robocopy exit $copyStatus). Copia em C: preservada. Verifique espaco livre/permissoes e execute novamente."
+  }
+  Write-Host '[native-update] NCAs reutilizados em D:.' -ForegroundColor Green
+ } else {
+  Write-Host '[native-update] NCAs de D: ja estao completos. Sem nova copia.' -ForegroundColor DarkGray
  }
- Write-Host '[native-update] NCAs reutilizados em D:.' -ForegroundColor Green
 }
 # Failed probes leave a .work directory. Keep already-extracted NCAs and retry
 # only the scanning/patching steps. Never delete an existing work directory.
@@ -443,6 +464,29 @@ function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
   $probeOutput = Join-Path $work 'last-hactool-probe.log'
   $code = Run-Hactool -arguments $hactoolArgs -allowFailure $true -capturePath $probeOutput
   $info = Get-Content -LiteralPath $probeOutput -Raw -ErrorAction SilentlyContinue
+  # Some update NCAs contain BKTR sections that cannot be inspected without
+  # a virtual base. --basefake is safe ONLY for this ExeFS identification:
+  # final RomFS assembly MUST still pass the real --basenca.
+  if ($baseNca -and $code -ne 0) {
+   $firstInfo = $info
+   $firstCode = $code
+   $fakeArgs = @('-k',$keys,'--disablekeywarns','--suppresskeys','-t','nca','--xcontenttype=program','--basefake',"--exefsdir=$probe",$nca.FullName)
+   $fakeOutput = Join-Path $work 'last-update-basefake-probe.log'
+   $fakeCode = Run-Hactool -arguments $fakeArgs -allowFailure $true -capturePath $fakeOutput
+   $fakeInfo = Get-Content -LiteralPath $fakeOutput -Raw -ErrorAction SilentlyContinue
+   if ($fakeCode -eq 0 -and (Test-Path -LiteralPath (Join-Path $probe 'main.npdm') -PathType Leaf)) {
+    $code = $fakeCode
+    $info = $fakeInfo
+    Write-Host ("[native-update] ExeFS do candidato {0} acessivel com base simulada (apenas probe)." -f $nca.Name) -ForegroundColor DarkGray
+   } else {
+    Write-Warning ("[native-update] NCA {0}: leitura normal exit={1}; com --basefake exit={2}." -f $nca.Name,$firstCode,$fakeCode)
+    foreach ($reason in @(Get-HactoolSafeErrors $fakeInfo)) {
+     Write-Warning ("[native-update] Probe alternativo: {0}" -f $reason)
+    }
+    $info = $firstInfo
+    $code = $firstCode
+   }
+  }
   $kind = if ($info -match '(?m)^Content Type:\s+([a-zA-Z0-9]+)') { $Matches[1] } else { 'unknown' }
   if ($kind -eq 'Program') { $programCandidates++ }
   $titleKeyMissing = [bool]($info -match '(?m)^Titlekey:\s+Unknown\b')
