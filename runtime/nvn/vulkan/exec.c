@@ -19,6 +19,7 @@
 #include "../indirect.h"
 #include "vk.h"
 #include "completion_cache.h"
+#include "draw_state_cache.h"
 #include "scarlet_temporal.h"
 #include "scarlet_post_policy.h"
 #include "scarlet_fidelity.h"
@@ -101,6 +102,8 @@ static int cur_sub;
 static uint64_t submit_seq;  // last physically submitted timeline value
 static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
+static ScarletDrawStateCache draw_state_cache;
+static bool draw_state_reuse = true;
 
 // Each list can contribute an upload and a main command buffer.
 #define QBATCH_MAX_CBS (MAX_QUEUE_LISTS * 2)
@@ -207,6 +210,7 @@ static void gp_mark(VkCommandBuffer cb, const char *fmt, ...);
 VkCommandBuffer vk_cmd(void) {
     Sub *s = sub();
     if (!s->main_begun) {
+        scarlet_draw_state_invalidate(&draw_state_cache);
         begin_cb(&s->main, &s->main_begun);
         gp_mark(s->main, "(submission start; includes GPU idle before it)");
         if (prof && prof_qp) {
@@ -1472,6 +1476,9 @@ static void st_defaults(void) {
 
 void vk_exec_init(void) {
     scarlet_completion_reset(&completed_cache);
+    scarlet_draw_state_invalidate(&draw_state_cache);
+    const char *reuse = getenv("SCARLET_DRAW_STATE_REUSE");
+    draw_state_reuse = !reuse || atoi(reuse) != 0;
     prof = getenv("LARECOMP_VK_PROF") != NULL;
     if (prof) {
         prof_up_ns = 0;
@@ -1550,6 +1557,7 @@ static uint32_t level_extent(uint32_t v, uint32_t lv) { v >>= lv; return v ? v :
 
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
+    scarlet_draw_state_invalidate(&draw_state_cache);
     vk_end_pass();
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
     st.rt_dirty = false;
@@ -1699,6 +1707,7 @@ static const VkDynamicState DYN[] = {
 
 // Fixed-function state that isn't part of a pipeline is set explicitly on every bind (it persists across pipelines).
 static void dyn_defaults(VkCommandBuffer cb) {
+    scarlet_draw_state_invalidate(&draw_state_cache);
     vkCmdSetDepthBias(cb, 0, 0, 0);
     vkCmdSetDepthBiasEnable(cb, VK_FALSE);
     float bc[4] = {0, 0, 0, 0};
@@ -1796,6 +1805,7 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
     }
     VkPipeline p = clear_pipeline(index, kind, mask, depth, stencil);
     if (!p) return;
+    scarlet_draw_state_invalidate(&draw_state_cache);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     dyn_defaults(cb);
     if (depth) { vkCmdSetDepthTestEnable(cb, VK_TRUE); vkCmdSetDepthWriteEnable(cb, VK_TRUE); }
@@ -4119,7 +4129,7 @@ static void draw_(CmdRec *r, bool indexed) {
     pipe_history_prewarm(pr, ph);
     wait_built(&pp->state, "pipeline", pr->code[0], pr->code[1]);
     if (atomic_load(&pp->state) != 1) { SKIP(5 + (atomic_load(&pp->state) > 1)); return; }
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe);
+    ScarletDrawState dynamic = {0};
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_key += prof_td_ - prof_tk_;
 
@@ -4127,8 +4137,8 @@ static void draw_(CmdRec *r, bool indexed) {
     static int nodt = -1;
     if (nodt < 0) nodt = getenv("LARECOMP_NO_DEPTH_TEST") != NULL;
     bool dt = st.ds[0] && !nodt && pass_depth;
-    vkCmdSetDepthTestEnable(cb, dt);
-    vkCmdSetDepthWriteEnable(cb, dt && st.ds[1]);
+    dynamic.depth_test = dt;
+    dynamic.depth_write = dt && st.ds[1];
     VkCompareOp dop = dt ? compare_fn(st.ds[2]) : VK_COMPARE_OP_ALWAYS;
     // EQUAL against a depth pre-pass written by a different vertex shader (foliage, trees) needs both shaders to land
     // on identical depths. They do since the translator stopped using unpackHalf2x16 (NVIDIA ran the half math after
@@ -4139,34 +4149,34 @@ static void draw_(CmdRec *r, bool indexed) {
     if (tol < 0) tol = getenv("LARECOMP_VK_EQUAL_TOL") != NULL;
     bool equal_tol = dop == VK_COMPARE_OP_EQUAL && tol;
     if (equal_tol) dop = VK_COMPARE_OP_LESS_OR_EQUAL;
-    vkCmdSetDepthCompareOp(cb, dop);
+    dynamic.depth_compare = dop;
     bool sten = st.ds[3] && pass_stencil;
-    vkCmdSetStencilTestEnable(cb, sten);
+    dynamic.stencil_test = sten;
     if (sten) {
         uint32_t ops = st.ds[5] | st.ds[6] << 8 | st.ds[7] << 16;
         for (int f = 0; f < 2; f++) {
             uint32_t o = f ? ops >> 12 : ops;
-            VkStencilFaceFlags face = f ? VK_STENCIL_FACE_BACK_BIT : VK_STENCIL_FACE_FRONT_BIT;
-            vkCmdSetStencilOp(cb, face, stencil_op(o & 0xF), stencil_op((o >> 8) & 0xF), stencil_op((o >> 4) & 0xF),
-                              compare_fn(f ? st.ds[4] >> 4 : st.ds[4] & 0xF));
-            vkCmdSetStencilCompareMask(cb, face, st.stencil_vmask[f] & 0xFF);
-            vkCmdSetStencilWriteMask(cb, face, st.stencil_mask[f] & 0xFF);
-            vkCmdSetStencilReference(cb, face, st.stencil_ref[f]);
+            dynamic.stencil[f] = (ScarletStencilState){
+                .fail = stencil_op(o & 0xF), .pass = stencil_op((o >> 8) & 0xF),
+                .depth_fail = stencil_op((o >> 4) & 0xF),
+                .compare = compare_fn(f ? st.ds[4] >> 4 : st.ds[4] & 0xF),
+                .compare_mask = st.stencil_vmask[f] & 0xFF,
+                .write_mask = st.stencil_mask[f] & 0xFF, .reference = st.stencil_ref[f]};
         }
     }
-    vkCmdSetBlendConstants(cb, st.blend_color);
+    memcpy(dynamic.blend, st.blend_color, sizeof dynamic.blend);
 
     // ---- rasterizer
     uint8_t cull = st.poly[0];
-    vkCmdSetCullMode(cb, cull == 1 ? VK_CULL_MODE_FRONT_BIT : cull == 2 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE);
+    dynamic.cull = cull == 1 ? VK_CULL_MODE_FRONT_BIT : cull == 2 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
     bool ccw = st.poly[1] == 1;
     static int flipw = -1;  // LARECOMP_VK_FLIP_WINDING: invert the front-face mapping (A/B against Metal)
     if (flipw < 0) flipw = getenv("LARECOMP_VK_FLIP_WINDING") != NULL;
     bool front_ccw = (ccw != vkey.flip_y) != (flipw != 0);
-    vkCmdSetFrontFace(cb, front_ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
-    vkCmdSetPrimitiveTopology(cb, native ? topo : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-    vkCmdSetPrimitiveRestartEnable(cb, st.prim_restart && native && (mode == 3 || mode == 5));
-    vkCmdSetRasterizerDiscardEnable(cb, (st.raster_discard || vkey.xfb) ? VK_TRUE : VK_FALSE);
+    dynamic.front = front_ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
+    dynamic.topology = native ? topo : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    dynamic.restart = st.prim_restart && native && (mode == 3 || mode == 5);
+    dynamic.discard = (st.raster_discard || vkey.xfb) ? VK_TRUE : VK_FALSE;
     {
         float f[3] = {0, 0, 0};
         static int off = -1;
@@ -4174,9 +4184,12 @@ static void draw_(CmdRec *r, bool indexed) {
         bool on = (st.poly[3] & 4) && !off;
         if (on) memcpy(f, st.poly_offset, sizeof f);
         if (equal_tol) { f[1] -= 8; on = true; }  // (see the EQUAL comment above: a few depth ulps nearer)
-        vkCmdSetDepthBiasEnable(cb, on);
-        vkCmdSetDepthBias(cb, f[1], f[2], f[0]);
+        dynamic.bias_enable = on;
+        dynamic.bias_constant = f[1]; dynamic.bias_clamp = f[2]; dynamic.bias_slope = f[0];
     }
+
+    if (!draw_state_reuse) scarlet_draw_state_invalidate(&draw_state_cache);
+    scarlet_apply_draw_state(&draw_state_cache, cb, pp->pipe, &dynamic);
 
     // ---- textures first (their scales feed the widescreen decision and the rscale table), then the viewport
     float *vp = st.viewport[0];
@@ -5084,6 +5097,7 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
                                       .pImageInfo = &ii[i]};
     }
     vkUpdateDescriptorSets(g_vk.dev, (uint32_t)n, w, 0, NULL);
+    scarlet_draw_state_invalidate(&draw_state_cache);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, post_layout, 0, 1, &ds, 0, NULL);
     VkViewport vp = {0, 0, (float)dst->width, (float)dst->height, 0, 1};
@@ -5171,6 +5185,7 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
                               .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
     vkUpdateDescriptorSets(g_vk.dev, 1, &w, 0, NULL);
+    scarlet_draw_state_invalidate(&draw_state_cache);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &ds, 0, NULL);
     VkViewport vp = {vx, vy, vw, vh, 0, 1};
@@ -5215,6 +5230,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     VkWriteDescriptorSet wr = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
                                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
     vkUpdateDescriptorSets(g_vk.dev, 1, &wr, 0, NULL);
+    scarlet_draw_state_invalidate(&draw_state_cache);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &ds, 0, NULL);
     VkViewport vp = {0, 0, (float)w, (float)h, 0, 1};
