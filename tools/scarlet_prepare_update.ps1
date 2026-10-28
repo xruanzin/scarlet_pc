@@ -113,8 +113,8 @@ function Find-Hactool([string]$requested) {
   Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
  }
 }
-$keys = Find-Keys $KeysPath
-$hactool = Find-Hactool $HactoolPath
+# Tool discovery is intentionally deferred until a real extraction is needed.
+# A prepared/validated ExeFS+RomFS is a direct native boot input.
 
 # NSTool is a newer NCA reader with BKTR support. It is only obtained if
 # hactool fails on verified update NCAs. The release binary stays on D:.
@@ -302,6 +302,12 @@ if (Test-Path -LiteralPath $OutputRoot) {
  if (-not $Force) { throw "Cache invalido em $OutputRoot. Confira antes de usar -Force." }
  Remove-Item -LiteralPath $OutputRoot -Recurse -Force
 }
+# Only an unprepared/invalidated update needs prod.keys and NCA tools.
+# Prepared games boot through the native AOT loader without key discovery,
+# hactool, NSTool, BKTR patching or a copy from C:.
+$keys = Find-Keys $KeysPath
+$hactool = Find-Hactool $HactoolPath
+
 # Never read, restore or copy NSP extraction caches from C:. The D: work
 # directory is authoritative and incomplete NCAs are recovered from the
 # original base/update NSPs (also on D:) by Repair-ScarletNspNcaCache.
