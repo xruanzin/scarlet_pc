@@ -159,16 +159,17 @@ $hash = [Security.Cryptography.SHA256]::Create()
 try {
  $tag = ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity)))).Replace('-','').Substring(0,16).ToLowerInvariant()
 } finally { $hash.Dispose() }
-# Prefer D: for all native base+update builds on Windows. Keep a portable
-# fallback on hosts without D:, and continue honoring explicit -OutputRoot.
-$legacyOutputRoot = Join-Path $repo ('build\native-update-cache\scarlet-' + $tag)
-$usingDefaultD = $false
+# Native update extraction is D:-only by default. The original checkout on
+# C: is read-only input (exe, compiled AOT and keys), never a cache source.
+# An explicit -OutputRoot remains available for alternate storage.
 if (-not $OutputRoot) {
- if ($env:OS -eq 'Windows_NT' -and (Test-Path -LiteralPath 'D:\' -PathType Container)) {
+ if ($env:OS -eq 'Windows_NT') {
+  if (-not (Test-Path -LiteralPath 'D:\' -PathType Container)) {
+   throw 'A unidade D: nao esta disponivel para o cache. Use -OutputRoot em outra unidade; nunca usaremos C: automaticamente.'
+  }
   $OutputRoot = Join-Path 'D:\ScarletNativeCache' ('scarlet-' + $tag)
-  $usingDefaultD = $true
  } else {
-  $OutputRoot = $legacyOutputRoot
+  $OutputRoot = Join-Path $repo ('build/native-update-cache/scarlet-' + $tag)
  }
 }
 $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
@@ -298,52 +299,9 @@ if (Test-Path -LiteralPath $OutputRoot) {
  if (-not $Force) { throw "Cache invalido em $OutputRoot. Confira antes de usar -Force." }
  Remove-Item -LiteralPath $OutputRoot -Recurse -Force
 }
-# If this is the first run after switching to D:, copy the previously
-# extracted NCAs from C: instead of extracting two NSPs again. Do not delete
-# the source: it remains a recovery copy until the user confirms success.
-# robocopy can resume a partially copied directory after interruption.
-if ($usingDefaultD -and (Test-Path -LiteralPath ($legacyOutputRoot + '.work') -PathType Container)) {
- $oldWork = $legacyOutputRoot + '.work'
- # After a successful migration, do not recopy all NCAs on every launch.
- # Compare cached NCA/ticket file lengths without reading key material.
- $copyNeeded = $true
- if (Test-Path -LiteralPath $work -PathType Container) {
-  $copyNeeded = $false
-  $sourceParts = @(Get-ChildItem -LiteralPath $oldWork -Recurse -File | Where-Object { $_.Extension -in @('.nca','.tik') })
-  foreach ($part in $sourceParts) {
-   $relative = $part.FullName.Substring($oldWork.Length).TrimStart('\')
-   $target = Join-Path $work $relative
-   if (-not (Test-Path -LiteralPath $target -PathType Leaf) -or
-       (Get-Item -LiteralPath $target).Length -ne $part.Length) {
-    $copyNeeded = $true
-    break
-   }
-  }
-  if ($sourceParts.Count -eq 0) { $copyNeeded = $true }
- }
- if ($copyNeeded -and -not (Test-Path -LiteralPath $work -PathType Container)) {
-  $size = (Get-ChildItem -LiteralPath $oldWork -File -Recurse | Measure-Object -Property Length -Sum).Sum
-  if ($null -eq $size) { $size = 0 }
-  $drive = [IO.DriveInfo]::new('D:\')
-  if (-not $drive.IsReady) { throw 'A unidade D: nao esta pronta para receber o cache.' }
-  $needed = [long]$size + [long](8GB)
-  if ($drive.AvailableFreeSpace -lt $needed) {
-   throw ("Espaco insuficiente em D: para transferir o cache e extrair o RomFS: livre={0:N1} GiB, minimo estimado={1:N1} GiB. O cache original em C: foi preservado." -f ($drive.AvailableFreeSpace / 1GB),($needed / 1GB))
-  }
- }
- if ($copyNeeded) {
-  New-Item -ItemType Directory -Force -Path $work | Out-Null
-  Write-Host '[native-update] Transferindo NCAs existentes de C: para D: (preservando a copia original)...' -ForegroundColor Cyan
-  & robocopy.exe $oldWork $work /E /R:1 /W:1 /XJ /NFL /NDL /NJH /NJS /NP | Out-Null
-  $copyStatus = $LASTEXITCODE
-  if ($copyStatus -ge 8) {
-   throw "Transferencia do cache para D: falhou (robocopy exit $copyStatus). Copia em C: preservada. Verifique espaco livre/permissoes e execute novamente."
-  }
-  Write-Host '[native-update] NCAs reutilizados em D:.' -ForegroundColor Green
- } else {
-  Write-Host '[native-update] NCAs de D: ja estao completos. Sem nova copia.' -ForegroundColor DarkGray
- }
-}
+# Never read, restore or copy NSP extraction caches from C:. The D: work
+# directory is authoritative and incomplete NCAs are recovered from the
+# original base/update NSPs (also on D:) by Repair-ScarletNspNcaCache.
 # Failed probes leave a .work directory. Keep already-extracted NCAs and retry
 # only the scanning/patching steps. Never delete an existing work directory.
 $resume = Test-Path -LiteralPath $work -PathType Container
