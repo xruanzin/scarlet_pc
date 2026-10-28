@@ -14,6 +14,34 @@ BKTR-encrypted update partitions. For update launches the runner uses hactool
 with its --basenca feature, temporarily extracts base/update NCA containers,
 and caches the patched ExeFS and RomFS image.
 
+## Native build, executable and runtime data on D:
+
+Starting with the D-drive fix, the native build/run scripts default to
+\`D:\ScarletNativeCache\native-build\` on Windows. The source checkout may
+remain on C:, but object files (.o), Clang scratch files, ScarletPC.exe,
+shader/pipeline caches, runtime logs and profiler data are written on D:.
+There is **no automatic fallback to C:** if D: is unavailable. The four
+existing AOT DLLs are reused, not regenerated, and an already-complete
+AOT stage is never copied again.
+
+~~~powershell
+cd "C:\Users\ruana\Downloads\scarlet_pc-update-test"
+git fetch origin native/nsp-update-aot-20261027
+git merge --ff-only origin/native/nsp-update-aot-20261027
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\tools\scarlet_native_run.ps1" -Runtime native -GamePath "D:\ScarletNativeCache\scarlet-8df208305cfada13" -Upscaler fsr31 -Build -Jobs 2 -NoLauncher
+~~~
+
+To use a different target volume or an existing AOT stage, the runner also
+accepts \`-BuildRoot "E:\ScarletNativeBuild"\` and
+\`-AotDir "C:\path\to\already-built\aot"\`. No cache is imported from C:
+for NSP extraction. The previous C: build remains intact; clean it only
+after confirming the new EXE boots successfully.
+
+The normal native build omits large host DWARF sections via
+\`HOST_DEBUG=0\` while retaining \`-O3\`. To retain debugging symbols,
+invoke \`tools/scarlet_native_build.ps1 -DebugSymbols\`. CI Makefile
+invocations continue using the original debug setting.
+
 ## Windows usage
 
 First check git status --short --branch; preserve all local changes and work
