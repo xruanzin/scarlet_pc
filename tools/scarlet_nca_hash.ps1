@@ -78,7 +78,14 @@ function Test-ScarletFailedNca {
   if ((Get-ScarletSha256Prefix -Path $stage) -ne $id) {
    throw 'SHA256 do arquivo de recuperacao nao confere; arquivo de cache antigo preservado.'
   }
-  [IO.File]::Replace($stage,$target,$null)
+  # .NET Framework on Windows requires an actual backup path for File.Replace.
+  # Keep the old file until the atomically swapped NCA is verified.
+  $backup = $target + '.scarlet-old-' + [guid]::NewGuid().ToString('N')
+  [IO.File]::Replace($stage,$target,$backup)
+  if ((Get-ScarletSha256Prefix -Path $target) -ne $id) {
+   throw "Falha na validacao pos-substituicao do NCA $name; backup preservado em $backup"
+  }
+  Remove-Item -LiteralPath $backup -Force
   Write-Host ("[native-update] NCA {0} restaurado do NSP original apos validacao SHA256." -f $name) -ForegroundColor Green
   return 'repaired'
  }
