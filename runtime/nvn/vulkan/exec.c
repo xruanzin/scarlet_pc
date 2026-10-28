@@ -1673,7 +1673,9 @@ static VkRect2D scissor_rect(void) {
 
 static void apply_scissor(void) {
     VkRect2D r = scissor_rect();
-    vkCmdSetScissor(vk_cmd(), 0, 1, &r);
+    VkCommandBuffer cb = vk_cmd();
+    if (draw_state_reuse) scarlet_apply_scissor(&draw_state_cache, cb, &r);
+    else vkCmdSetScissor(cb, 0, 1, &r);
 }
 
 // Metal convention (y up in NDC, origin top-left) through a negative-height viewport.
@@ -1681,7 +1683,9 @@ static void set_viewport(float x, float y, float w, float h, float zn, float zf)
     if (w <= 0) w = 1;
     if (h == 0) h = 1;
     VkViewport vp = {x, y + h, w, -h, fminf(fmaxf(zn, 0), 1), fminf(fmaxf(zf, 0), 1)};
-    vkCmdSetViewport(vk_cmd(), 0, 1, &vp);
+    VkCommandBuffer cb = vk_cmd();
+    if (draw_state_reuse) scarlet_apply_viewport(&draw_state_cache, cb, &vp);
+    else vkCmdSetViewport(cb, 0, 1, &vp);
 }
 
 // ================================================================== clears

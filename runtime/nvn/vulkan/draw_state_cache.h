@@ -29,12 +29,40 @@ typedef struct {
     VkPipeline pipeline;
     bool valid;
     ScarletDrawState state;
+    bool viewport_valid, scissor_valid;
+    VkViewport viewport;
+    VkRect2D scissor;
 } ScarletDrawStateCache;
 
 static inline void scarlet_draw_state_invalidate(ScarletDrawStateCache *cache) {
     cache->command = VK_NULL_HANDLE;
     cache->pipeline = VK_NULL_HANDLE;
     cache->valid = false;
+    cache->viewport_valid = cache->scissor_valid = false;
+}
+
+static inline void scarlet_apply_viewport(ScarletDrawStateCache *cache,
+                                        VkCommandBuffer cb, const VkViewport *viewport) {
+    if (cache->command != cb) {
+        scarlet_draw_state_invalidate(cache);
+        cache->command = cb;
+    }
+    if (cache->viewport_valid && !memcmp(&cache->viewport, viewport, sizeof *viewport)) return;
+    vkCmdSetViewport(cb, 0, 1, viewport);
+    cache->viewport = *viewport;
+    cache->viewport_valid = true;
+}
+
+static inline void scarlet_apply_scissor(ScarletDrawStateCache *cache,
+                                       VkCommandBuffer cb, const VkRect2D *scissor) {
+    if (cache->command != cb) {
+        scarlet_draw_state_invalidate(cache);
+        cache->command = cb;
+    }
+    if (cache->scissor_valid && !memcmp(&cache->scissor, scissor, sizeof *scissor)) return;
+    vkCmdSetScissor(cb, 0, 1, scissor);
+    cache->scissor = *scissor;
+    cache->scissor_valid = true;
 }
 
 static inline void scarlet_apply_draw_state(ScarletDrawStateCache *cache,
@@ -47,6 +75,7 @@ static inline void scarlet_apply_draw_state(ScarletDrawStateCache *cache,
         // Conservatively emit all values after a pipeline change, including
         // values that would survive between two wholly dynamic pipelines.
         cache->valid = false;
+        cache->viewport_valid = cache->scissor_valid = false;
     }
     if (cache->valid && !memcmp(&cache->state, state, sizeof *state)) return;
 

@@ -23,6 +23,8 @@ fixture = r'''
 typedef uint64_t VkCommandBuffer, VkPipeline;
 typedef uint32_t VkBool32, VkStencilOp, VkCompareOp, VkCullModeFlags;
 typedef uint32_t VkFrontFace, VkPrimitiveTopology, VkStencilFaceFlags;
+typedef struct {float x, y, width, height, minDepth, maxDepth;} VkViewport;
+typedef struct {struct {int32_t x, y;} offset; struct {uint32_t width, height;} extent;} VkRect2D;
 #define VK_NULL_HANDLE 0
 #define VK_PIPELINE_BIND_POINT_GRAPHICS 0
 #define VK_STENCIL_FACE_FRONT_BIT 1
@@ -34,6 +36,8 @@ static void vkCmdSetStencilWriteMask(VkCommandBuffer, unsigned, unsigned);
 static void vkCmdSetStencilReference(VkCommandBuffer, unsigned, unsigned);
 static void vkCmdSetBlendConstants(VkCommandBuffer, const float *);
 static void vkCmdSetDepthBias(VkCommandBuffer, float, float, float);
+static void vkCmdSetViewport(VkCommandBuffer, unsigned, unsigned, const VkViewport *);
+static void vkCmdSetScissor(VkCommandBuffer, unsigned, unsigned, const VkRect2D *);
 '''
 for name in single:
     fixture += f'static void vkCmdSet{name}(VkCommandBuffer, unsigned);\n'
@@ -43,6 +47,15 @@ static ScarletDrawState observed;
 static unsigned calls, binds;
 static VkCommandBuffer last_cb;
 static VkPipeline last_pipe;
+static VkViewport observed_viewport;
+static VkRect2D observed_scissor;
+static unsigned viewport_calls, scissor_calls;
+static void vkCmdSetViewport(VkCommandBuffer cb, unsigned first, unsigned count, const VkViewport *v) {
+    assert(cb && first == 0 && count == 1); observed_viewport=*v; ++viewport_calls;
+}
+static void vkCmdSetScissor(VkCommandBuffer cb, unsigned first, unsigned count, const VkRect2D *s) {
+    assert(cb && first == 0 && count == 1); observed_scissor=*s; ++scissor_calls;
+}
 static void touch(VkCommandBuffer cb) { assert(cb == last_cb); ++calls; }
 static void vkCmdBindPipeline(VkCommandBuffer cb, unsigned point, VkPipeline pipe) {
     assert(point == VK_PIPELINE_BIND_POINT_GRAPHICS);
@@ -126,6 +139,33 @@ fixture += r'''
         scarlet_apply_draw_state(&cache, 2, 3, &state); equivalent(&state);
     }
     assert(binds == 14);
+    VkViewport vp={0, 720, 1280, -720, 0, 1}; // negative height preserves Y inversion
+    VkRect2D sc={{-4, 9}, {1280, 720}};
+    scarlet_apply_viewport(&cache, 2, &vp);
+    scarlet_apply_scissor(&cache, 2, &sc);
+    for (unsigned i=0; i<1000; ++i) {
+        scarlet_apply_draw_state(&cache, 2, 3, &state);
+        scarlet_apply_viewport(&cache, 2, &vp);
+        scarlet_apply_scissor(&cache, 2, &sc);
+    }
+    assert(viewport_calls == 1 && scissor_calls == 1);
+    vp.minDepth=0.25f; sc.extent.width=960;
+    scarlet_apply_viewport(&cache, 2, &vp);
+    scarlet_apply_scissor(&cache, 2, &sc);
+    assert(viewport_calls == 2 && scissor_calls == 2);
+    assert(!memcmp(&vp, &observed_viewport, sizeof vp) && !memcmp(&sc, &observed_scissor, sizeof sc));
+    scarlet_apply_draw_state(&cache, 2, 4, &state); // new pipeline invalidates viewport/scissor too
+    scarlet_apply_viewport(&cache, 2, &vp);
+    scarlet_apply_scissor(&cache, 2, &sc);
+    assert(viewport_calls == 3 && scissor_calls == 3);
+    scarlet_draw_state_invalidate(&cache); // clear, postprocess or command handle reuse
+    scarlet_apply_viewport(&cache, 2, &vp);
+    scarlet_apply_scissor(&cache, 2, &sc);
+    assert(viewport_calls == 4 && scissor_calls == 4);
+    scarlet_apply_viewport(&cache, 5, &vp); // another command buffer
+    scarlet_apply_scissor(&cache, 5, &sc);
+    assert(viewport_calls == 5 && scissor_calls == 5);
+    assert(cache.pipeline == VK_NULL_HANDLE && !cache.valid);
     puts("draw state: repeated draws, every state field, pipeline/CB changes and invalidation passed");
 }
 '''
