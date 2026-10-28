@@ -51,6 +51,38 @@ of NCAs and writes an updated RomFS image. Subsequent runs reuse a validated
 cache under build/native-update-cache. This is not yet zero-extraction BKTR
 mounting.
 
+## hactool "Failed to write file!" (Windows)
+
+This means hactool's fwrite() failed while saving an extracted section/file;
+it is not proof that keys or NCAs are invalid. First check available disk
+space on the volume that contains the native update cache (usually C:):
+
+~~~powershell
+Get-PSDrive -PSProvider FileSystem |
+  Select-Object Name,@{N='FreeGiB';E={[math]::Round($_.Free/1GB,2)}}
+~~~
+
+The new preparer prints available space automatically when this specific
+error occurs. It also reports the last file hactool tried to write. If C:
+is short on free space but D: has ample space, preserve the already-extracted
+NCA cache by moving the existing .work directory to a new output root. For
+the test run captured in the project discussion:
+
+~~~powershell
+$old = "C:\Users\ruana\Downloads\scarlet_pc-update-test\build\native-update-cache\scarlet-8df208305cfada13"
+$new = "D:\ScarletNativeCache\scarlet-8df208305cfada13"
+New-Item -ItemType Directory -Force -Path (Split-Path $new -Parent) | Out-Null
+Move-Item -LiteralPath ($old + ".work") -Destination ($new + ".work")
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\scarlet_native_run.ps1 -Runtime native -GamePath "D:\Pokemon Scarlet\Pokemon Scarlet.nsp" -UpdatePath "D:\Pokemon Scarlet\Pokemon Scarlet v4.0.0.nsp" -UpdateCacheRoot $new -Profile -NoLauncher
+~~~
+
+Only relocate after verifying the destination has sufficient free space; the
+move can be large. Do not delete existing .work, force a new extraction, or
+rebuild AOT DLLs. If hactool continues failing with ample free space, inspect
+the new redacted diagnostic for the last written file and check filesystem
+permissions/drive errors; an alternate cache volume is not a guarantee.
+
+
 ## Implementation
 
 1. Prepare tool finds the base Program NCA by main.npdm Title ID.
