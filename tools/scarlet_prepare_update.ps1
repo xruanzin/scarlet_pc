@@ -714,6 +714,9 @@ if (-not $script:usedNstoolProbe) {
 }
 if (-not $assembledBy) {
  Write-Host '[native-update] Reconstruindo ExeFS e RomFS por NSTool + base NCA real...' -ForegroundColor Cyan
+ # Never let a partially written legacy RomFS image override the clean
+ # NSTool directory returned to the native runner.
+ if (Test-Path -LiteralPath $romfs -PathType Leaf) { Remove-Item -LiteralPath $romfs -Force }
  if (Test-Path -LiteralPath $exeFs) { Remove-Item -LiteralPath $exeFs -Recurse -Force }
  New-Item -ItemType Directory -Force -Path $exeFs,$romfsDir | Out-Null
  $nstoolLog = Join-Path $work 'last-nstool-assembly.log'
