@@ -23,6 +23,7 @@
 #include "scarlet_fsr3.h"
 #include "scarlet_fsr4.h"
 #include "scarlet_dlss.h"
+#include "scarlet_fidelity.h"
 #include "../output_scale.h"
 #include "../renderer.h"
 
@@ -736,9 +737,17 @@ void backend_present(NvnTexture *t) {
     // (missing depth/motion, unsupported format, etc.), preserve the existing
     // SMAA/FSR1 fallback instead of silently downgrading the final image.
     TexBackend *guest_surface = b;
-    const bool native_dlss = scarlet_dlss_requested();
-    const bool native_fsr3 = scarlet_fsr3_requested();
-    const bool native_fsr4 = scarlet_fsr4_requested();
+    const bool reference = scarlet_graphics_reference();
+    if (reference) {
+        static bool reference_logged;
+        if (!reference_logged) {
+            reference_logged = true;
+            LOG("[graphics-reference] raw guest output; no native temporal upscale, SMAA/FSR1, frame interpolation or port-authored tone/hair overrides\n");
+        }
+    }
+    const bool native_dlss = !reference && scarlet_dlss_requested();
+    const bool native_fsr3 = !reference && scarlet_fsr3_requested();
+    const bool native_fsr4 = !reference && scarlet_fsr4_requested();
     if (native_dlss)
         b = scarlet_dlss_upscale(b);
     else if (native_fsr4)
@@ -753,7 +762,7 @@ void backend_present(NvnTexture *t) {
     // interpolated frames back through FSR temporal history.
     TexBackend *hold = NULL;
     extern bool vk_interp_render(TexBackend *b, TexBackend **hold);
-    bool two = (native_dlss || native_fsr3 || native_fsr4) ? false : vk_interp_render(b, &hold);
+    bool two = reference || native_dlss || native_fsr3 || native_fsr4 ? false : vk_interp_render(b, &hold);
     static uint64_t last_present, period = 33333333;
     if (last_present && t0 - last_present > 5000000 && t0 - last_present < 100000000) period = (period * 7 + (t0 - last_present)) / 8;
     last_present = t0;
