@@ -101,9 +101,10 @@ function Get-ScarletExistingTitleKeys {
 }
 
 function New-ScarletTemporaryKeyHome {
- param([hashtable]$Keys)
+ param([hashtable]$Keys,[string]$BaseDirectory='')
  if ($Keys.Count -eq 0) { return '' }
- $homePath = Join-Path ([IO.Path]::GetTempPath()) ('ScarletTitleKeys-' + [Guid]::NewGuid().ToString('N'))
+ if (-not $BaseDirectory) { $BaseDirectory = [IO.Path]::GetTempPath() }
+ $homePath = Join-Path $BaseDirectory ('ScarletTitleKeys-' + [Guid]::NewGuid().ToString('N'))
  $switchDir = Join-Path $homePath '.switch'
  try {
   New-Item -ItemType Directory -Path $switchDir -Force | Out-Null
