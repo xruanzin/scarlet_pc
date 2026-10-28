@@ -4,6 +4,7 @@ param(
  [Parameter(Mandatory=$true)][string]$BasePath,
  [Parameter(Mandatory=$true)][string]$UpdatePath,
  [string]$KeysPath = '',
+ [string]$TitleKeysPath = '',
  [string]$HactoolPath = '',
  [string]$AotManifestPath = '',
  [string]$OutputRoot = '',
@@ -12,6 +13,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repo = Split-Path $PSScriptRoot -Parent
+. (Join-Path $PSScriptRoot 'scarlet_native_titlekeys.ps1')
 $titleId = [UInt64]0x0100A3D008C5C000
 $expectedMain = '421c5411b487eb4d'
 
@@ -254,15 +256,26 @@ if (-not (Test-Path -LiteralPath $log -PathType Leaf)) {
  Add-Content -LiteralPath $log -Value "[native-update] Retry/resume $(Get-Date -Format o)"
 }
 
+$script:ticketHome = ''
 function Run-Hactool([string[]]$arguments, [bool]$allowFailure=$false, [string]$capturePath='') {
- $safe = ($arguments | ForEach-Object { if ($_ -eq $keys) { '<keys-file>' } else { $_ } }) -join ' '
+ $safe = ($arguments | ForEach-Object {
+  if ($_ -eq $keys) { '<keys-file>' }
+  elseif ($_ -match '^--(?:titlekey|contentkey)=') { '--key=<redacted>' }
+  else { $_ }
+ }) -join ' '
  Add-Content -LiteralPath $log -Value ([Environment]::NewLine + '> hactool ' + $safe)
  $old = $ErrorActionPreference
+ $oldHome = $env:HOME
  try {
   $ErrorActionPreference = 'Continue'
+  if ($script:ticketHome) { $env:HOME = $script:ticketHome }
   $output = @(& $hactool @arguments 2>&1)
   $code = $LASTEXITCODE
- } finally { $ErrorActionPreference = $old }
+ } finally {
+  $ErrorActionPreference = $old
+  if ($null -eq $oldHome) { Remove-Item Env:HOME -ErrorAction SilentlyContinue }
+  else { $env:HOME = $oldHome }
+ }
  if ($output.Count -gt 0) {
   $output | Out-File -LiteralPath $log -Append -Encoding UTF8
  }
@@ -279,9 +292,9 @@ $baseFiles = @(Get-ChildItem -LiteralPath $baseDir -Recurse -File -Filter '*.nca
 if ($baseFiles.Count -eq 0) {
  Write-Host '[native-update] Extraindo NCAs base (primeira execucao)...' -ForegroundColor Cyan
  if ([IO.Path]::GetExtension($base).ToLowerInvariant() -eq '.xci') {
-  $null = Run-Hactool -arguments @('-k',$keys,'--suppresskeys','-t','xci',"--securedir=$baseDir",$base)
+  $null = Run-Hactool -arguments @('-k',$keys,'--disablekeywarns','--suppresskeys','-t','xci',"--securedir=$baseDir",$base)
  } else {
-  $null = Run-Hactool -arguments @('-k',$keys,'--suppresskeys','-t','pfs0',"--outdir=$baseDir",$base)
+  $null = Run-Hactool -arguments @('-k',$keys,'--disablekeywarns','--suppresskeys','-t','pfs0',"--outdir=$baseDir",$base)
  }
  $baseFiles = @(Get-ChildItem -LiteralPath $baseDir -Recurse -File -Filter '*.nca')
 }
@@ -289,11 +302,33 @@ if ($baseFiles.Count -eq 0) { throw "NSP base sem NCAs apos extracao: $base. Con
 $updateFiles = @(Get-ChildItem -LiteralPath $updateDir -Recurse -File -Filter '*.nca')
 if ($updateFiles.Count -eq 0) {
  Write-Host '[native-update] Extraindo NCAs da atualizacao...' -ForegroundColor Cyan
- $null = Run-Hactool -arguments @('-k',$keys,'--suppresskeys','-t','pfs0',"--outdir=$updateDir",$update)
+ $null = Run-Hactool -arguments @('-k',$keys,'--disablekeywarns','--suppresskeys','-t','pfs0',"--outdir=$updateDir",$update)
  $updateFiles = @(Get-ChildItem -LiteralPath $updateDir -Recurse -File -Filter '*.nca')
 }
 if ($updateFiles.Count -eq 0) { throw "Update sem NCAs apos extracao: $update. Confira o pacote. Log: $log" }
 Write-Host ("[native-update] Encontrados: {0} NCA(s) base; {1} NCA(s) update." -f $baseFiles.Count,$updateFiles.Count) -ForegroundColor DarkGray
+
+# NSP tickets contain encrypted titlekeys, not plaintext/decrypted keys.
+# Hactool 1.4.0 automatically loads HOME/.switch/title.keys; supply both the
+# base and update ticket keys through a temporary HOME so --basenca can decrypt
+# BOTH NCAs. Nothing is downloaded or placed in the repository.
+$existingTitleKeyFile = Find-ScarletTitleKeysFile -Requested $TitleKeysPath -ProdKeys $keys -Repository $repo
+$allTitleKeys = Get-ScarletExistingTitleKeys -Path $existingTitleKeyFile
+$tickets = Get-ScarletTicketTitleKeys -Directories @($baseDir,$updateDir)
+$ticketKeysAdded = 0
+foreach ($rights in @($tickets.Keys.Keys)) {
+ if (-not $allTitleKeys.ContainsKey($rights)) { $ticketKeysAdded++ }
+ $allTitleKeys[$rights] = $tickets.Keys[$rights]
+}
+if ($allTitleKeys.Count -gt 0) {
+ $script:ticketHome = New-ScarletTemporaryKeyHome -Keys $allTitleKeys
+ Write-Host ("[native-update] Chaves de ticket locais prontas: {0} Rights ID(s) (inclui {1} do NSP)." -f $allTitleKeys.Count,$ticketKeysAdded) -ForegroundColor DarkGray
+} else {
+ Write-Warning '[native-update] Nenhum ticket comum ou title.keys local encontrado. Program NCAs protegidos por Rights ID nao poderao ser extraidos.'
+}
+if ($tickets.PersonalizedCount -gt 0) {
+ Write-Warning "[native-update] $($tickets.PersonalizedCount) ticket(s) personalizado(s) detectado(s); esses tickets nao podem ser importados automaticamente."
+}
 
 function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
  $ncas = @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.nca' | Sort-Object Length -Descending)
@@ -358,6 +393,7 @@ function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
  Add-Content -LiteralPath $log -Value ("[native-update] NCA scan summary for {0}: {1}" -f $type,$details)
  return ''
 }
+try {
 $baseNca = Find-ProgramNca $baseDir
 if (-not $baseNca) {
  throw "Program NCA do Scarlet na base nao identificado. Confira o final do log ${log}: falhas de NCA normalmente indicam chaves insuficientes (prod.keys/title.keys), arquivo NSP incompleto ou incompatibilidade do hactool."
@@ -369,7 +405,7 @@ Write-Host '[native-update] Aplicando patch BKTR com --basenca...' -ForegroundCo
 $exeFs = Join-Path $assembled 'exefs'
 $romfs = Join-Path $assembled 'romfs.bin'
 New-Item -ItemType Directory -Force -Path $exeFs | Out-Null
-$null = Run-Hactool -arguments @('-k',$keys,'--suppresskeys','-t','nca','--xcontenttype=program',
+$null = Run-Hactool -arguments @('-k',$keys,'--disablekeywarns','--suppresskeys','-t','nca','--xcontenttype=program',
  "--basenca=$baseNca","--exefsdir=$exeFs","--romfs=$romfs",$patchNca)
 if (-not (Test-ExeFs $exeFs)) {
  $found = Get-BuildId (Join-Path $exeFs 'main')
@@ -387,3 +423,12 @@ Move-Item -LiteralPath $assembled -Destination $OutputRoot
 Remove-Item -LiteralPath $work -Recurse -Force
 Write-Host '[native-update] Conteudo 4.0.0 pronto; DLLs AOT preservadas.' -ForegroundColor Green
 Emit-Result $OutputRoot $false
+}
+finally {
+ # The derived encrypted ticket keys exist only in the user's temp directory
+ # while hactool is running. Always clean them up, including on failure.
+ if ($script:ticketHome) {
+  Remove-Item -LiteralPath $script:ticketHome -Recurse -Force -ErrorAction SilentlyContinue
+  $script:ticketHome = ''
+ }
+}
