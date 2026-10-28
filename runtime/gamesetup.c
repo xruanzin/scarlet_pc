@@ -81,6 +81,7 @@ int game_build(const char *exefs) {
 const char *game_version(const char *exefs) {
     static const struct { uint8_t id[8]; const char *v; } k[] = {
         {{0xca, 0x44, 0xe7, 0xdd, 0x62, 0xe6, 0x1a, 0x2a}, "1.0.0"},  // Scarlet base
+        {{0x42, 0x1c, 0x54, 0x11, 0xb4, 0x87, 0xeb, 0x4d}, "4.0.0"},  // Scarlet update/AOT
     };
     char p[1100];
     snprintf(p, sizeof p, "%s/main", exefs);
@@ -93,7 +94,7 @@ const char *game_version(const char *exefs) {
     }
     for (size_t i = 0; i < sizeof k / sizeof *k; i++)
         if (!memcmp(id, k[i].id, 8)) return k[i].v;
-    return "1.0.0";  // temporary fallback until update Build IDs are mapped
+    return "unknown";  // Never report an unknown update's code as base 1.0.0.
 }
 
 const char *game_name(const char *exefs) {
