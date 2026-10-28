@@ -50,7 +50,51 @@ function Find-Hactool([string]$requested) {
  $cmd = Get-Command hactool.exe -ErrorAction SilentlyContinue
  if (-not $cmd) { $cmd = Get-Command hactool -ErrorAction SilentlyContinue }
  if ($cmd) { return $cmd.Source }
- throw 'hactool.exe ausente; informe -HactoolPath (requer --basenca/BKTR).'
+
+ # Other Scarlet checkouts may already have the tool. In particular, the
+ # separate worktree typically sits next to the user's original scarlet_pc.
+ $parent = Split-Path $repo -Parent
+ foreach ($sibling in @('scarlet_pc', 'scarlet_pc-native-test')) {
+  $other = Join-Path $parent $sibling
+  foreach ($rel in @('tools\hactool.exe', 'tools\hactool\hactool.exe', 'build\tools\hactool.exe')) {
+   $candidate = Join-Path $other $rel
+   if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+    Write-Host "[native-update] Reutilizando hactool existente: $candidate" -ForegroundColor DarkGray
+    return (Resolve-Path -LiteralPath $candidate).Path
+   }
+  }
+ }
+
+ # Keep downloaded executable in ignored build/ rather than source-controlled
+ # tools/. Use only the upstream SciresM 1.4.0 Windows release, never download
+ # games, title keys or AOT images. The published hactool supports --basenca.
+ if ($env:OS -ne 'Windows_NT') {
+  throw 'hactool.exe nao encontrado. Informe -HactoolPath com uma versao que suporte --basenca.'
+ }
+ $dir = Join-Path $repo 'build\tools\hactool'
+ $toolExe = Join-Path $dir 'hactool.exe'
+ $zip = Join-Path $dir 'hactool-1.4.0-win.zip'
+ $unpacked = Join-Path $dir '_download_extract'
+ $url = 'https://github.com/SciresM/hactool/releases/download/1.4.0/hactool-1.4.0-win.zip'
+ try {
+  Write-Host '[native-update] hactool ausente; obtendo a release oficial SciresM 1.4.0 para Windows...' -ForegroundColor Cyan
+  New-Item -ItemType Directory -Path $dir -Force | Out-Null
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zip -ErrorAction Stop
+  Expand-Archive -LiteralPath $zip -DestinationPath $unpacked -Force -ErrorAction Stop
+  $found = Get-ChildItem -LiteralPath $unpacked -Recurse -File -Filter 'hactool.exe' | Select-Object -First 1
+  if (-not $found) { throw 'O pacote oficial nao contem hactool.exe.' }
+  Copy-Item -LiteralPath $found.FullName -Destination $toolExe -Force -ErrorAction Stop
+  Write-Host "[native-update] hactool instalado: $toolExe" -ForegroundColor Green
+  return $toolExe
+ }
+ catch {
+  throw "Falha ao baixar hactool 1.4.0 da release oficial: $($_.Exception.Message). Instale a ferramenta manualmente e informe -HactoolPath."
+ }
+ finally {
+  Remove-Item -LiteralPath $unpacked -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+ }
 }
 $keys = Find-Keys $KeysPath
 $hactool = Find-Hactool $HactoolPath
