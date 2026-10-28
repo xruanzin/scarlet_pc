@@ -19,7 +19,7 @@ if (-not $preparer.Contains('"--basenca=$baseNca","--exefsdir=$exeFs"')) {
 }
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('Scarlet Runner Test ' + [guid]::NewGuid())
 $capture = @{ Process = $null }
-$names = @('SCARLET_RUNTIME','SCARLET_NATIVE_PROFILE','LARECOMP_NO_LAUNCHER',
+$names = @('SCARLET_RUNTIME','SCARLET_UPSCALER','SCARLET_NATIVE_PROFILE','LARECOMP_NO_LAUNCHER',
     'LARECOMP_HLE_PROF','LARECOMP_EXEFS_DIR','LARECOMP_ROMFS_DIR','LARECOMP_ROMFS_IMAGE',
     'LARECOMP_PACKAGE_STREAM','LARECOMP_PROF_SVC','LARECOMP_VK_PROF',
     'LARECOMP_COMMAND_COUNTS','LARECOMP_FRAME_CSV')
@@ -39,6 +39,7 @@ function Start-Process {
         Arguments = @($ArgumentList)
         Directory = $WorkingDirectory
         Runtime = $env:SCARLET_RUNTIME
+        Upscaler = $env:SCARLET_UPSCALER
         Profile = $env:SCARLET_NATIVE_PROFILE
         Hle = $env:LARECOMP_HLE_PROF
         FrameCsv = $env:LARECOMP_FRAME_CSV
@@ -71,6 +72,17 @@ try {
     foreach ($name in $names) {
         Assert-Runner ([Environment]::GetEnvironmentVariable($name, 'Process') -eq 'test-before') "Environment leaked: $name"
     }
+
+    # A/B image-quality testing must change the native child configuration
+    # without leaking the override into the user's next launch.
+    & $runner -Runtime native -GamePath $game -Upscaler fsr31 -NoLauncher
+    Assert-Runner ($capture.Process.Upscaler -eq 'fsr31') 'FSR 3.1 mode not propagated.'
+    Assert-Runner ([Environment]::GetEnvironmentVariable('SCARLET_UPSCALER', 'Process') -eq 'test-before') 'FSR upscaler leaked to parent.'
+    & $runner -Runtime native -GamePath $game -Upscaler off -NoLauncher
+    Assert-Runner ($capture.Process.Upscaler -eq 'off') 'Native upscaler off mode not propagated.'
+    Assert-Runner ([Environment]::GetEnvironmentVariable('SCARLET_UPSCALER', 'Process') -eq 'test-before') 'Off mode leaked to parent.'
+    & $runner -Runtime native -GamePath $game -Upscaler current -NoLauncher
+    Assert-Runner ($capture.Process.Upscaler -eq 'test-before') 'Current mode must honor the user's existing setting.'
 
     # Explicit DLC support must be a declared array parameter, even with none supplied.
     $parameters = (Get-Command $runner).Parameters
