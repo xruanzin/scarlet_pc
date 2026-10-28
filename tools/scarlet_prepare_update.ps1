@@ -334,6 +334,32 @@ if ($tickets.UnsupportedCount -gt 0) {
 }
 Write-Host ("[native-update] Tickets locais analisados: {0}; validos comuns: {1}; personalizados: {2}; assinatura desconhecida: {3}." -f $tickets.TicketCount,$tickets.Keys.Count,$tickets.PersonalizedCount,$tickets.UnsupportedCount) -ForegroundColor DarkGray
 
+# Redacted, bounded hactool diagnostics. No key/rights-id byte sequences are
+# emitted to the console. We only need error wording from the Program NCA;
+# generic printed NCA metadata is deliberately not shown.
+function Get-HactoolSafeErrors([string]$message) {
+ if (-not $message) { return @('hactool nao retornou texto de erro.') }
+ $lines = @($message -split '\r?\n' | Where-Object {
+  $_ -match '(?i)^\s*(?:(?:hactool(?:\.exe)?\s*:\s*)?(?:Error:|Fatal:|Failed to |Unable to |Invalid NCA header|Missing |Unknown Base File Type|Out of memory|Could not ))'
+ } | Select-Object -Last 5)
+ if ($lines.Count -eq 0) {
+  if ($message -match '(?i)section\s+[0-9]+\s+is\s+corrupted') {
+   return @('Secao NCA corrompida ou descriptografia falhou; confira titlekey/prod.keys e integridade do pacote.')
+  }
+  return @('Saida do hactool nao contem mensagem de erro reconhecida. Consulte o diagnostico local.')
+ }
+ $safeLines = @()
+ foreach ($line in $lines) {
+  $safe = [string]$line
+  $safe = [regex]::Replace($safe,'(?i)(?:0x)?[0-9a-f]{32,}', '<redacted>')
+  $safe = [regex]::Replace($safe,'(?i)\(value\s+"[^"]*"\)', '(value redacted)')
+  $safe = $safe.Trim()
+  if ($safe.Length -gt 220) { $safe = $safe.Substring(0,220) }
+  if ($safe) { $safeLines += $safe }
+ }
+ return $safeLines
+}
+
 function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
  $ncas = @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.nca' | Sort-Object Length -Descending)
  $type = if ($baseNca) { 'update' } else { 'base' }
@@ -359,7 +385,17 @@ function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
   $titleKeyMissing = [bool]($info -match '(?m)^Titlekey:\s+Unknown\b')
   if ($titleKeyMissing) { $missingTitlekeys++ }
   if ($info -match 'Invalid NCA header!') { $invalidHeaders++ }
-  if ($code -ne 0) { $ncaFailed++; continue }
+  if ($code -ne 0) {
+   $ncaFailed++
+   if ($kind -eq 'Program') {
+    Write-Warning ("[native-update] Program NCA {0}: hactool exit={1}; main.npdm nao extraido." -f $nca.Name,$code)
+    foreach ($reason in @(Get-HactoolSafeErrors $info)) {
+     Write-Warning ("[native-update] Causa informada pelo hactool: {0}" -f $reason)
+    }
+    Write-Host ("[native-update] Diagnostico deste NCA: {0}" -f $probeOutput) -ForegroundColor DarkGray
+   }
+   continue
+  }
   if (-not (Test-Path -LiteralPath (Join-Path $probe 'main.npdm') -PathType Leaf)) {
    $missingNpdm++
    if ($kind -eq 'Program' -or $titleKeyMissing) {
@@ -400,7 +436,7 @@ function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
 try {
 $baseNca = Find-ProgramNca $baseDir
 if (-not $baseNca) {
- throw "Program NCA do Scarlet na base nao identificado. Confira o final do log ${log}: falhas de NCA normalmente indicam chaves insuficientes (prod.keys/title.keys), arquivo NSP incompleto ou incompatibilidade do hactool."
+ throw "Program NCA do Scarlet na base nao extraido. Consulte a mensagem de erro do hactool acima. NSP e tickets ja foram encontrados; preserve a pasta .work. Log: $log"
 }
 $patchNca = Find-ProgramNca $updateDir $baseNca $expectedMain
 if (-not $patchNca) { throw "Update 4.0.0 (main $expectedMain) nao encontrado. Verifique build IDs e log: $log" }
