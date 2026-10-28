@@ -360,6 +360,151 @@ function Get-HactoolSafeErrors([string]$message) {
  return $safeLines
 }
 
+# hactool 1.4.0 uses "Failed to write file!" when fwrite() returns a
+# short write; this is not proof of bad titlekeys or a corrupted NSP.
+# Inspect only the output filesystem and partial file metadata.
+function Show-NativeWriteFailure([string]$hactoolOutput, [string]$targetDirectory) {
+ if (-not $hactoolOutput -or $hactoolOutput -notmatch '(?i)Failed to write file!') { return }
+ $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($targetDirectory))
+ Write-Warning ("[native-update] hactool nao conseguiu gravar um arquivo do ExeFS em {0}. Possiveis causas: unidade cheia, cota de disco ou erro de E/S." -f $root)
+ try {
+  $drive = New-Object System.IO.DriveInfo($root)
+  if ($drive.IsReady) {
+   $freeGiB = [math]::Round($drive.AvailableFreeSpace / 1GB, 2)
+   Write-Warning ("[native-update] Espaco livre em {0}: {1} GiB." -f $root,$freeGiB)
+   if ($drive.AvailableFreeSpace -lt (4GB)) {
+    Write-Warning '[native-update] Pouco espaco para extrair ExeFS. Use -UpdateCacheRoot em outra unidade com espaco livre e mova o cache .work existente para nao reextrair NCAs.'
+   }
+  }
+ } catch {
+  Write-Warning '[native-update] Nao foi possivel consultar o espaco disponivel na unidade de destino.'
+ }
+ # Hactool says "Saving main to ..."; never print full output or key material.
+ $saveLines = @($hactoolOutput -split '\r?\n' | Where-Object { $_ -match '(?i)Saving [^\r\n]+ to [^\r\n]+' })
+ if ($saveLines.Count -gt 0) {
+  $lastSave = [string]$saveLines[-1]
+  if ($lastSave -match '(?i)^\s*Saving\s+([^\r\n]+?)\s+to\s+(.+?)\.\.\.\s*
+ $ncas = @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.nca' | Sort-Object Length -Descending)
+ $type = if ($baseNca) { 'update' } else { 'base' }
+ $ncaFailed = 0
+ $missingNpdm = 0
+ $missingTitlekeys = 0
+ $programCandidates = 0
+ $invalidHeaders = 0
+ $wrongId = @{}
+ $missingMain = 0
+ Write-Host ("[native-update] Analisando {0} NCA(s) de {1}..." -f $ncas.Count,$type) -ForegroundColor Cyan
+ foreach ($nca in $ncas) {
+  if (Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe -Recurse -Force }
+  New-Item -ItemType Directory -Force -Path $probe | Out-Null
+  $hactoolArgs = @('-k',$keys,'--disablekeywarns','--suppresskeys','-t','nca','--xcontenttype=program')
+  if ($baseNca) { $hactoolArgs += "--basenca=$baseNca" }
+  $hactoolArgs += @("--exefsdir=$probe",$nca.FullName)
+  $probeOutput = Join-Path $work 'last-hactool-probe.log'
+  $code = Run-Hactool -arguments $hactoolArgs -allowFailure $true -capturePath $probeOutput
+  $info = Get-Content -LiteralPath $probeOutput -Raw -ErrorAction SilentlyContinue
+  $kind = if ($info -match '(?m)^Content Type:\s+([a-zA-Z0-9]+)') { $Matches[1] } else { 'unknown' }
+  if ($kind -eq 'Program') { $programCandidates++ }
+  $titleKeyMissing = [bool]($info -match '(?m)^Titlekey:\s+Unknown\b')
+  if ($titleKeyMissing) { $missingTitlekeys++ }
+  if ($info -match 'Invalid NCA header!') { $invalidHeaders++ }
+  if ($code -ne 0) {
+   $ncaFailed++
+   if ($kind -eq 'Program') {
+    Write-Warning ("[native-update] Program NCA {0}: hactool exit={1}; main.npdm nao extraido." -f $nca.Name,$code)
+    foreach ($reason in @(Get-HactoolSafeErrors $info)) {
+     Write-Warning ("[native-update] Causa informada pelo hactool: {0}" -f $reason)
+    }
+    Show-NativeWriteFailure -hactoolOutput $info -targetDirectory $probe
+    Write-Host ("[native-update] Diagnostico deste NCA: {0}" -f $probeOutput) -ForegroundColor DarkGray
+   }
+   continue
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $probe 'main.npdm') -PathType Leaf)) {
+   $missingNpdm++
+   if ($kind -eq 'Program' -or $titleKeyMissing) {
+    $hint = if ($titleKeyMissing) { 'Titlekey ausente (NCA protegido por Rights ID)' } else { 'ExeFS nao extraido' }
+    Write-Warning ("[native-update] {0}: Content Type={1}; {2}; hactool exit={3}" -f $nca.Name,$kind,$hint,$code)
+   }
+   continue
+  }
+  $programId = Get-ProgramId $probe
+  if ($programId -ne $titleId) {
+   $id = $programId.ToString('x16')
+   if (-not $wrongId.ContainsKey($id)) { $wrongId[$id] = 0 }
+   $wrongId[$id]++
+   continue
+  }
+  $got = Get-BuildId (Join-Path $probe 'main')
+  if (-not $got) { $missingMain++; continue }
+  if ($mainId -and -not $got.StartsWith($mainId)) {
+   Write-Host ("[native-update] Program NCA {0}: main {1}, esperado {2}" -f $nca.Name,$got.Substring(0,16),$mainId) -ForegroundColor Yellow
+   continue
+  }
+  Write-Host ("[native-update] Program NCA: {0} / main {1}" -f $nca.Name,$got.Substring(0,16)) -ForegroundColor Green
+  return $nca.FullName
+ }
+ $details = "NCA(s)=$($ncas.Count); tipo Program=$programCandidates; titlekeys ausentes=$missingTitlekeys; headers invalidos=$invalidHeaders; hactool exit nao-zero=$ncaFailed; sem main.npdm=$missingNpdm; sem main NSO=$missingMain"
+ if ($wrongId.Count) { $details += '; title IDs divergentes=' + (($wrongId.Keys | Sort-Object) -join ',') }
+ Write-Warning "[native-update] Nenhum Program NCA valido ($type). $details"
+ if ($missingTitlekeys -gt 0) {
+  Write-Warning '[native-update] Pelo menos um NCA usa titlekey nao localizada. Verifique suas chaves locais de console e title.keys; nao envie chaves no chat.'
+ } elseif ($programCandidates -eq 0 -and $invalidHeaders -gt 0) {
+  Write-Warning '[native-update] Hactool nao validou o cabecalho dos NCAs. Verifique prod.keys e a integridade do pacote.'
+ } elseif ($programCandidates -gt 0 -and $missingNpdm -gt 0) {
+  Write-Warning '[native-update] Program NCA identificado, mas ExeFS nao foi extraido. Consulte as mensagens do ultimo probe no log.'
+ }
+ Add-Content -LiteralPath $log -Value ("[native-update] NCA scan summary for {0}: {1}" -f $type,$details)
+ return ''
+}
+try {
+$baseNca = Find-ProgramNca $baseDir
+if (-not $baseNca) {
+ throw "Program NCA do Scarlet na base nao extraido. Consulte a mensagem de erro do hactool acima. NSP e tickets ja foram encontrados; preserve a pasta .work. Log: $log"
+}
+$patchNca = Find-ProgramNca $updateDir $baseNca $expectedMain
+if (-not $patchNca) { throw "Update 4.0.0 (main $expectedMain) nao encontrado. Verifique build IDs e log: $log" }
+
+Write-Host '[native-update] Aplicando patch BKTR com --basenca...' -ForegroundColor Cyan
+$exeFs = Join-Path $assembled 'exefs'
+$romfs = Join-Path $assembled 'romfs.bin'
+New-Item -ItemType Directory -Force -Path $exeFs | Out-Null
+$null = Run-Hactool -arguments @('-k',$keys,'--disablekeywarns','--suppresskeys','-t','nca','--xcontenttype=program',
+ "--basenca=$baseNca","--exefsdir=$exeFs","--romfs=$romfs",$patchNca)
+if (-not (Test-ExeFs $exeFs)) {
+ $found = Get-BuildId (Join-Path $exeFs 'main')
+ throw "ExeFS nao corresponde ao AOT 4.0.0 (main=$found). Log: $log"
+}
+if (-not (Test-Romfs $romfs)) { throw "RomFS atualizado invalido; BKTR nao aplicado. Log: $log" }
+[ordered]@{
+ source_identity=$identity
+ base_path=$base
+ update_path=$update
+ main_build_id=(Get-BuildId (Join-Path $exeFs 'main'))
+ created_utc=[DateTime]::UtcNow.ToString('o')
+} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $assembled '.source.json') -Encoding UTF8
+Move-Item -LiteralPath $assembled -Destination $OutputRoot
+Remove-Item -LiteralPath $work -Recurse -Force
+Write-Host '[native-update] Conteudo 4.0.0 pronto; DLLs AOT preservadas.' -ForegroundColor Green
+Emit-Result $OutputRoot $false
+}
+finally {
+ # The derived encrypted ticket keys exist only in the user's temp directory
+ # while hactool is running. Always clean them up, including on failure.
+ if ($script:ticketHome) {
+  Remove-Item -LiteralPath $script:ticketHome -Recurse -Force -ErrorAction SilentlyContinue
+  $script:ticketHome = ''
+ }
+}
+) {
+   $fileName = [IO.Path]::GetFileName($Matches[2])
+   if (-not $fileName) { $fileName = $Matches[1] }
+   Write-Host ("[native-update] Ultimo arquivo que hactool tentou escrever: {0}" -f $fileName) -ForegroundColor DarkGray
+  }
+ }
+ Write-Host ("[native-update] Para verificar C: e D:: Get-PSDrive -PSProvider FileSystem | Select-Object Name,Free,Used") -ForegroundColor DarkGray
+}
+
 function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
  $ncas = @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.nca' | Sort-Object Length -Descending)
  $type = if ($baseNca) { 'update' } else { 'base' }
