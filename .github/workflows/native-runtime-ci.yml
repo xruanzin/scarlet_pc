@@ -94,6 +94,11 @@ jobs:
           python3 tools/test_vulkan_descriptor_keys.py
           python3 tools/test_vulkan_draw_state.py
           python3 tools/test_vulkan_pipeline_lookup.py
+          python3 tools/test_vulkan_lean_constants.py
+          python3 tools/test_vulkan_program_memo.py
+          python3 tools/test_targeted_sync_wake.py
+          clang -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined tools/test_vulkan_texture_hash.c -o /tmp/texture-hash
+          /tmp/texture-hash
           python3 tools/test_native_aot_loader.py
           python3 tools/test_native_setup.py
       - name: Check pinned AOT layout header by itself

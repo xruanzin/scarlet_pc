@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 
 #include "vk.h"
+#include "../tex_hash.h"
 #include "scarlet_temporal.h"
 #include "../astc.h"
 #include "../renderer.h"
@@ -529,6 +530,7 @@ static int texture_pages_changed(uint64_t addr, uint64_t size, uint32_t since, u
 // Four independent lanes (one serial multiply chain ran at ~1.5 bytes/cycle; dynamic textures are hashed every
 // frame). Values are only compared within a run.
 static uint64_t hash_full(const uint8_t *p, uint64_t n) {
+    if (tex_fast_hash()) return tex_hash_full(p, n);
     uint64_t h0 = 0x9E3779B97F4A7C15ull ^ n, h1 = 0xC2B2AE3D27D4EB4Full, h2 = 0x165667B19E3779F9ull, h3 = 0x27D4EB2F165667C5ull;
     uint64_t i = 0;
     for (; i + 32 <= n; i += 32) {
@@ -545,6 +547,7 @@ static uint64_t hash_full(const uint8_t *p, uint64_t n) {
 }
 
 static uint64_t fnv_sample(const uint8_t *p, uint64_t n) {
+    if (tex_fast_hash()) return tex_hash_sample(p, n);
     uint64_t h = 1469598103934665603ull;
     uint64_t step = n > 4096 ? n / 4096 : 1;
     for (uint64_t i = 0; i < n; i += step) { h ^= p[i]; h *= 1099511628211ull; }
@@ -685,7 +688,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     prof_tex_full++; prof_tex_full_bytes += total; if (b->dynamic) prof_tex_dyn++;
     uint64_t h = hash_full(mem, total);
     b->full_frame = frame;
-    b->sample_hash = fnv_sample(mem, total);
+    if (!b->dynamic) b->sample_hash = fnv_sample(mem, total);
     if (b->uploaded && h == b->data_hash) return;
     if (b->uploaded && h != b->data_hash) b->dynamic = true;
     b->data_hash = h;
