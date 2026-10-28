@@ -7,6 +7,9 @@ param(
     [string]$GamePath,
     [string]$UpdatePath,
     [string[]]$DlcPath = @(),
+    [string]$KeysPath,
+    [string]$HactoolPath,
+    [string]$AotManifestPath,
 
     [ValidateRange(1, 32)]
     [int]$Jobs = 4,
@@ -32,26 +35,18 @@ if ($Runtime -eq 'legacy') {
     exit $LASTEXITCODE
 }
 
-# The native loader already owns base ExeFS/RomFS, but Nintendo update NSPs
-# require BKTR/patch overlay semantics that have not been migrated yet. Never
-# ignore an explicitly requested update: preserve the known-working legacy
-# path until the native overlay service replaces it.
-if (-not [string]::IsNullOrWhiteSpace($UpdatePath) -or $DlcPath.Count) {
-    if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
-        Write-Warning 'Native BKTR/update overlay is not migrated yet; preserving update support through the legacy runtime for this launch.'
-    }
-    if ($DlcPath.Count) {
-        Write-Warning 'Native DLC content overlay is not migrated yet; preserving DLC support through the legacy runtime for this launch.'
-    }
+# DLC has not been migrated yet. Preserve the existing explicit legacy path
+# for DLC launches, but an ordinary base+update launch must remain native.
+if ($DlcPath.Count) {
+    Write-Warning 'Native DLC overlay is not migrated; this DLC launch uses the legacy runtime.'
     $legacy = Join-Path $PSScriptRoot 'scarlet_independent_run.ps1'
     $args = @{}
     if (-not [string]::IsNullOrWhiteSpace($GamePath)) { $args.GamePath = $GamePath }
     if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) { $args.UpdatePath = $UpdatePath }
-    if ($DlcPath.Count) { $args.DlcPath = $DlcPath }
+    $args.DlcPath = $DlcPath
     & $legacy @args
     exit $LASTEXITCODE
 }
-
 
 $exe = Join-Path $repoRoot 'build\native\ScarletPC.exe'
 if ($Build -or -not (Test-Path $exe -PathType Leaf)) {
@@ -65,7 +60,28 @@ $resolvedRoot = $GameRoot
 $packageMount = $null
 $packageMountPid = $null
 
-if (-not [string]::IsNullOrWhiteSpace($GamePath)) {
+if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
+    if ([string]::IsNullOrWhiteSpace($GamePath)) {
+        throw 'Native NSP update requires -GamePath with the NSP/XCI base and -UpdatePath with the update NSP.'
+    }
+    Write-Host '[package] preparing base + update with BKTR for the native runtime...' -ForegroundColor Cyan
+    $prepareArgs = @{
+        BasePath = $GamePath
+        UpdatePath = $UpdatePath
+    }
+    if ($KeysPath) { $prepareArgs.KeysPath = $KeysPath }
+    if ($HactoolPath) { $prepareArgs.HactoolPath = $HactoolPath }
+    if ($AotManifestPath) { $prepareArgs.AotManifestPath = $AotManifestPath }
+    $prepareJson = & (Join-Path $PSScriptRoot 'scarlet_prepare_update.ps1') @prepareArgs
+    if (-not $prepareJson) { throw 'The native update preparation did not return an ExeFS/RomFS result.' }
+    $packageMount = ($prepareJson | Select-Object -Last 1 | ConvertFrom-Json)
+    if (-not (Test-Path -LiteralPath $packageMount.ExeFs -PathType Container) -or
+        -not (Test-Path -LiteralPath $packageMount.RomFsImage -PathType Leaf)) {
+        throw 'The native update preparation returned invalid ExeFS/RomFS paths.'
+    }
+    $resolvedRoot = $repoRoot
+}
+elseif (-not [string]::IsNullOrWhiteSpace($GamePath)) {
     $resolvedGame = (Resolve-Path -LiteralPath $GamePath).Path
     if (Test-Path -LiteralPath $resolvedGame -PathType Container) {
         $resolvedRoot = $resolvedGame
@@ -76,7 +92,9 @@ if (-not [string]::IsNullOrWhiteSpace($GamePath)) {
             throw "Native runtime GamePath must be an extracted game directory, .nsp, or .xci: $resolvedGame"
         }
         Write-Host '[package] mounting base game directly (zero extraction)...' -ForegroundColor Cyan
-        $mountJson = & (Join-Path $PSScriptRoot 'scarlet_mount_package.ps1') -PackagePath $resolvedGame
+        $mountArgs = @{ PackagePath = $resolvedGame }
+        if ($KeysPath) { $mountArgs.KeysPath = $KeysPath }
+        $mountJson = & (Join-Path $PSScriptRoot 'scarlet_mount_package.ps1') @mountArgs
         if (-not $mountJson) {
             throw 'Base package mount failed.'
         }
@@ -110,7 +128,7 @@ try {
         $env:LARECOMP_EXEFS_DIR = [string]$packageMount.ExeFs
         $env:LARECOMP_ROMFS_DIR = [string]$packageMount.RomFsDir
         $env:LARECOMP_ROMFS_IMAGE = [string]$packageMount.RomFsImage
-        $env:LARECOMP_PACKAGE_STREAM = '1'
+        $env:LARECOMP_PACKAGE_STREAM = if ($packageMount.PSObject.Properties.Name -contains 'CacheRoot') { '0' } else { '1' }
         Write-Host ("[package] ExeFS: {0}" -f $env:LARECOMP_EXEFS_DIR) -ForegroundColor DarkGray
         Write-Host ("[package] RomFS: {0}" -f $env:LARECOMP_ROMFS_IMAGE) -ForegroundColor DarkGray
     }
