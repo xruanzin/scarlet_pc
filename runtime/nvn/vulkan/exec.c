@@ -3459,7 +3459,10 @@ static ScarletStageDescriptors stage_descriptors[3];
 
 static bool stage_descriptor_key(const VkWriteDescriptorSet *w, int n,
                                   ScarletDescriptorKey key[MAX_BIND]) {
-    memset(key, 0, sizeof(ScarletDescriptorKey) * MAX_BIND);
+    // Only n entries participate in comparisons/copies. Clearing MAX_BIND on
+    // every draw wrote 7680 bytes even for a stage with just a few bindings.
+    if (n < 0 || n > MAX_BIND) return false;
+    memset(key, 0, sizeof(ScarletDescriptorKey) * (size_t)n);
     for (int i = 0; i < n; ++i) {
         if (w[i].descriptorCount != 1 || w[i].pNext ||
             w[i].dstArrayElement || w[i].pTexelBufferView)

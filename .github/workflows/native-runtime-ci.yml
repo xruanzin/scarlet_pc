@@ -91,6 +91,7 @@ jobs:
           python3 tools/test_vulkan_completion.py
           python3 tools/test_vulkan_upload_cache.py
           python3 tools/test_vulkan_vertex_bindings.py
+          python3 tools/test_vulkan_descriptor_keys.py
           python3 tools/test_native_aot_loader.py
           python3 tools/test_native_setup.py
       - name: Check pinned AOT layout header by itself

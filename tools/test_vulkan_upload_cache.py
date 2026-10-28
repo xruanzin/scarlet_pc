@@ -29,13 +29,18 @@ static VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align)
 checks = r'''
 static unsigned char guest[1 << 20];
 int main(void) {
-    uint64_t addresses[4]; unsigned count = 0, target = 0;
+    uint64_t addresses[4]; unsigned count = 0;
+    static uint64_t buckets[GCOPY_TAB][4];
+    static unsigned occupancy[GCOPY_TAB];
     for (unsigned off = 0; off + 16 <= sizeof guest && count < 4; off += 16) {
         uint64_t a = (uint64_t)(uintptr_t)(guest + off);
         uint64_t h = (a * 0x9E3779B97F4A7C15ull) ^ (16ull * 0xC2B2AE3D27D4EB4Full);
         unsigned slot = (unsigned)(h ^ (h >> 32)) & (GCOPY_TAB - 1);
-        if (!off) target = slot;
-        if (slot == target) addresses[count++] = a;
+        buckets[slot][occupancy[slot]++] = a;
+        if (occupancy[slot] == 4) {
+            memcpy(addresses, buckets[slot], sizeof addresses);
+            count = 4;
+        }
     }
     assert(count == 4);
     VkSpan saved[4];
