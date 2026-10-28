@@ -7,11 +7,22 @@ param(
     [string]$GamePath,
     [string]$UpdatePath,
     [string[]]$DlcPath = @(),
+    [string]$KeysPath,
+    [string]$TitleKeysPath,
+    [string]$HactoolPath,
+    [string]$NstoolPath,
+    [string]$AotManifestPath,
+    [string]$UpdateCacheRoot,
+    [string]$BuildRoot,
+    [string]$AotDir,
 
     [ValidateRange(1, 32)]
     [int]$Jobs = 4,
 
     [switch]$Build,
+    [ValidateSet('current','fsr31','fsr4','dlss','spatial')]
+    [string]$Upscaler = 'current',
+    [switch]$GraphicsReference,
     [switch]$Profile,
     [switch]$NoLauncher
 )
@@ -20,6 +31,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
+. (Join-Path $PSScriptRoot 'scarlet_native_paths.ps1')
 
 if ($Runtime -eq 'legacy') {
     Write-Host '[runtime] legacy suyu fallback' -ForegroundColor Yellow
@@ -32,30 +44,25 @@ if ($Runtime -eq 'legacy') {
     exit $LASTEXITCODE
 }
 
-# The native loader already owns base ExeFS/RomFS, but Nintendo update NSPs
-# require BKTR/patch overlay semantics that have not been migrated yet. Never
-# ignore an explicitly requested update: preserve the known-working legacy
-# path until the native overlay service replaces it.
-if (-not [string]::IsNullOrWhiteSpace($UpdatePath) -or $DlcPath.Count) {
-    if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
-        Write-Warning 'Native BKTR/update overlay is not migrated yet; preserving update support through the legacy runtime for this launch.'
-    }
-    if ($DlcPath.Count) {
-        Write-Warning 'Native DLC content overlay is not migrated yet; preserving DLC support through the legacy runtime for this launch.'
-    }
+# DLC has not been migrated yet. Preserve the existing explicit legacy path
+# for DLC launches, but an ordinary base+update launch must remain native.
+if ($DlcPath.Count) {
+    Write-Warning 'Native DLC overlay is not migrated; this DLC launch uses the legacy runtime.'
     $legacy = Join-Path $PSScriptRoot 'scarlet_independent_run.ps1'
     $args = @{}
     if (-not [string]::IsNullOrWhiteSpace($GamePath)) { $args.GamePath = $GamePath }
     if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) { $args.UpdatePath = $UpdatePath }
-    if ($DlcPath.Count) { $args.DlcPath = $DlcPath }
+    $args.DlcPath = $DlcPath
     & $legacy @args
     exit $LASTEXITCODE
 }
 
-
-$exe = Join-Path $repoRoot 'build\native\ScarletPC.exe'
-if ($Build -or -not (Test-Path $exe -PathType Leaf)) {
-    & (Join-Path $PSScriptRoot 'scarlet_native_build.ps1') -Jobs $Jobs
+$buildDir = Resolve-ScarletNativeBuildRoot -BuildRoot $BuildRoot
+$exe = Join-Path $buildDir 'ScarletPC.exe'
+if ($Build -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+    $nativeBuildArgs = @{ Jobs = $Jobs; BuildRoot = $buildDir }
+    if ($AotDir) { $nativeBuildArgs.AotDir = $AotDir }
+    & (Join-Path $PSScriptRoot 'scarlet_native_build.ps1') @nativeBuildArgs
 }
 if (-not (Test-Path $exe -PathType Leaf)) {
     throw 'Native ScarletPC.exe is missing after build.'
@@ -65,7 +72,33 @@ $resolvedRoot = $GameRoot
 $packageMount = $null
 $packageMountPid = $null
 
-if (-not [string]::IsNullOrWhiteSpace($GamePath)) {
+if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
+    if ([string]::IsNullOrWhiteSpace($GamePath)) {
+        throw 'Native NSP update requires -GamePath with the NSP/XCI base and -UpdatePath with the update NSP.'
+    }
+    Write-Host '[package] preparing base + update with BKTR for the native runtime...' -ForegroundColor Cyan
+    $prepareArgs = @{
+        BasePath = $GamePath
+        UpdatePath = $UpdatePath
+    }
+    if ($KeysPath) { $prepareArgs.KeysPath = $KeysPath }
+    if ($TitleKeysPath) { $prepareArgs.TitleKeysPath = $TitleKeysPath }
+    if ($HactoolPath) { $prepareArgs.HactoolPath = $HactoolPath }
+    if ($NstoolPath) { $prepareArgs.NstoolPath = $NstoolPath }
+    if ($AotManifestPath) { $prepareArgs.AotManifestPath = $AotManifestPath }
+    if ($UpdateCacheRoot) { $prepareArgs.OutputRoot = $UpdateCacheRoot }
+    $prepareJson = & (Join-Path $PSScriptRoot 'scarlet_prepare_update.ps1') @prepareArgs
+    if (-not $prepareJson) { throw 'The native update preparation did not return an ExeFS/RomFS result.' }
+    $packageMount = ($prepareJson | Select-Object -Last 1 | ConvertFrom-Json)
+    $romFsImageReady = $packageMount.RomFsImage -and (Test-Path -LiteralPath $packageMount.RomFsImage -PathType Leaf)
+    $romFsDirReady = $packageMount.RomFsDir -and (Test-Path -LiteralPath $packageMount.RomFsDir -PathType Container)
+    if (-not (Test-Path -LiteralPath $packageMount.ExeFs -PathType Container) -or
+        -not ($romFsImageReady -or $romFsDirReady)) {
+        throw 'The native update preparation returned invalid ExeFS/RomFS paths.'
+    }
+    $resolvedRoot = $repoRoot
+}
+elseif (-not [string]::IsNullOrWhiteSpace($GamePath)) {
     $resolvedGame = (Resolve-Path -LiteralPath $GamePath).Path
     if (Test-Path -LiteralPath $resolvedGame -PathType Container) {
         $resolvedRoot = $resolvedGame
@@ -76,7 +109,9 @@ if (-not [string]::IsNullOrWhiteSpace($GamePath)) {
             throw "Native runtime GamePath must be an extracted game directory, .nsp, or .xci: $resolvedGame"
         }
         Write-Host '[package] mounting base game directly (zero extraction)...' -ForegroundColor Cyan
-        $mountJson = & (Join-Path $PSScriptRoot 'scarlet_mount_package.ps1') -PackagePath $resolvedGame
+        $mountArgs = @{ PackagePath = $resolvedGame }
+        if ($KeysPath) { $mountArgs.KeysPath = $KeysPath }
+        $mountJson = & (Join-Path $PSScriptRoot 'scarlet_mount_package.ps1') @mountArgs
         if (-not $mountJson) {
             throw 'Base package mount failed.'
         }
@@ -93,6 +128,10 @@ elseif (Test-Path (Join-Path $repoRoot $GameRoot) -PathType Container) {
 }
 
 $oldRuntime = $env:SCARLET_RUNTIME
+$oldDataRoot = $env:LARECOMP_DATA_ROOT
+$oldAotDir = $env:SCARLET_AOT_DIR
+$oldUpscaler = $env:SCARLET_UPSCALER
+$oldGraphicsReference = $env:SCARLET_GRAPHICS_REFERENCE
 $oldProfile = $env:SCARLET_NATIVE_PROFILE
 $oldLauncher = $env:LARECOMP_NO_LAUNCHER
 $oldHleProfile = $env:LARECOMP_HLE_PROF
@@ -106,16 +145,51 @@ $oldCommandCounts = $env:LARECOMP_COMMAND_COUNTS
 $oldFrameCsv = $env:LARECOMP_FRAME_CSV
 try {
     $env:SCARLET_RUNTIME = $Runtime
+    # The runtime changes to its data root and writes shader caches, saves,
+    # profiler output and logs there. The D: build location is authoritative
+    # unless the user intentionally selected another data root.
+    if ([string]::IsNullOrWhiteSpace($env:LARECOMP_DATA_ROOT)) {
+        $env:LARECOMP_DATA_ROOT = $buildDir
+    }
+    $aotCandidate = if ($AotDir) { $AotDir } else { Join-Path $buildDir 'aot' }
+    if ([string]::IsNullOrWhiteSpace($env:SCARLET_AOT_DIR) -and
+        (Test-Path -LiteralPath $aotCandidate -PathType Container)) {
+        $env:SCARLET_AOT_DIR = [IO.Path]::GetFullPath($aotCandidate)
+    }
+    if ($GraphicsReference) {
+        $env:SCARLET_GRAPHICS_REFERENCE = '1'
+        Write-Host '[graphics] Suyu comparison baseline: original guest shaders, LUT and materials; no extra postprocessing.' -ForegroundColor Cyan
+        if ($Upscaler -ne 'current') {
+            Write-Warning '-GraphicsReference bypasses FSR/DLSS and post-SMAA during comparison even if -Upscaler was supplied.'
+        }
+    }
+    if ($Upscaler -ne 'current') {
+        # 'spatial' selects the existing native SMAA/FSR1 presentation path;
+        # this is a temporal selector, not a forced no-scaling switch.
+        $env:SCARLET_UPSCALER = $Upscaler
+        Write-Host ("[graphics] Native temporal upscaler selection: {0}" -f $Upscaler) -ForegroundColor Cyan
+    }
     if ($packageMount) {
         $env:LARECOMP_EXEFS_DIR = [string]$packageMount.ExeFs
         $env:LARECOMP_ROMFS_DIR = [string]$packageMount.RomFsDir
-        $env:LARECOMP_ROMFS_IMAGE = [string]$packageMount.RomFsImage
-        $env:LARECOMP_PACKAGE_STREAM = '1'
+        if ([string]::IsNullOrEmpty([string]$packageMount.RomFsImage)) {
+            Remove-Item Env:LARECOMP_ROMFS_IMAGE -ErrorAction SilentlyContinue
+        } else {
+            $env:LARECOMP_ROMFS_IMAGE = [string]$packageMount.RomFsImage
+        }
+        if ($packageMount.PSObject.Properties.Name -contains 'CacheRoot') {
+            # An extracted/patched image can be memory-mapped; existence of this
+            # variable (even '0') forces the native FS into streaming mode.
+            Remove-Item Env:LARECOMP_PACKAGE_STREAM -ErrorAction SilentlyContinue
+        } else {
+            $env:LARECOMP_PACKAGE_STREAM = '1'
+        }
         Write-Host ("[package] ExeFS: {0}" -f $env:LARECOMP_EXEFS_DIR) -ForegroundColor DarkGray
         Write-Host ("[package] RomFS: {0}" -f $env:LARECOMP_ROMFS_IMAGE) -ForegroundColor DarkGray
     }
     if ($Profile) {
-        $profileDir = Join-Path $repoRoot 'build\native\profile'
+        # Keep the profiler beside the native executable, not on the full C:.
+        $profileDir = Join-Path $buildDir 'profile'
         New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
         $env:SCARLET_NATIVE_PROFILE = '1'
         $env:LARECOMP_HLE_PROF = '1'
@@ -137,13 +211,17 @@ try {
     $quotedRoot = [regex]::Replace($resolvedRoot, '(\\+)$', '$1$1')
     $launch += ('"' + $quotedRoot + '"')
 
-    $p = Start-Process -FilePath $exe -ArgumentList $launch -WorkingDirectory $repoRoot -PassThru -Wait
+    $p = Start-Process -FilePath $exe -ArgumentList $launch -WorkingDirectory $buildDir -PassThru -Wait
     if ($p.ExitCode -ne 0) {
         throw "Scarlet Native Runtime exited with code $($p.ExitCode)"
     }
 }
 finally {
     if ($null -eq $oldRuntime) { Remove-Item Env:SCARLET_RUNTIME -ErrorAction SilentlyContinue } else { $env:SCARLET_RUNTIME = $oldRuntime }
+    if ($null -eq $oldDataRoot) { Remove-Item Env:LARECOMP_DATA_ROOT -ErrorAction SilentlyContinue } else { $env:LARECOMP_DATA_ROOT = $oldDataRoot }
+    if ($null -eq $oldAotDir) { Remove-Item Env:SCARLET_AOT_DIR -ErrorAction SilentlyContinue } else { $env:SCARLET_AOT_DIR = $oldAotDir }
+    if ($null -eq $oldUpscaler) { Remove-Item Env:SCARLET_UPSCALER -ErrorAction SilentlyContinue } else { $env:SCARLET_UPSCALER = $oldUpscaler }
+    if ($null -eq $oldGraphicsReference) { Remove-Item Env:SCARLET_GRAPHICS_REFERENCE -ErrorAction SilentlyContinue } else { $env:SCARLET_GRAPHICS_REFERENCE = $oldGraphicsReference }
     if ($null -eq $oldProfile) { Remove-Item Env:SCARLET_NATIVE_PROFILE -ErrorAction SilentlyContinue } else { $env:SCARLET_NATIVE_PROFILE = $oldProfile }
     if ($null -eq $oldLauncher) { Remove-Item Env:LARECOMP_NO_LAUNCHER -ErrorAction SilentlyContinue } else { $env:LARECOMP_NO_LAUNCHER = $oldLauncher }
     if ($null -eq $oldExeFs) { Remove-Item Env:LARECOMP_EXEFS_DIR -ErrorAction SilentlyContinue } else { $env:LARECOMP_EXEFS_DIR = $oldExeFs }

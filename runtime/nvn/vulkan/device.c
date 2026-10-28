@@ -23,6 +23,7 @@
 #include "scarlet_fsr3.h"
 #include "scarlet_fsr4.h"
 #include "scarlet_dlss.h"
+#include "scarlet_fidelity.h"
 #include "../output_scale.h"
 #include "../renderer.h"
 
@@ -689,7 +690,7 @@ void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h) 
 
 // ================================================================== game presentation (metal.m backend_present)
 // Draws the game's image into the window with the widescreen crop, then the overlay menu.
-extern void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]);
+extern void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8], bool temporal_output);
 void renderer_submit(void);
 void renderer_set_scale(float sx, float sy);
 uint64_t renderer_present_count(void);
@@ -731,15 +732,29 @@ void backend_present(NvnTexture *t) {
     b->presented = true;
     vk_end_pass();
 
-    const bool native_dlss = scarlet_dlss_requested();
-    const bool native_fsr3 = scarlet_fsr3_requested();
-    const bool native_fsr4 = scarlet_fsr4_requested();
+    // A native temporal upscaler returns a separate output surface only
+    // after it actually produced a frame. If it returns the guest surface
+    // (missing depth/motion, unsupported format, etc.), preserve the existing
+    // SMAA/FSR1 fallback instead of silently downgrading the final image.
+    TexBackend *guest_surface = b;
+    const bool reference = scarlet_graphics_reference();
+    if (reference) {
+        static bool reference_logged;
+        if (!reference_logged) {
+            reference_logged = true;
+            LOG("[graphics-reference] raw guest output; no native temporal upscale, SMAA/FSR1, frame interpolation or port-authored tone/hair overrides\n");
+        }
+    }
+    const bool native_dlss = !reference && scarlet_dlss_requested();
+    const bool native_fsr3 = !reference && scarlet_fsr3_requested();
+    const bool native_fsr4 = !reference && scarlet_fsr4_requested();
     if (native_dlss)
         b = scarlet_dlss_upscale(b);
     else if (native_fsr4)
         b = scarlet_fsr4_upscale(b);
     else if (native_fsr3)
         b = scarlet_fsr3_upscale(b);
+    const bool temporal_output = b != guest_surface;
 
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
@@ -747,7 +762,7 @@ void backend_present(NvnTexture *t) {
     // interpolated frames back through FSR temporal history.
     TexBackend *hold = NULL;
     extern bool vk_interp_render(TexBackend *b, TexBackend **hold);
-    bool two = (native_dlss || native_fsr3 || native_fsr4) ? false : vk_interp_render(b, &hold);
+    bool two = reference || native_dlss || native_fsr3 || native_fsr4 ? false : vk_interp_render(b, &hold);
     static uint64_t last_present, period = 33333333;
     if (last_present && t0 - last_present > 5000000 && t0 - last_present < 100000000) period = (period * 7 + (t0 - last_present)) / 8;
     last_present = t0;
@@ -803,7 +818,8 @@ void backend_present(NvnTexture *t) {
         // (0: show everything).
         static long hide = -1;
         if (hide < 0) hide = getenv("LARECOMP_HIDE_FIRST_FRAMES") ? atol(getenv("LARECOMP_HIDE_FIRST_FRAMES")) : 2;
-        if ((long)total_frames >= hide) vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
+        if ((long)total_frames >= hide) vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv,
+                                                       temporal_output && final);
         static long menu_at = -1;
         if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
         if (final && menu_at && (long)total_frames + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }

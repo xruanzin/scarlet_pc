@@ -35,9 +35,21 @@ jobs:
       - name: Parse and exercise the native runner
         shell: powershell
         run: |
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_paths.ps1 -Raw))
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_build.ps1 -Raw))
+          ./tools/test_native_build_root.ps1
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_run.ps1 -Raw))
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_prepare_update.ps1 -Raw))
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_titlekeys.ps1 -Raw))
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_nsp_cache.ps1 -Raw))
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_nca_hash.ps1 -Raw))
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_cleanup_legacy_cache.ps1 -Raw))
+          ./tools/test_native_d_only.ps1
+          ./tools/test_native_titlekeys.ps1
+          ./tools/test_native_nca_hash.ps1
+          ./tools/test_native_nsp_cache.ps1
           ./tools/test_native_runner.ps1
+          ./tools/test_native_prepared_boot.ps1
 
   syntax:
     runs-on: ubuntu-latest
@@ -58,6 +70,21 @@ jobs:
             runtime/scarlet_native/aot_execute.c \
             runtime/dispatch.c \
             runtime/kernel.c
+      - name: Verify fidelity-oriented Vulkan post-processing policy
+        run: |
+          clang -std=c11 -Wall -Wextra -Werror -o /tmp/scarlet-post-policy tools/test_native_post_policy.c
+          /tmp/scarlet-post-policy
+      - name: Verify Vulkan target equality does not restart on inactive views
+        run: |
+          clang -std=gnu11 -Wall -Wextra -Werror -Iruntime -Iruntime/nvn -o /tmp/scarlet-rt-targets tools/test_native_rt_targets.c
+          /tmp/scarlet-rt-targets
+      - name: Verify original-guest graphics reference switch
+        run: |
+          clang -std=c11 -Wall -Wextra -Werror -o /tmp/scarlet-graphics-reference tools/test_native_graphics_reference.c
+          /tmp/scarlet-graphics-reference
+      - name: Check synchronized suyu/native frame comparison tool
+        run: python3 -m py_compile tools/scarlet_compare_suyu.py
+
       - name: Execute native AOT loader and boundary regression tests
         run: |
           python3 tools/test_native_aot_loader.py
@@ -93,16 +120,52 @@ jobs:
         run: |
           $scripts = @(
             'tools/scarlet_native_build.ps1',
-            'tools/scarlet_native_run.ps1'
+            'tools/scarlet_native_paths.ps1',
+            'tools/test_native_build_root.ps1',
+            'tools/scarlet_native_run.ps1',
+            'tools/scarlet_prepare_update.ps1',
+            'tools/scarlet_native_titlekeys.ps1',
+            'tools/scarlet_nsp_cache.ps1',
+            'tools/scarlet_nca_hash.ps1',
+            'tools/scarlet_cleanup_legacy_cache.ps1',
+            'tools/test_native_d_only.ps1',
+            'tools/test_native_nca_hash.ps1',
+            'tools/test_native_titlekeys.ps1',
+            'tools/test_native_nsp_cache.ps1',
+            'tools/test_native_prepared_boot.ps1'
           )
           foreach ($script in $scripts) {
             [void][ScriptBlock]::Create((Get-Content -LiteralPath $script -Raw))
             Write-Host "parsed $script"
           }
 
+      - name: Test native titlekey ticket parser without game files
+        shell: powershell
+        run: ./tools/test_native_titlekeys.ps1
+
+      - name: Test NSP/PFS0 cache integrity and targeted recovery
+        shell: powershell
+        run: ./tools/test_native_nsp_cache.ps1
+
+      - name: Guard D-only cache and C cleanup policy
+        shell: powershell
+        run: ./tools/test_native_d_only.ps1
+
+      - name: Test same-size NCA corruption and safe recovery
+        shell: powershell
+        run: ./tools/test_native_nca_hash.ps1
+
+      - name: Test Windows native build paths on D or an explicit build root
+        shell: powershell
+        run: ./tools/test_native_build_root.ps1
+
       - name: Test native Windows runner without game files
         shell: powershell
         run: ./tools/test_native_runner.ps1
+
+      - name: Verify prepared native game boots without keys or NCA tools
+        shell: powershell
+        run: ./tools/test_native_prepared_boot.ps1
 
       - name: Build and link ScarletPC native runtime
         shell: msys2 {0}

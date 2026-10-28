@@ -58,6 +58,9 @@ GuestFn dispatch_lookup(uint64_t addr);
 // Resolve only native/HLE destinations. AOT execution uses this before its
 // own module lookup so existing service implementations and overrides survive
 // the backend transition.
+// Address-only preflight for native AOT slices; preserves full HLE lookup
+// whenever a host override or registered HLE slot can handle the PC.
+bool rt_dispatch_host_has_pc(uint64_t addr);
 GuestFn rt_dispatch_host_lookup(Cpu *c, uint64_t addr);
 
 typedef void (*RtGuestCallBackend)(Cpu *c, uint64_t addr);

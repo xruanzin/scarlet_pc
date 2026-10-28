@@ -27,6 +27,8 @@ typedef struct {
     _Atomic uint64_t svc_ns;
     _Atomic uint64_t hle_calls;
     _Atomic uint64_t hle_ns;
+    _Atomic uint64_t host_pc_skips;
+    _Atomic uint64_t host_pc_candidates;
     _Atomic uint64_t loads;
     _Atomic uint64_t stores;
     _Atomic uint64_t missing_targets;
@@ -231,17 +233,20 @@ void scarlet_aot_profile_report(void) {
     uint64_t calls = TAKE(calls), slices = TAKE(slices), blocks = TAKE(blocks);
     uint64_t aot_ns = TAKE(aot_ns), svc = TAKE(svc_calls), svc_ns = TAKE(svc_ns);
     uint64_t hle = TAKE(hle_calls), hle_ns = TAKE(hle_ns);
+    uint64_t skips = TAKE(host_pc_skips), candidates = TAKE(host_pc_candidates);
     uint64_t loads = TAKE(loads), stores = TAKE(stores);
     uint64_t miss = TAKE(missing_targets), gaps = TAKE(unhandled_halts);
     uint64_t las = TAKE(las_fallbacks), las_ns = TAKE(las_fallback_ns);
 #undef TAKE
     LOG("[native-prof] calls=%llu slices=%llu blocks=%llu aot=%.3fms "
-        "svc=%llu/%.3fms hle=%llu/%.3fms mem=%lluR/%lluW miss=%llu gaps=%llu "
+        "svc=%llu/%.3fms hle=%llu/%.3fms host-pc=%llu skips/%llu candidates " 
+        "mem=%lluR/%lluW miss=%llu gaps=%llu "
         "las-fallback=%llu/%.3fms\n",
         (unsigned long long)calls, (unsigned long long)slices,
         (unsigned long long)blocks, aot_ns / 1e6,
         (unsigned long long)svc, svc_ns / 1e6,
         (unsigned long long)hle, hle_ns / 1e6,
+        (unsigned long long)skips, (unsigned long long)candidates,
         (unsigned long long)loads, (unsigned long long)stores,
         (unsigned long long)miss, (unsigned long long)gaps,
         (unsigned long long)las, las_ns / 1e6);
@@ -294,21 +299,29 @@ void scarlet_aot_guest_call(Cpu *cpu, uint64_t address) {
     while (g.pc) {
         rt_unwind_point();
 
-        // Existing native imports and overrides remain authoritative. This is
-        // checked at host boundaries; module-local AOT chaining stays hot.
-        aot_to_cpu(&g, cpu);
-        GuestFn host = rt_dispatch_host_lookup(cpu, g.pc);
-        if (host) {
-            uint64_t t0 = prof ? plat_now_ns() : 0;
-            cpu->pc = g.pc;
-            host(cpu);
-            if (prof) {
-                atomic_fetch_add_explicit(&g_prof.hle_calls, 1, memory_order_relaxed);
-                atomic_fetch_add_explicit(&g_prof.hle_ns, plat_now_ns() - t0, memory_order_relaxed);
+        // Existing native HLE and overrides stay authoritative even when
+        // their PCs overlap a compiled AOT module. The PC-only preflight
+        // avoids copying 31 GPRs and the entire SIMD/FP state on ordinary
+        // AOT-to-AOT slices; Cpu state is synchronized only for host calls,
+        // SVC, the LAS fallback and when leaving this guest call.
+        if (rt_dispatch_host_has_pc(g.pc)) {
+            if (prof) atomic_fetch_add_explicit(&g_prof.host_pc_candidates, 1, memory_order_relaxed);
+            aot_to_cpu(&g, cpu);
+            GuestFn host = rt_dispatch_host_lookup(cpu, g.pc);
+            if (host) {
+                uint64_t t0 = prof ? plat_now_ns() : 0;
+                cpu->pc = g.pc;
+                host(cpu);
+                if (prof) {
+                    atomic_fetch_add_explicit(&g_prof.hle_calls, 1, memory_order_relaxed);
+                    atomic_fetch_add_explicit(&g_prof.hle_ns, plat_now_ns() - t0, memory_order_relaxed);
+                }
+                cpu_to_aot(cpu, &g);
+                g.pc = g.x[30];  // native HLE implements a guest function call
+                continue;
             }
-            cpu_to_aot(cpu, &g);
-            g.pc = g.x[30];  // native HLE implements a guest function call
-            continue;
+        } else if (prof) {
+            atomic_fetch_add_explicit(&g_prof.host_pc_skips, 1, memory_order_relaxed);
         }
 
         ScarletAotModule *m = scarlet_aot_find_pc(g.pc);

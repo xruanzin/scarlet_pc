@@ -19,6 +19,9 @@
 #include "../indirect.h"
 #include "vk.h"
 #include "scarlet_temporal.h"
+#include "scarlet_post_policy.h"
+#include "scarlet_fidelity.h"
+#include "scarlet_rt_targets.h"
 #include "../renderer.h"
 #include "../../settings.h"
 
@@ -946,15 +949,7 @@ static void wait_built(_Atomic int *state, const char *kind, uint64_t code0, uin
 }
 
 // ================================================================== state
-typedef struct {
-    NvnTexture *color[8];
-    NvnTextureView cview[8];
-    uint8_t has_cview[8];
-    int ncolor;
-    NvnTexture *depth;
-    NvnTextureView dview;
-    uint8_t has_dview;
-} RtState;
+typedef ScarletRtState RtState;
 
 typedef struct { uint64_t addr, size; } Range;
 
@@ -2541,6 +2536,7 @@ static uint64_t fragment_code_hash(uint64_t fs) {
 }
 
 static bool sharp_dof_variant(uint64_t hash) {
+    if (scarlet_graphics_reference()) return false; // keep original guest cinematic DOF
     static int enabled = -1;
     if (enabled < 0) {
         const char *e = getenv("LARECOMP_NO_DOF");
@@ -2550,6 +2546,7 @@ static bool sharp_dof_variant(uint64_t hash) {
     return enabled && hash == 0xfbff97881854688eull;
 }
 static bool hair_lighting_variant(uint64_t hash) {
+    if (scarlet_graphics_reference()) return false; // preserve guest anisotropic shader
     // The G-buffer capture proved this compatibility path restores Scarlet's
     // material-3 hair colour. Keep it on by default for the exact deferred
     // lighting shader; LARECOMP_NO_HAIR_FIX=1 is a diagnostic opt-out.
@@ -2590,6 +2587,7 @@ static void scarlet_scene_markers(uint64_t fs_addr) {
     }
 }
 static bool schoolyard_grade_variant(uint64_t fs_addr) {
+    if (scarlet_graphics_reference()) return false; // no port-authored hue/tone adjustment
     static int disabled = -1;
     if (disabled < 0) {
         const char *off = getenv("LARECOMP_NO_RING_GRADE_FIX");
@@ -3613,7 +3611,7 @@ static bool draw_lut_slices(CmdRec *r, bool indexed) {
     for (int i = 1; i < st.rt.ncolor; i++) if (st.rt.color[i]) return false;
     uint32_t base = (uint32_t)r->x[indexed ? 5 : 3];
     uint32_t count = (uint32_t)r->x[indexed ? 6 : 4];
-    const char *compat = getenv("LARECOMP_LUT_IDENTITY");
+    const char *compat = scarlet_graphics_reference() ? NULL : getenv("LARECOMP_LUT_IDENTITY");
     /*
      * Keep the game's own colour cube by default.  The identity cube is only an
      * A/B diagnostic: captures proved that replacing the guest LUT makes Scarlet
@@ -4954,13 +4952,29 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
 
 // The view the present samples: the game image, or its anti-aliased / upscaled version. ow x oh: the whole image's
 // size in the window (its crop is drawn into the viewport).
-static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, double oh_d) {
+static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, double oh_d, bool temporal_output) {
     VkImageView v = raw_view(b);
-    bool smaa = g_settings.antialias == AA_SMAA && getenv("LARECOMP_NO_SMAA") == NULL;
+    // The policy is shared with a standalone regression test. A temporal
+    // frame bypasses both spatial passes; a returned source texture keeps
+    // SMAA/FSR1 intact even if temporal reconstruction was requested.
     uint32_t ow = (uint32_t)lround(ow_d), oh = (uint32_t)lround(oh_d);
     if (ow > 16384) ow = 16384;
     if (oh > 16384) oh = 16384;
-    bool fsr = g_settings.upscaler == UPSCALE_FSR1 && (ow > b->width + 1 || oh > b->height + 1);  // (an upscale only)
+    bool reference = scarlet_graphics_reference();
+    ScarletPostPasses post = scarlet_post_passes(
+        temporal_output,
+        !reference && g_settings.antialias == AA_SMAA && getenv("LARECOMP_NO_SMAA") == NULL,
+        !reference && g_settings.upscaler == UPSCALE_FSR1,
+        ow > b->width + 1 || oh > b->height + 1);
+    bool smaa = post.smaa;
+    bool fsr = post.fsr1;
+    if (temporal_output) {
+        static bool logged;
+        if (!logged) {
+            logged = true;
+            LOG("[post] native temporal output: bypass duplicate SMAA/FSR1 (quality preservation)\n");
+        }
+    }
     if (!smaa && !fsr) return v;
     extern void vk_frame_suspend(void);
     extern void vk_frame_resume(void);
@@ -5002,9 +5016,10 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
 }
 
 // Inside the window image's rendering (device.c vk_frame_begin): the game image into (vx, vy, vw, vh).
-void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]) {
+void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8], bool temporal_output) {
     if (!b || !b->image || (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return;
-    VkImageView src = post_process(cb, b, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh);
+    VkImageView src = post_process(cb, b, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh,
+                                   temporal_output);
     VkPipeline p = present_pipeline(g_vk.sc_format);
     VkDescriptorSet ds = vk_alloc_set(present_set_layout);
     VkDescriptorImageInfo ii = {vk_default_sampler(true), src, VK_IMAGE_LAYOUT_GENERAL};
@@ -5259,7 +5274,15 @@ static void exec_list(uint64_t handle, int depth) {
 
             static int always = -1;
             if (always < 0) always = getenv("LARECOMP_VK_PASS_RESTART") != NULL;
-            if (always || memcmp(&prev, &st.rt, sizeof prev)) st.rt_dirty = true;
+            if (always || !scarlet_rt_targets_equal(&prev, &st.rt)) {
+                st.rt_dirty = true;
+            } else if (memcmp(&prev, &st.rt, sizeof prev)) {
+                // Diagnostic proof that opaque/inactive view bytes would have
+                // restarted an otherwise identical Vulkan render target.
+                static unsigned redundant_view_updates;
+                if (++redundant_view_updates == 1)
+                    LOG("[vk] ignoring inactive NVN render-target view bytes (prevent redundant passes)\n");
+            }
             break;
         }
         case CMD_SET_VIEWPORTS:
