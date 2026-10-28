@@ -385,6 +385,34 @@ function Run-Hactool([string[]]$arguments, [bool]$allowFailure=$false, [string]$
  return $code
 }
 
+# NSTool supports the same temporary HOME/.switch/title.keys mechanism.
+# The first use resolves an official executable; no AOT or game files change.
+$script:nstoolExe = ''
+function Run-Nstool([string[]]$arguments,[string]$capturePath) {
+ if (-not $script:nstoolExe) { $script:nstoolExe = Find-Nstool $NstoolPath }
+ $oldPref = $ErrorActionPreference
+ $oldHome = $env:HOME
+ try {
+  $ErrorActionPreference = 'Continue'
+  if ($script:ticketHome) { $env:HOME = $script:ticketHome }
+  $output = @(& $script:nstoolExe @arguments 2>&1)
+  $code = $LASTEXITCODE
+ } finally {
+  $ErrorActionPreference = $oldPref
+  if ($null -eq $oldHome) { Remove-Item Env:HOME -ErrorAction SilentlyContinue }
+  else { $env:HOME = $oldHome }
+ }
+ $output | Out-File -LiteralPath $capturePath -Encoding UTF8
+ # Do not log encrypted title key bytes, --showkeys is never enabled.
+ $lines = @($output | ForEach-Object { [string]$_ } | Where-Object { $_ -match '(?i)exception|error|fail|warn|cannot|invalid' } | Select-Object -Last 3)
+ foreach ($line in $lines) {
+  $safe = [regex]::Replace($line,'(?i)(?:0x)?[0-9a-f]{32,}','<redacted>')
+  if ($safe.Length -gt 200) { $safe=$safe.Substring(0,200) }
+  Write-Warning ("[native-update] NSTool: {0}" -f $safe)
+ }
+ return [int]$code
+}
+
 Write-Host '[native-update] Conferindo NCAs de base e update...' -ForegroundColor Cyan
 $baseFiles = @(Get-ChildItem -LiteralPath $baseDir -Recurse -File -Filter '*.nca')
 if ($baseFiles.Count -eq 0) {
@@ -498,6 +526,7 @@ function Show-NativeWriteFailure([string]$hactoolOutput, [string]$targetDirector
  }
 }
 
+$script:usedNstoolProbe = $false
 function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
  $allNcas = @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.nca' | Sort-Object Length -Descending)
  $type = if ($baseNca) { 'update' } else { 'base' }
@@ -567,6 +596,32 @@ function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
     New-Item -ItemType Directory -Path $probe -Force | Out-Null
     $code = Run-Hactool -arguments $hactoolArgs -allowFailure $true -capturePath $probeOutput
     $info = Get-Content -LiteralPath $probeOutput -Raw -ErrorAction SilentlyContinue
+   }
+   if ($code -ne 0 -and $status -in @('valid','repaired')) {
+    # NSTool v1.9.2 can decode newer update NCAs where hactool v1.4
+    # fails. Extract only the "code"/ExeFS partition during discovery.
+    # The full RomFS will be handled with the REAL base NCA later.
+    if (Test-Path -LiteralPath $probe -PathType Container) {
+     Remove-Item -LiteralPath $probe -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $probe -Force | Out-Null
+    $nstoolProbeLog = Join-Path $work 'last-nstool-probe.log'
+    try {
+     Write-Host ("[native-update] Tentando ExeFS com NSTool: {0}" -f $nca.Name) -ForegroundColor Cyan
+     $nstoolCode = Run-Nstool -arguments @('-k',$keys,'--basenca',$baseNca,'--part0',$probe,$nca.FullName) -capturePath $nstoolProbeLog
+     if ($nstoolCode -eq 0 -and
+         (Test-Path -LiteralPath (Join-Path $probe 'main.npdm') -PathType Leaf) -and
+         (Test-Path -LiteralPath (Join-Path $probe 'main') -PathType Leaf)) {
+      $script:usedNstoolProbe = $true
+      $code = 0
+      $info = 'Content Type: Program'
+      Write-Host ("[native-update] NSTool extraiu ExeFS de: {0}" -f $nca.Name) -ForegroundColor Green
+     } else {
+      Write-Warning ("[native-update] NSTool nao extraiu ExeFS de {0} (exit={1}); log local: {2}" -f $nca.Name,$nstoolCode,$nstoolProbeLog)
+     }
+    } catch {
+     Write-Warning ("[native-update] NSTool nao disponivel para o probe: {0}" -f $_.Exception.Message)
+    }
    }
   }
   $kind = if ($info -match '(?m)^Content Type:\s+([a-zA-Z0-9]+)') { $Matches[1] } else { 'unknown' }
