@@ -412,7 +412,14 @@ static void mutex_release(uint64_t addr) {
 
 KThread *g_waitlist;
 
-static void waitlist_add(KThread *t) { t->wnext = g_waitlist; g_waitlist = t; }
+// FIFO within a priority: the wakers choose the first matching most urgent waiter.
+// Adapted from PokeZ-ARecomp (MIT; docs/SCARLET-POKEZA.md).
+static void waitlist_add(KThread *t) {
+    KThread **p = &g_waitlist;
+    while (*p) p = &(*p)->wnext;
+    t->wnext = NULL;
+    *p = t;
+}
 static void waitlist_remove(KThread *t) {
     for (KThread **p = &g_waitlist; *p; p = &(*p)->wnext)
         if (*p == t) { *p = t->wnext; return; }
@@ -554,6 +561,16 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     if (sync_prof)
         atomic_fetch_add_explicit(&g_sync_prof.cond_waits, 1, memory_order_relaxed);
     uint32_t r = block_current(timeout);
+    if (r == R_TIMEOUT && t->wait_addr == mutex) {
+        // Signal already moved us to the mutex queue. Finish ownership transfer
+        // instead of making the SDK enter its timeout/relock path after a signal.
+        r = R_OK;
+        if ((__atomic_load_n(u32p(mutex), __ATOMIC_SEQ_CST) & ~WAITERS_BIT) != tag &&
+            !mutex_acquire_or_mark(mutex, tag)) {
+            t->wait_kind = WAIT_MUTEX;
+            r = block_current(-1);
+        }
+    }
     if (sync_prof)
         atomic_fetch_add_explicit(&g_sync_prof.cond_wait_ns,
                                   plat_now_ns() - wait_start, memory_order_relaxed);
@@ -602,8 +619,10 @@ static uint32_t svc_wait_for_address(uint64_t addr, uint32_t type, int32_t value
     bool wait;
     if (type == ARB_WAIT_LESS) wait = cur < value;
     else if (type == ARB_DEC_WAIT_LESS) {
-        wait = cur < value;
-        if (wait) __atomic_store_n(u32p(addr), (uint32_t)(cur - 1), __ATOMIC_SEQ_CST);
+        // Guest atomics run outside g_klock; never overwrite their concurrent updates.
+        uint32_t v = (uint32_t)cur;
+        while ((wait = (int32_t)v < value) &&
+               !__atomic_compare_exchange_n(u32p(addr), &v, v - 1u, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {}
     } else if (type == ARB_WAIT_EQ) wait = cur == value;
     else { pthread_mutex_unlock(&g_klock); return R_INVALID_ENUM; }
     if (!wait) { pthread_mutex_unlock(&g_klock); return R_INVALID_STATE; }
@@ -622,38 +641,44 @@ static uint32_t svc_wait_for_address(uint64_t addr, uint32_t type, int32_t value
     return r;
 }
 
-static int arbiter_wake(uint64_t addr, int32_t count) {
+static int arbiter_wake(uint64_t addr, int32_t count) {  // (the most urgent waiters first, as Horizon)
     int woken = 0;
-    for (KThread *t = g_waitlist; t; t = t->wnext) {
-        if (count > 0 && woken >= count) break;
-        if (t->wait_kind == WAIT_ARBITER && t->wait_addr == addr) {
-            t->wait_kind = WAIT_NONE;
-            t->wait_result = R_OK;
-            wake(t);
-            woken++;
-        }
+    while (count <= 0 || woken < count) {
+        KThread *best = NULL;
+        for (KThread *t = g_waitlist; t; t = t->wnext)
+            if (t->wait_kind == WAIT_ARBITER && t->wait_addr == addr && (!best || t->prio < best->prio)) best = t;
+        if (!best) break;
+        best->wait_kind = WAIT_NONE;
+        best->wait_result = R_OK;
+        wake(best);
+        woken++;
     }
     return woken;
+}
+
+// The word at addr from `expected` to `desired` if it still holds `expected` (user space may change it any time).
+static bool arbiter_update(uint64_t addr, int32_t expected, uint32_t desired) {
+    uint32_t e = (uint32_t)expected;
+    return __atomic_compare_exchange_n(u32p(addr), &e, (uint32_t)desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
 
 static uint32_t svc_signal_to_address(uint64_t addr, uint32_t type, int32_t value, int32_t count) {
     pthread_mutex_lock(&g_klock);
     uint32_t r = R_OK;
-    int32_t cur = (int32_t)__atomic_load_n(u32p(addr), __ATOMIC_SEQ_CST);
     if (type == ARB_SIGNAL) {
         arbiter_wake(addr, count);
     } else if (type == ARB_SIGNAL_INC_EQ) {
-        if (cur != value) r = R_INVALID_STATE;
-        else { __atomic_store_n(u32p(addr), (uint32_t)(cur + 1), __ATOMIC_SEQ_CST); arbiter_wake(addr, count); }
+        if (!arbiter_update(addr, value, (uint32_t)value + 1u)) r = R_INVALID_STATE;
+        else arbiter_wake(addr, count);
     } else if (type == ARB_SIGNAL_MOD_EQ) {
         int waiting = 0;
         for (KThread *t = g_waitlist; t; t = t->wnext)
             if (t->wait_kind == WAIT_ARBITER && t->wait_addr == addr) waiting++;
-        int32_t nv;
-        if (count <= 0) nv = waiting > 0 ? value - 2 : value + 1;
-        else nv = waiting == 0 ? value + 1 : (waiting <= count ? value - 1 : value);
-        if (cur != value) r = R_INVALID_STATE;
-        else { __atomic_store_n(u32p(addr), (uint32_t)nv, __ATOMIC_SEQ_CST); arbiter_wake(addr, count); }
+        uint32_t nv;
+        if (count <= 0) nv = waiting > 0 ? (uint32_t)value - 2u : (uint32_t)value + 1u;
+        else nv = waiting == 0 ? (uint32_t)value + 1u : (waiting <= count ? (uint32_t)value - 1u : value);
+        if (!arbiter_update(addr, value, nv)) r = R_INVALID_STATE;
+        else arbiter_wake(addr, count);
     } else {
         r = R_INVALID_ENUM;
     }
