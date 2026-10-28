@@ -368,7 +368,7 @@ function Show-NativeWriteFailure([string]$hactoolOutput, [string]$targetDirector
  $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($targetDirectory))
  Write-Warning ("[native-update] hactool nao conseguiu gravar um arquivo do ExeFS em {0}. Possiveis causas: unidade cheia, cota de disco ou erro de E/S." -f $root)
  try {
-  $drive = New-Object System.IO.DriveInfo($root)
+  $drive = [IO.DriveInfo]::new($root)
   if ($drive.IsReady) {
    $freeGiB = [math]::Round($drive.AvailableFreeSpace / 1GB, 2)
    Write-Warning ("[native-update] Espaco livre em {0}: {1} GiB." -f $root,$freeGiB)
