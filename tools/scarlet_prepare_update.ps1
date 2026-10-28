@@ -57,7 +57,8 @@ function Find-Hactool([string]$requested) {
   (Join-Path $repo 'tools\hactool.exe'),
   (Join-Path $repo 'tools\hactool\hactool.exe'),
   (Join-Path $repo 'build\tools\hactool.exe'),
-  (Join-Path $repo 'build\tools\hactool\hactool.exe'))
+  (Join-Path $repo 'build\tools\hactool\hactool.exe'),
+  'D:\ScarletNativeCache\tools\hactool\hactool.exe')
  foreach ($p in $paths) {
   if ($p -and (Test-Path -LiteralPath $p -PathType Leaf)) { return (Resolve-Path -LiteralPath $p).Path }
  }
@@ -85,7 +86,9 @@ function Find-Hactool([string]$requested) {
  if ($env:OS -ne 'Windows_NT') {
   throw 'hactool.exe nao encontrado. Informe -HactoolPath com uma versao que suporte --basenca.'
  }
- $dir = Join-Path $repo 'build\tools\hactool'
+ # The checkout may live on the full C: drive. Download into D: cache,
+ # never create build/tools/hactool in the source worktree.
+ $dir = 'D:\ScarletNativeCache\tools\hactool'
  $toolExe = Join-Path $dir 'hactool.exe'
  $zip = Join-Path $dir 'hactool-1.4.0-win.zip'
  $unpacked = Join-Path $dir '_download_extract'
