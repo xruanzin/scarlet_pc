@@ -14,6 +14,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repo = Split-Path $PSScriptRoot -Parent
 . (Join-Path $PSScriptRoot 'scarlet_native_titlekeys.ps1')
+. (Join-Path $PSScriptRoot 'scarlet_nsp_cache.ps1')
 $titleId = [UInt64]0x0100A3D008C5C000
 $expectedMain = '421c5411b487eb4d'
 
@@ -365,6 +366,17 @@ if ($updateFiles.Count -eq 0) {
 }
 if ($updateFiles.Count -eq 0) { throw "Update sem NCAs apos extracao: $update. Confira o pacote. Log: $log" }
 Write-Host ("[native-update] Encontrados: {0} NCA(s) base; {1} NCA(s) update." -f $baseFiles.Count,$updateFiles.Count) -ForegroundColor DarkGray
+
+# A previous extraction on a full C: drive can leave correctly named but
+# truncated NCA files. Compare cached sizes to the original NSP PFS0 index
+# before hactool reads any of them. Recover only damaged entries into D:.
+# A complete file with a wrong size is replaced only after a full staged copy.
+if ([IO.Path]::GetExtension($base).ToLowerInvariant() -eq '.nsp') {
+ Repair-ScarletNspNcaCache -PackagePath $base -CacheDirectory $baseDir -Label 'base'
+}
+Repair-ScarletNspNcaCache -PackagePath $update -CacheDirectory $updateDir -Label 'update'
+$baseFiles = @(Get-ChildItem -LiteralPath $baseDir -Recurse -File -Filter '*.nca')
+$updateFiles = @(Get-ChildItem -LiteralPath $updateDir -Recurse -File -Filter '*.nca')
 
 # NSP tickets contain encrypted titlekeys, not plaintext/decrypted keys.
 # Hactool 1.4.0 automatically loads HOME/.switch/title.keys; supply both the
