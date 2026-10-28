@@ -188,11 +188,11 @@ function Run-Hactool([string[]]$arguments, [bool]$allowFailure=$false) {
 
 Write-Host '[native-update] Extraindo NCAs para cache temporario (primeiro boot)...' -ForegroundColor Cyan
 if ([IO.Path]::GetExtension($base).ToLowerInvariant() -eq '.xci') {
- $null = Run-Hactool @('-k',$keys,'--suppresskeys','-t','xci',"--securedir=$baseDir",$base)
+ $null = Run-Hactool -arguments @('-k',$keys,'--suppresskeys','-t','xci',"--securedir=$baseDir",$base)
 } else {
- $null = Run-Hactool @('-k',$keys,'--suppresskeys','-t','pfs0',"--outdir=$baseDir",$base)
+ $null = Run-Hactool -arguments @('-k',$keys,'--suppresskeys','-t','pfs0',"--outdir=$baseDir",$base)
 }
-$null = Run-Hactool @('-k',$keys,'--suppresskeys','-t','pfs0',"--outdir=$updateDir",$update)
+$null = Run-Hactool -arguments @('-k',$keys,'--suppresskeys','-t','pfs0',"--outdir=$updateDir",$update)
 
 function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
  $ncas = @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.nca' | Sort-Object Length -Descending)
@@ -220,7 +220,7 @@ Write-Host '[native-update] Aplicando patch BKTR com --basenca...' -ForegroundCo
 $exeFs = Join-Path $assembled 'exefs'
 $romfs = Join-Path $assembled 'romfs.bin'
 New-Item -ItemType Directory -Force -Path $exeFs | Out-Null
-$null = Run-Hactool @('-k',$keys,'--suppresskeys','-t','nca','--xcontenttype=program',
+$null = Run-Hactool -arguments @('-k',$keys,'--suppresskeys','-t','nca','--xcontenttype=program',
  "--basenca=$baseNca","--exefsdir=$exeFs","--romfs=$romfs",$patchNca)
 if (-not (Test-ExeFs $exeFs)) {
  $found = Get-BuildId (Join-Path $exeFs 'main')
