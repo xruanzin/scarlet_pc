@@ -217,10 +217,10 @@ function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
  foreach ($nca in $ncas) {
   if (Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe -Recurse -Force }
   New-Item -ItemType Directory -Force -Path $probe | Out-Null
-  $args = @('-k',$keys,'--suppresskeys','-t','nca','--xcontenttype=program')
-  if ($baseNca) { $args += "--basenca=$baseNca" }
-  $args += @("--exefsdir=$probe",$nca.FullName)
-  $code = Run-Hactool $args $true
+  $hactoolArgs = @('-k',$keys,'--suppresskeys','-t','nca','--xcontenttype=program')
+  if ($baseNca) { $hactoolArgs += "--basenca=$baseNca" }
+  $hactoolArgs += @("--exefsdir=$probe",$nca.FullName)
+  $code = Run-Hactool -arguments $hactoolArgs -allowFailure $true
   if ($code -ne 0 -or (Get-ProgramId $probe) -ne $titleId) { continue }
   $got = Get-BuildId (Join-Path $probe 'main')
   if (-not $got -or ($mainId -and -not $got.StartsWith($mainId))) { continue }
