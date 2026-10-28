@@ -30,6 +30,22 @@ try {
  Assert-TitleKeys ($result.Keys.Count -eq 1) 'Common titlekey was not parsed.'
  Assert-TitleKeys ($result.Keys[$rights] -eq $encrypted) 'Titlekey or Rights ID offset is wrong.'
 
+ # The real NSP previously contained a ticket signature not recognized by the
+ # parser. With StrictMode enabled, an unknown type must be safely skipped,
+ # never fall through and read the uninitialized $start offset.
+ $badTicket = New-Object byte[] 0x400
+ [IO.File]::WriteAllBytes((Join-Path $testRoot 'unknown.tik'),$badTicket)
+ $mixed = Get-ScarletTicketTitleKeys -Directories @($testRoot)
+ Assert-TitleKeys ($mixed.TicketCount -eq 2) 'Unknown ticket not counted.'
+ Assert-TitleKeys ($mixed.UnsupportedCount -eq 1) 'Unknown ticket not classified.'
+ Assert-TitleKeys ($mixed.Keys.Count -eq 1 -and $mixed.Keys[$rights] -eq $encrypted) 'Unknown ticket should not invalidate valid common ticket.'
+ # An NSP with only unknown signatures should return zero keys, not crash.
+ Remove-Item -LiteralPath $tikPath -Force
+ $unknownOnly = Get-ScarletTicketTitleKeys -Directories @($testRoot)
+ Assert-TitleKeys ($unknownOnly.UnsupportedCount -eq 1 -and $unknownOnly.Keys.Count -eq 0) 'Unknown-only ticket set caused an error.'
+ [IO.File]::WriteAllBytes($tikPath,$ticket)
+ Remove-Item -LiteralPath (Join-Path $testRoot 'unknown.tik') -Force
+
  $titlekeys = Join-Path $testRoot 'title.keys'
  [IO.File]::WriteAllText($titlekeys, "$rights = $encrypted")
  $local = Get-ScarletExistingTitleKeys -Path $titlekeys
