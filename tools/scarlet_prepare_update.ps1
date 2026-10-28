@@ -269,10 +269,12 @@ function Test-RomfsDir([string]$p) {
 function Emit-Result([string]$root, [bool]$cached) {
  $image = Join-Path $root 'romfs.bin'
  $directory = Join-Path $root 'romfs'
+ $imageValue = if (Test-Romfs $image) { $image } else { '' }
+ $dirValue = if (Test-RomfsDir $directory) { $directory } else { '' }
  [PSCustomObject]@{
   ExeFs = (Join-Path $root 'exefs')
-  RomFsImage = if (Test-Romfs $image) { $image } else { '' }
-  RomFsDir = if (Test-RomfsDir $directory) { $directory } else { '' }
+  RomFsImage = $imageValue
+  RomFsDir = $dirValue
   PackagePath = $base
   UpdatePath = $update
   CacheRoot = $root
