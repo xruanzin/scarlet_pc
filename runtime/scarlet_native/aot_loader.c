@@ -118,20 +118,8 @@ static bool load_one(ScarletAotModule *m, const char *game_root, char *why, size
         return false;
     }
 
-    if (m->features & SCARLET_AOT_FEATURE_FASTMEM_PT1) {
-        LOAD_REQUIRED(m, fastmem_v1, ScarletAotFastmemV1Fn, "recomp_image_fastmem_v1");
-        // The current native address space is identity-mapped. We deliberately
-        // leave GuestContext.fm_limit=0 instead of fabricating suyu's page-entry
-        // array, so the image takes its ABI5-compatible direct flat-memory path.
-        // The handshake still proves that the shared context layout matches.
-        if (!m->fastmem_v1(12, 5, ~(uint64_t)3,
-                           (uint32_t)offsetof(ScarletAotGuestContext, fm_table),
-                           (uint32_t)offsetof(ScarletAotGuestContext, fm_limit))) {
-            snprintf(why, why_size, "%s: FM1 layout handshake failed", m->filename);
-            return false;
-        }
-    }
-
+    // Preserved ABI-6 DLLs enable FM1 negotiation in guard_gen_v1.
+    // Negotiate GG1 first; matching offsets alone do not enable FM1.
     if (m->features & SCARLET_AOT_FEATURE_GUARD_GEN1) {
         LOAD_REQUIRED(m, guard_gen_v1, ScarletAotGuardGenV1Fn, "recomp_image_guard_gen_v1");
         uint64_t lo = 0, hi = 0;
@@ -144,6 +132,20 @@ static bool load_one(ScarletAotModule *m, const char *game_root, char *why, size
         // Keep VERIFY_ALWAYS until the native loader has its own code-page
         // generation tracking. This preserves correctness without importing
         // suyu's page table or invalidation machinery.
+    }
+
+    if (m->features & SCARLET_AOT_FEATURE_FASTMEM_PT1) {
+        LOAD_REQUIRED(m, fastmem_v1, ScarletAotFastmemV1Fn, "recomp_image_fastmem_v1");
+        // The current native address space is identity-mapped. We deliberately
+        // leave GuestContext.fm_limit=0 instead of fabricating suyu's page-entry
+        // array, so the image takes its ABI5-compatible direct flat-memory path.
+        // The handshake still proves that the shared context layout matches.
+        if (!m->fastmem_v1(12, 5, ~(uint64_t)3,
+                           (uint32_t)offsetof(ScarletAotGuestContext, fm_table),
+                           (uint32_t)offsetof(ScarletAotGuestContext, fm_limit))) {
+            snprintf(why, why_size, "%s: FM1 layout handshake failed", m->filename);
+            return false;
+        }
     }
 
     if (m->features & SCARLET_AOT_FEATURE_FPX1) {
