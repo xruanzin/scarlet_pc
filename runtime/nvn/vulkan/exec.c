@@ -4954,13 +4954,26 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
 
 // The view the present samples: the game image, or its anti-aliased / upscaled version. ow x oh: the whole image's
 // size in the window (its crop is drawn into the viewport).
-static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, double oh_d) {
+static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, double oh_d, bool temporal_output) {
     VkImageView v = raw_view(b);
-    bool smaa = g_settings.antialias == AA_SMAA && getenv("LARECOMP_NO_SMAA") == NULL;
+    // FSR3/FSR4/DLSS already reconstructed and anti-aliased the guest image.
+    // Applying our post-SMAA or spatial FSR1 again destroys temporal detail,
+    // sharpness and can alter material colours. Only skip them when the
+    // native temporal path returned a real output surface; on failure the
+    // old SMAA/FSR1 fallback remains available unchanged.
+    bool smaa = !temporal_output && g_settings.antialias == AA_SMAA && getenv("LARECOMP_NO_SMAA") == NULL;
     uint32_t ow = (uint32_t)lround(ow_d), oh = (uint32_t)lround(oh_d);
     if (ow > 16384) ow = 16384;
     if (oh > 16384) oh = 16384;
-    bool fsr = g_settings.upscaler == UPSCALE_FSR1 && (ow > b->width + 1 || oh > b->height + 1);  // (an upscale only)
+    bool fsr = !temporal_output && g_settings.upscaler == UPSCALE_FSR1 &&
+               (ow > b->width + 1 || oh > b->height + 1); // upscale only
+    if (temporal_output) {
+        static bool logged;
+        if (!logged) {
+            logged = true;
+            LOG("[post] native temporal output: bypass duplicate SMAA/FSR1 (quality preservation)\n");
+        }
+    }
     if (!smaa && !fsr) return v;
     extern void vk_frame_suspend(void);
     extern void vk_frame_resume(void);
@@ -5002,9 +5015,10 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
 }
 
 // Inside the window image's rendering (device.c vk_frame_begin): the game image into (vx, vy, vw, vh).
-void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]) {
+void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8], bool temporal_output) {
     if (!b || !b->image || (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return;
-    VkImageView src = post_process(cb, b, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh);
+    VkImageView src = post_process(cb, b, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh,
+                                   temporal_output);
     VkPipeline p = present_pipeline(g_vk.sc_format);
     VkDescriptorSet ds = vk_alloc_set(present_set_layout);
     VkDescriptorImageInfo ii = {vk_default_sampler(true), src, VK_IMAGE_LAYOUT_GENERAL};
