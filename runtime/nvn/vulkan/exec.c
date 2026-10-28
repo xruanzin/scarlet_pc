@@ -3679,6 +3679,19 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
 // ================================================================== draws
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed);
 
+// Bind contiguous streams together; unused holes remain untouched. This cuts
+// driver entry points without expanding copies or changing UMA memory policy.
+static void bind_vertex_streams(VkCommandBuffer cb, uint32_t mask,
+                                const VkBuffer buffers[17], const VkDeviceSize offsets[17]) {
+    for (uint32_t first = 0; first < 17;) {
+        if (!(mask & (1u << first))) { ++first; continue; }
+        uint32_t end = first + 1;
+        while (end < 17 && (mask & (1u << end))) ++end;
+        vkCmdBindVertexBuffers(cb, first, end - first, buffers + first, offsets + first);
+        first = end;
+    }
+}
+
 // Quads / fans / polygons as a 32-bit triangle index list.
 // Write directly into the mapped transient ring: the old path malloc'ed a CPU
 // array, filled it, copied it into Vulkan staging, then freed it for every such
@@ -4310,18 +4323,21 @@ static void draw_(CmdRec *r, bool indexed) {
     if (use_index) vkCmdBindIndexBuffer(cb, ib.buf, ib.off, itype_vk);
 
     // ---- vertex streams: the range this draw can read, copied once per submission
+    VkBuffer vertex_buffers[17];
+    VkDeviceSize vertex_offsets[17];
     for (int s = 0; s < 17; s++) {
         if (!(k.used_streams & (1u << s))) continue;
         VkSpan sp;
         if (s == ZERO_BINDING) {
             static const float zero[4] = {0, 0, 0, 1};
-            sp = vk_transient_copy(zero, 16, 16);
+            sp = guest_copy((uint64_t)(uintptr_t)zero, sizeof zero);
         } else {
             Range v = st.vbuf[s];
             VkBuffer dbuf;
             VkDeviceSize doff;
             if (v.addr && v.size && guest_direct(v.addr, v.size, &dbuf, &doff)) {
-                vkCmdBindVertexBuffers(cb, (uint32_t)s, 1, &dbuf, &doff);
+                vertex_buffers[s] = dbuf;
+                vertex_offsets[s] = doff;
                 continue;
             }
             if (scan_src) {  // copying after all: the index scan bounds the copy
@@ -4337,12 +4353,13 @@ static void draw_(CmdRec *r, bool indexed) {
             else if (k.divisor[s]) need = ((uint64_t)base_inst + inst + k.divisor[s] - 1) / k.divisor[s] * stride + 256;
             else need = (uint64_t)max_index * stride + 256;
             if (v.size && need > v.size) need = v.size;
-            if (!v.addr) { static const uint8_t zero[256]; sp = vk_transient_copy(zero, 256, 16); }
+            if (!v.addr) { static const uint8_t zero[256]; sp = guest_copy((uint64_t)(uintptr_t)zero, sizeof zero); }
             else sp = guest_copy(v.addr, need ? need : 16);
         }
-        VkDeviceSize off = sp.off;
-        vkCmdBindVertexBuffers(cb, (uint32_t)s, 1, &sp.buf, &off);
+        vertex_buffers[s] = sp.buf;
+        vertex_offsets[s] = sp.off;
     }
+    bind_vertex_streams(cb, k.used_streams, vertex_buffers, vertex_offsets);
 
     if (prof) prof_vtx += SDL_GetTicksNS() - prof_t2_;
     // ---- draw
