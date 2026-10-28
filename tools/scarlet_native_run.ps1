@@ -18,7 +18,7 @@ param(
     [int]$Jobs = 4,
 
     [switch]$Build,
-    [ValidateSet('current','fsr31','fsr4','dlss','off')]
+    [ValidateSet('current','fsr31','fsr4','dlss','spatial')]
     [string]$Upscaler = 'current',
     [switch]$Profile,
     [switch]$NoLauncher
@@ -136,6 +136,8 @@ $oldFrameCsv = $env:LARECOMP_FRAME_CSV
 try {
     $env:SCARLET_RUNTIME = $Runtime
     if ($Upscaler -ne 'current') {
+        # 'spatial' selects the existing native SMAA/FSR1 presentation path;
+        # this is a temporal selector, not a forced no-scaling switch.
         $env:SCARLET_UPSCALER = $Upscaler
         Write-Host ("[graphics] Native temporal upscaler selection: {0}" -f $Upscaler) -ForegroundColor Cyan
     }
