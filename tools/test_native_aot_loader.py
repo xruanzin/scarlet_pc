@@ -46,6 +46,7 @@ static unsigned abi = 6, features;
 static const char *missing;
 static uint64_t base;
 static uint32_t generation;
+static int gg_ready;
 static void block(ScarletAotGuestContext *c) { c->pc = 0; }
 static ScarletAotBlockFn slots[4] = {block, NULL, block, NULL};
 static ScarletAotBlockFn lookup(uint64_t pc) { return pc == base + 8 ? block : NULL; }
@@ -80,11 +81,11 @@ static int index_export(uint64_t *lo, uint64_t *hi, ScarletAotBlockFn **out) {
     *lo = base; *hi = base + (invalid_index ? 0x10000 : 16); *out = slots; return 1;
 }
 static uint32_t *gg(unsigned v, uint64_t *lo, uint64_t *hi, const uint64_t **ptr) {
-    (void)v; *lo = 0; *hi = 16; *ptr = &base; return &generation;
+    assert(v == 2); gg_ready = 1; *lo = 0; *hi = 16; *ptr = &base; return &generation;
 }
 static unsigned fm(uint32_t p, uint32_t s, uint64_t mask, uint32_t table, uint32_t limit) {
     assert(p == 12 && s == 5 && mask == ~(uint64_t)3);
-    assert(table == 872 && limit == 880); return 1;
+    assert(table == 872 && limit == 880); return gg_ready;
 }
 static unsigned fpx(uint32_t fpcr, uint32_t fpsr, uint64_t inhibit) {
     assert(fpcr == 848 && fpsr == 856 && inhibit == SCARLET_AOT_FPX_INHIBIT); return 1;
@@ -93,7 +94,7 @@ bool rt_resource(const char *rel, const char *fallback, char *out, size_t n) {
     (void)fallback; snprintf(out, n, "%s", rel); return true;
 }
 HMODULE LoadLibraryA(const char *path) {
-    (void)path; current = opens++; return current == fail_at ? NULL : (void *)(uintptr_t)(current + 1);
+    (void)path; gg_ready = 0; current = opens++; return current == fail_at ? NULL : (void *)(uintptr_t)(current + 1);
 }
 int FreeLibrary(HMODULE h) { assert(h); ++closes; return 1; }
 unsigned long GetLastError(void) { return 126; }
