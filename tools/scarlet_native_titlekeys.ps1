@@ -22,14 +22,19 @@ function Get-ScarletTicketTitleKeys {
     # 'continue' inside a PowerShell switch does not skip the enclosing
     # foreach. Explicitly validate the signature before using the offset.
     $start = -1
+    # Ticket SignatureType is a little-endian uint32 in actual NSP .tik
+    # files (see nut/Fs/Ticket.py -> readInt32). The previous parser accepted
+    # only the reversed byte order and silently ignored every real ticket.
+    # Accept the documented little-endian representation and the older
+    # big-endian test fixtures for backward compatibility.
     switch ($signature) {
-     '00010000' { $start = 0x240 } # RSA-4096 / SHA-1
-     '00010003' { $start = 0x240 } # RSA-4096 / SHA-256
-     '00010001' { $start = 0x140 } # RSA-2048 / SHA-1
-     '00010004' { $start = 0x140 } # RSA-2048 / SHA-256
-     '00010002' { $start = 0x80 }  # ECDSA / SHA-1
-     '00010005' { $start = 0x80 }  # ECDSA / SHA-256
-     '00010006' { $start = 0x40 }  # HMAC-SHA1
+     { $_ -in @('00000100','00010000') } { $start = 0x240; break } # 0x010000 RSA-4096/SHA-1
+     { $_ -in @('03000100','00010003') } { $start = 0x240; break } # 0x010003 RSA-4096/SHA-256
+     { $_ -in @('01000100','00010001') } { $start = 0x140; break } # 0x010001 RSA-2048/SHA-1
+     { $_ -in @('04000100','00010004') } { $start = 0x140; break } # 0x010004 RSA-2048/SHA-256
+     { $_ -in @('02000100','00010002') } { $start = 0x80; break }  # 0x010002 ECDSA/SHA-1
+     { $_ -in @('05000100','00010005') } { $start = 0x80; break }  # 0x010005 ECDSA/SHA-256
+     { $_ -in @('06000100','00010006') } { $start = 0x40; break }  # 0x010006 HMAC/SHA-1
     }
     if ($start -lt 0) {
      $unsupported++
