@@ -262,11 +262,17 @@ function Test-Romfs([string]$p) {
   [BitConverter]::ToUInt64($header,0) -eq [UInt64]0x50
  } finally { $s.Dispose() }
 }
+function Test-RomfsDir([string]$p) {
+ if (-not (Test-Path -LiteralPath $p -PathType Container)) { return $false }
+ return $null -ne (Get-ChildItem -LiteralPath $p -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
 function Emit-Result([string]$root, [bool]$cached) {
+ $image = Join-Path $root 'romfs.bin'
+ $directory = Join-Path $root 'romfs'
  [PSCustomObject]@{
   ExeFs = (Join-Path $root 'exefs')
-  RomFsImage = (Join-Path $root 'romfs.bin')
-  RomFsDir = ''
+  RomFsImage = if (Test-Romfs $image) { $image } else { '' }
+  RomFsDir = if (Test-RomfsDir $directory) { $directory } else { '' }
   PackagePath = $base
   UpdatePath = $update
   CacheRoot = $root
@@ -279,7 +285,8 @@ if (-not $Force -and (Test-Path -LiteralPath $metaPath -PathType Leaf)) {
  $meta = Get-Content -LiteralPath $metaPath -Raw | ConvertFrom-Json
  if ($meta.source_identity -eq $identity -and
   (Test-ExeFs (Join-Path $OutputRoot 'exefs')) -and
-  (Test-Romfs (Join-Path $OutputRoot 'romfs.bin'))) {
+  ((Test-Romfs (Join-Path $OutputRoot 'romfs.bin')) -or
+   (Test-RomfsDir (Join-Path $OutputRoot 'romfs')))) {
   Write-Host '[native-update] Cache validado. Reusando.' -ForegroundColor Green
   Emit-Result $OutputRoot $true
   exit 0
@@ -688,17 +695,38 @@ Write-Host '[native-update] Identificando update ExeFS sem --basenca; BKTR sera 
 $patchNca = Find-ProgramNca $updateDir $baseNca $expectedMain
 if (-not $patchNca) { throw "Update 4.0.0 (main $expectedMain) nao identificado sem --basenca. Consulte diagnosticos dos NCAs da atualizacao; cache .work preservado. Log: $log" }
 
-Write-Host '[native-update] Aplicando patch BKTR com --basenca...' -ForegroundColor Cyan
+Write-Host '[native-update] Aplicando patch BKTR da atualizacao 4.0.0...' -ForegroundColor Cyan
 $exeFs = Join-Path $assembled 'exefs'
 $romfs = Join-Path $assembled 'romfs.bin'
+$romfsDir = Join-Path $assembled 'romfs'
 New-Item -ItemType Directory -Force -Path $exeFs | Out-Null
-$null = Run-Hactool -arguments @('-k',$keys,'--disablekeywarns','--suppresskeys','-t','nca','--xcontenttype=program',
- "--basenca=$baseNca","--exefsdir=$exeFs","--romfs=$romfs",$patchNca)
-if (-not (Test-ExeFs $exeFs)) {
- $found = Get-BuildId (Join-Path $exeFs 'main')
- throw "ExeFS nao corresponde ao AOT 4.0.0 (main=$found). Log: $log"
+$assembledBy = ''
+if (-not $script:usedNstoolProbe) {
+ try {
+  $null = Run-Hactool -arguments @('-k',$keys,'--disablekeywarns','--suppresskeys','-t','nca','--xcontenttype=program',
+   "--basenca=$baseNca","--exefsdir=$exeFs","--romfs=$romfs",$patchNca)
+  if ((Test-ExeFs $exeFs) -and (Test-Romfs $romfs)) { $assembledBy = 'hactool' }
+ } catch {
+  Write-Warning '[native-update] Reconstrucao completa via hactool falhou; tentando NSTool.'
+ }
 }
-if (-not (Test-Romfs $romfs)) { throw "RomFS atualizado invalido; BKTR nao aplicado. Log: $log" }
+if (-not $assembledBy) {
+ Write-Host '[native-update] Reconstruindo ExeFS e RomFS por NSTool + base NCA real...' -ForegroundColor Cyan
+ if (Test-Path -LiteralPath $exeFs) { Remove-Item -LiteralPath $exeFs -Recurse -Force }
+ New-Item -ItemType Directory -Force -Path $exeFs,$romfsDir | Out-Null
+ $nstoolLog = Join-Path $work 'last-nstool-assembly.log'
+ $nstoolResult = Run-Nstool -arguments @('-k',$keys,'--basenca',$baseNca,'--part0',$exeFs,'--part1',$romfsDir,$patchNca) -capturePath $nstoolLog
+ if ($nstoolResult -ne 0) { throw "NSTool nao concluiu BKTR (exit $nstoolResult); confira log local: $nstoolLog" }
+ if (-not (Test-ExeFs $exeFs)) {
+  $found = Get-BuildId (Join-Path $exeFs 'main')
+  throw "ExeFS da atualizacao nao confere com AOT 4.0.0 (main=$found), mesmo com NSTool."
+ }
+ if (-not (Test-RomfsDir $romfsDir)) {
+  throw "NSTool nao extraiu RomFS atualizado. Confira log: $nstoolLog"
+ }
+ $assembledBy = 'NSTool'
+}
+Write-Host ("[native-update] ExeFS e RomFS preparados via {0}; Build ID 4.0.0 confirmado." -f $assembledBy) -ForegroundColor Green
 [ordered]@{
  source_identity=$identity
  base_path=$base
