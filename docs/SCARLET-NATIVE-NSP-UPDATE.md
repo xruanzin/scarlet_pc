@@ -47,9 +47,15 @@ logs may still contain key values. Tests in tools/test_native_titlekeys.ps1
 use only synthetic fixtures, not Nintendo keys or game assets.
 
 The first run can use significant disk space and time: it extracts two sets
-of NCAs and writes an updated RomFS image. Subsequent runs reuse a validated
-cache under build/native-update-cache. This is not yet zero-extraction BKTR
-mounting.
+of NCAs and writes an updated RomFS image. **On Windows with a D: drive,
+the default cache is now D:\ScarletNativeCache\scarlet-<identity-tag>.**
+On machines without D:, the cache stays under build/native-update-cache.
+Existing incomplete .work caches on C: are copied safely to D: (the original
+is kept until the user chooses to delete it) to avoid repeating extraction.
+D: must have enough space for the cache plus 8 GiB of working headroom.
+-UpdateCacheRoot explicitly overrides the default, and no automatic
+migration occurs for explicit override paths. This is not yet zero-extraction
+BKTR mounting.
 
 ## hactool "Failed to write file!" (Windows)
 
@@ -64,9 +70,10 @@ Get-PSDrive -PSProvider FileSystem |
 
 The new preparer prints available space automatically when this specific
 error occurs. It also reports the last file hactool tried to write. If C:
-is short on free space but D: has ample space, preserve the already-extracted
-NCA cache by moving the existing .work directory to a new output root. For
-the test run captured in the project discussion:
+is short on free space but D: has ample space, the default runner now copies
+the already-extracted NCA cache to D: automatically. Normally no manual move
+is necessary. To choose a specific alternate output root, preserve the source
+cache and supply -UpdateCacheRoot explicitly. For the previous manual approach:
 
 ~~~powershell
 $old = "C:\Users\ruana\Downloads\scarlet_pc-update-test\build\native-update-cache\scarlet-8df208305cfada13"
