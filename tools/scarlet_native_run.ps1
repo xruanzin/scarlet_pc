@@ -152,6 +152,19 @@ try {
     }
     if ($Profile) {
         $profileDir = Join-Path $repoRoot 'build\native\profile'
+        # When the system volume is full, keep frame/profiler output beside
+        # the prepared update rather than failing to write on C:.
+        if ($packageMount -and
+            $packageMount.PSObject.Properties.Name -contains 'CacheRoot' -and
+            $packageMount.CacheRoot) {
+            $cacheDrive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot([string]$packageMount.CacheRoot))
+            $systemDrive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($repoRoot))
+            if ($cacheDrive.IsReady -and $systemDrive.IsReady -and
+                $systemDrive.AvailableFreeSpace -lt 512MB) {
+                $profileDir = Join-Path (Split-Path ([string]$packageMount.CacheRoot) -Parent) 'profile'
+                Write-Warning ("[profile] Unidade do projeto sem espaco; gravando perfis em {0}" -f $profileDir)
+            }
+        }
         New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
         $env:SCARLET_NATIVE_PROFILE = '1'
         $env:LARECOMP_HLE_PROF = '1'
