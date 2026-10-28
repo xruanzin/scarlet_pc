@@ -2305,6 +2305,7 @@ typedef struct {
 typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; } Pipe;  // state: 0 building, 1 ready, 2 failed
 #define PIPE_TAB 8192
 static struct { uint64_t key; Pipe *pipe; } pipe_tab[PIPE_TAB];
+static Pipe *last_draw_pipeline;
 
 // SSBU-Recomp's production renderer uses a persistent pipeline history so
 // expensive variants can be built before their next first-use draw. Scarlet's
@@ -2468,6 +2469,22 @@ static uint64_t hash_words(uint64_t h, const void *p, size_t n) {
     for (; n >= 8; n -= 8, b += 8) { uint64_t w; memcpy(&w, b, 8); h = (h ^ w) * 0x9E3779B97F4A7C15ull; h ^= h >> 29; }
     for (; n; n--, b++) { h = (h ^ *b) * 0x100000001B3ull; }
     return h ^ (h >> 32);
+}
+
+static Pipe *lookup_draw_pipeline(const PipeKey *key, uint64_t *hash, uint32_t *slot) {
+    // Consecutive meshes commonly use the same baked state. An exact key
+    // comparison avoids rehashing all attributes/strides/blend state each draw.
+    if (last_draw_pipeline && !memcmp(&last_draw_pipeline->k, key, sizeof *key)) {
+        *hash = last_draw_pipeline->hash;
+        *slot = UINT32_MAX; // unused on a hit; no new table entry is needed
+        return last_draw_pipeline;
+    }
+    *hash = hash_words(UINT64_C(0xcbf29ce484222325), key, sizeof *key);
+    if (!*hash) *hash = 1;
+    *slot = (uint32_t)(*hash ^ (*hash >> 29)) & (PIPE_TAB - 1);
+    while (pipe_tab[*slot].key && pipe_tab[*slot].key != *hash)
+        *slot = (*slot + 1) & (PIPE_TAB - 1);
+    return pipe_tab[*slot].pipe;
 }
 
 static uint64_t hmix(uint64_t h, const void *p, size_t n) {
@@ -3178,6 +3195,8 @@ void vk_exec_reset(void) {
     vk_pipe_history_save();
     memset(prog_tab, 0, sizeof prog_tab);
     memset(pipe_tab, 0, sizeof pipe_tab);
+    last_draw_pipeline = NULL;
+    scarlet_draw_state_invalidate(&draw_state_cache);
     surface_cache_reset();
     g_cs_n = 0;
     gcopy_gen++;
@@ -4116,11 +4135,9 @@ static void draw_(CmdRec *r, bool indexed) {
     k.a2c = st.ms[0xC] != 0 && pass_samples > 1;
     k.topo_class = cls;
     k.poly_fill = st.poly[2] != 1;
-    uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
-    if (!ph) ph = 1;
-    uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
-    while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph) pslot = (pslot + 1) & (PIPE_TAB - 1);
-    Pipe *pp = pipe_tab[pslot].pipe;
+    uint64_t ph;
+    uint32_t pslot;
+    Pipe *pp = lookup_draw_pipeline(&k, &ph, &pslot);
     if (!pp) {
         pp = calloc(1, sizeof *pp);
         pp->k = k;
@@ -4130,6 +4147,7 @@ static void draw_(CmdRec *r, bool indexed) {
         pipe_history_note(&k);
         run_job(build_pipeline, pp); // required by this draw: always FIFO-first
     }
+    last_draw_pipeline = pp;
     pipe_history_prewarm(pr, ph);
     wait_built(&pp->state, "pipeline", pr->code[0], pr->code[1]);
     if (atomic_load(&pp->state) != 1) { SKIP(5 + (atomic_load(&pp->state) > 1)); return; }
