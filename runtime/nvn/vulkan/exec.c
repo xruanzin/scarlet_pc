@@ -437,6 +437,16 @@ void vk_gpuprof_report(void) {
 // The command buffers stay distinct and are appended in exact guest order:
 // upload0, main0, upload1, main1, ...
 static bool qbatch_finish_current(bool force_main) {
+    // A flush/list boundary may arrive without any newly recorded commands.
+    // Do not acquire the next ring slot just to discover this: sub() waits for
+    // its old GPU submission and resets descriptor pools. An empty boundary
+    // must submit the existing batch without that unrelated host-side wait.
+    Sub *current = &subs[cur_sub];
+    if (!force_main && !in_pass &&
+        (current->seq != submit_seq + 1 ||
+         (!current->main_begun && !current->upload_begun)))
+        return false;
+
     // Reserve for the worst-case upload/main pair before writing either entry.
     if (qbatch_ncb > QBATCH_MAX_CBS - 2)
         FATAL("vk: queue batch capacity exhausted before list finalization\n");
@@ -470,6 +480,10 @@ static bool qbatch_finish_current(bool force_main) {
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->main};
     }
 
+    // Ended buffers belong to qbatch_cbs, not to the current recording state.
+    // Keep seq/ts intact: GPU completion and query reuse are still handled by
+    // sub() before this slot is recorded into again.
+    s->main_begun = s->upload_begun = false;
     qbatch_lists++;
     stat_logical_submits++;
     cur_sub = (cur_sub + 1) % SUBS;
