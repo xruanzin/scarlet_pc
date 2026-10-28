@@ -34,6 +34,14 @@ function Find-Keys([string]$requested) {
   $paths += (Join-Path $env:APPDATA 'yuzu\keys\prod.keys')
  }
  $paths += (Join-Path $repo 'dist\ScarletPC-Independent\user\keys\prod.keys')
+ # The user's original checkout and the isolated native worktree may differ.
+ # Reuse only locally available key files; never download, log or copy keys.
+ $parent = Split-Path $repo -Parent
+ foreach ($sibling in @('scarlet_pc', 'scarlet_pc-native-test')) {
+  $other = Join-Path $parent $sibling
+  $paths += (Join-Path $other 'dist\ScarletPC-Independent\user\keys\prod.keys')
+  $paths += (Join-Path $other 'build\native\user\keys\prod.keys')
+ }
  foreach ($p in $paths) {
   if ($p -and (Test-Path -LiteralPath $p -PathType Leaf)) { return (Resolve-Path -LiteralPath $p).Path }
  }
@@ -43,7 +51,8 @@ function Find-Hactool([string]$requested) {
  $paths = @($requested,$env:SCARLET_HACTOOL,
   (Join-Path $repo 'tools\hactool.exe'),
   (Join-Path $repo 'tools\hactool\hactool.exe'),
-  (Join-Path $repo 'build\tools\hactool.exe'))
+  (Join-Path $repo 'build\tools\hactool.exe'),
+  (Join-Path $repo 'build\tools\hactool\hactool.exe'))
  foreach ($p in $paths) {
   if ($p -and (Test-Path -LiteralPath $p -PathType Leaf)) { return (Resolve-Path -LiteralPath $p).Path }
  }
@@ -56,7 +65,7 @@ function Find-Hactool([string]$requested) {
  $parent = Split-Path $repo -Parent
  foreach ($sibling in @('scarlet_pc', 'scarlet_pc-native-test')) {
   $other = Join-Path $parent $sibling
-  foreach ($rel in @('tools\hactool.exe', 'tools\hactool\hactool.exe', 'build\tools\hactool.exe')) {
+  foreach ($rel in @('tools\hactool.exe', 'tools\hactool\hactool.exe', 'build\tools\hactool.exe', 'build\tools\hactool\hactool.exe')) {
    $candidate = Join-Path $other $rel
    if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
     Write-Host "[native-update] Reutilizando hactool existente: $candidate" -ForegroundColor DarkGray
