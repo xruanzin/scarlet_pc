@@ -2,7 +2,7 @@
 
 This work extends `native/scarlet-runtime-migration`; it is not evidence of a
 completed gameplay migration. The initial checkout was clean at `0fd5691`.
-Concurrent migration changes through `041207f` were preserved. No game DLL was
+Concurrent migration changes through `e144506` were preserved. No game DLL was
 regenerated and no existing graphics, save, input or audio implementation was
 removed.
 
@@ -41,7 +41,20 @@ legacy renderer or verified gameplay boot.
 - CI executes synthetic native tests and retains the migration branch's full
   Windows executable link, instead of treating object compilation as completion.
 
+- Added `--check-aot` to validate the four DLL exports and ABI without opening a window or executing guest code (exit 0 on success, 2 on failure).
+- Declared the runner's missing `DlcPath` parameter; update/DLC routing remains available through legacy.
+
 ## Validation performed
+
+Windows CI passed at code commit `712623b5f59b72a5457ffa79eb41413038029879`:
+https://github.com/xruanzin/scarlet_pc/actions/runs/40567382291
+
+All three jobs passed: syntax/ABI regression, Windows runner tests, and full
+Windows executable compilation/linking. The resulting executable loaded four
+synthetic Windows DLLs successfully, rejected ABI 5, and rejected a missing SDK
+DLL. This tests real Windows DLL loading, not actual game DLL compatibility.
+Runner tests cover paths with spaces and profiler environment restoration.
+
 
 `python tools/test_native_aot_loader.py` compiles the production loader and
 execution bridge with synthetic DLL exports. It exercises all four images,
@@ -74,7 +87,7 @@ This is a scoped comparison, not an exhaustive audit of all four projects.
 - Real Windows AOT DLLs and game assets were unavailable in this environment.
   Logs/menu/load/gameplay, actual imports and SVC coverage cannot be certified.
 - Updates require BKTR/patch-overlay semantics. The concurrently added runner
-  explicitly routes `-UpdatePath` through the legacy executable; native update
+  explicitly routes `-UpdatePath` and DLC through the legacy executable; native update
   execution has not been implemented here.
 - A compatible LAS library, if present, remains an optional fallback for missing
   AOT targets/instructions. `SCARLET_NATIVE_LAS_FALLBACK=0` makes such gaps fatal.
@@ -96,6 +109,7 @@ switch branches over conflicting uncommitted work. Once on
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\scarlet_native_build.ps1 -Jobs 4 -AotDir .\dist\ScarletPC-Independent\aot
+.\build\native\ScarletPC.exe --check-aot
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\scarlet_native_run.ps1 -Runtime native -GamePath "D:\Pokemon Scarlet\Extracted\Base" -Profile
 ```
 
