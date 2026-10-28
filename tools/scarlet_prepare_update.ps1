@@ -15,6 +15,7 @@ Set-StrictMode -Version Latest
 $repo = Split-Path $PSScriptRoot -Parent
 . (Join-Path $PSScriptRoot 'scarlet_native_titlekeys.ps1')
 . (Join-Path $PSScriptRoot 'scarlet_nsp_cache.ps1')
+. (Join-Path $PSScriptRoot 'scarlet_nca_hash.ps1')
 $titleId = [UInt64]0x0100A3D008C5C000
 $expectedMain = '421c5411b487eb4d'
 
@@ -375,6 +376,12 @@ if ([IO.Path]::GetExtension($base).ToLowerInvariant() -eq '.nsp') {
  Repair-ScarletNspNcaCache -PackagePath $base -CacheDirectory $baseDir -Label 'base'
 }
 Repair-ScarletNspNcaCache -PackagePath $update -CacheDirectory $updateDir -Label 'update'
+# Only inspect NCAs listed inside the actual update NSP. Old .work caches
+# can contain an extra NCA from earlier failed attempts.
+$updateIndexNames = @{}
+foreach ($entry in @(Get-ScarletNspNcaEntries -PackagePath $update)) {
+ $updateIndexNames[$entry.Name] = $true
+}
 $baseFiles = @(Get-ChildItem -LiteralPath $baseDir -Recurse -File -Filter '*.nca')
 $updateFiles = @(Get-ChildItem -LiteralPath $updateDir -Recurse -File -Filter '*.nca')
 
@@ -454,8 +461,15 @@ function Show-NativeWriteFailure([string]$hactoolOutput, [string]$targetDirector
 }
 
 function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
- $ncas = @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.nca' | Sort-Object Length -Descending)
+ $allNcas = @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.nca' | Sort-Object Length -Descending)
  $type = if ($baseNca) { 'update' } else { 'base' }
+ $ncas = $allNcas
+ if ($baseNca) {
+  $ncas = @($allNcas | Where-Object { $updateIndexNames.ContainsKey($_.Name.ToLowerInvariant()) })
+  if ($allNcas.Count -gt $ncas.Count) {
+   Write-Warning ("[native-update] {0} NCA(s) avulsos no cache de update, ausentes do NSP original: ignorados na varredura." -f ($allNcas.Count-$ncas.Count))
+  }
+ }
  $ncaFailed = 0
  $missingNpdm = 0
  $missingTitlekeys = 0
@@ -497,6 +511,24 @@ function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
     }
     $info = $firstInfo
     $code = $firstCode
+   }
+  }
+  if ($baseNca -and $code -ne 0) {
+   # If the NCA is still unreadable after the full-size restoration, validate
+   # its actual ciphertext hash against the content ID encoded by its name.
+   # This distinguishes same-size corruption from a hactool decoding issue.
+   Write-Host ("[native-update] Verificando SHA256 de {0} apos falha do hactool..." -f $nca.Name) -ForegroundColor DarkGray
+   $status = Test-ScarletFailedNca -NcaPath $nca.FullName -NspPath $update -RepairCache
+   if ($status -eq 'source-mismatch') {
+    throw "NCA $($nca.Name) do update nao corresponde ao SHA256 Content ID nem no NSP original. Gere um novo dump integro da atualizacao. Cache e AOT preservados."
+   }
+   if ($status -eq 'repaired') {
+    if (Test-Path -LiteralPath $probe -PathType Container) {
+     Remove-Item -LiteralPath $probe -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $probe -Force | Out-Null
+    $code = Run-Hactool -arguments $hactoolArgs -allowFailure $true -capturePath $probeOutput
+    $info = Get-Content -LiteralPath $probeOutput -Raw -ErrorAction SilentlyContinue
    }
   }
   $kind = if ($info -match '(?m)^Content Type:\s+([a-zA-Z0-9]+)') { $Matches[1] } else { 'unknown' }
