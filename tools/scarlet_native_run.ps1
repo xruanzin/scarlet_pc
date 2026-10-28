@@ -18,6 +18,8 @@ param(
     [int]$Jobs = 4,
 
     [switch]$Build,
+    [ValidateSet('current','fsr31','fsr4','dlss','off')]
+    [string]$Upscaler = 'current',
     [switch]$Profile,
     [switch]$NoLauncher
 )
@@ -119,6 +121,7 @@ elseif (Test-Path (Join-Path $repoRoot $GameRoot) -PathType Container) {
 }
 
 $oldRuntime = $env:SCARLET_RUNTIME
+$oldUpscaler = $env:SCARLET_UPSCALER
 $oldProfile = $env:SCARLET_NATIVE_PROFILE
 $oldLauncher = $env:LARECOMP_NO_LAUNCHER
 $oldHleProfile = $env:LARECOMP_HLE_PROF
@@ -132,6 +135,10 @@ $oldCommandCounts = $env:LARECOMP_COMMAND_COUNTS
 $oldFrameCsv = $env:LARECOMP_FRAME_CSV
 try {
     $env:SCARLET_RUNTIME = $Runtime
+    if ($Upscaler -ne 'current') {
+        $env:SCARLET_UPSCALER = $Upscaler
+        Write-Host ("[graphics] Native temporal upscaler selection: {0}" -f $Upscaler) -ForegroundColor Cyan
+    }
     if ($packageMount) {
         $env:LARECOMP_EXEFS_DIR = [string]$packageMount.ExeFs
         $env:LARECOMP_ROMFS_DIR = [string]$packageMount.RomFsDir
@@ -193,6 +200,7 @@ try {
 }
 finally {
     if ($null -eq $oldRuntime) { Remove-Item Env:SCARLET_RUNTIME -ErrorAction SilentlyContinue } else { $env:SCARLET_RUNTIME = $oldRuntime }
+    if ($null -eq $oldUpscaler) { Remove-Item Env:SCARLET_UPSCALER -ErrorAction SilentlyContinue } else { $env:SCARLET_UPSCALER = $oldUpscaler }
     if ($null -eq $oldProfile) { Remove-Item Env:SCARLET_NATIVE_PROFILE -ErrorAction SilentlyContinue } else { $env:SCARLET_NATIVE_PROFILE = $oldProfile }
     if ($null -eq $oldLauncher) { Remove-Item Env:LARECOMP_NO_LAUNCHER -ErrorAction SilentlyContinue } else { $env:LARECOMP_NO_LAUNCHER = $oldLauncher }
     if ($null -eq $oldExeFs) { Remove-Item Env:LARECOMP_EXEFS_DIR -ErrorAction SilentlyContinue } else { $env:LARECOMP_EXEFS_DIR = $oldExeFs }
