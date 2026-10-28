@@ -28,6 +28,9 @@ function Start-Process {
         Profile = $env:SCARLET_NATIVE_PROFILE
         Hle = $env:LARECOMP_HLE_PROF
         FrameCsv = $env:LARECOMP_FRAME_CSV
+        ExeFs = $env:LARECOMP_EXEFS_DIR
+        RomFsImage = $env:LARECOMP_ROMFS_IMAGE
+        PackageStream = $env:LARECOMP_PACKAGE_STREAM
     }
     return [pscustomobject]@{ ExitCode = 0 }
 }
@@ -65,7 +68,36 @@ try {
     foreach ($name in $names) {
         Assert-Runner ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name, 'Process'))) "Environment not removed: $name"
     }
-    Write-Host 'Native runner: default DLC, spaced path, profiler propagation and restoration passed.'
+    # A base NSP + update NSP must stay in native mode. Mock only the preparation
+    # helper and process creation: no game assets, keys, hactool or suyu required.
+    $baseNsp = Join-Path $temp 'Scarlet base.nsp'
+    $updateNsp = Join-Path $temp 'Scarlet update.nsp'
+    New-Item -ItemType File -Path $baseNsp, $updateNsp | Out-Null
+    $patchedExeFs = Join-Path $temp 'patched\exefs'
+    $patchedRomFs = Join-Path $temp 'patched\romfs.bin'
+    New-Item -ItemType Directory -Force -Path $patchedExeFs | Out-Null
+    New-Item -ItemType File -Force -Path $patchedRomFs | Out-Null
+    $fakePrepare = Join-Path $temp 'tools\scarlet_prepare_update.ps1'
+    @'
+param([string]$BasePath,[string]$UpdatePath,[string]$KeysPath,[string]$HactoolPath,[string]$AotManifestPath)
+[PSCustomObject]@{
+    ExeFs = (Join-Path (Split-Path $PSScriptRoot -Parent) 'patched\exefs')
+    RomFsImage = (Join-Path (Split-Path $PSScriptRoot -Parent) 'patched\romfs.bin')
+    RomFsDir = ''
+    CacheRoot = 'synthetic-update-cache'
+} | ConvertTo-Json -Compress
+'@ | Set-Content -LiteralPath $fakePrepare -Encoding UTF8
+
+    & $runner -Runtime native -GamePath $baseNsp -UpdatePath $updateNsp -NoLauncher
+    Assert-Runner ($capture.Process.Runtime -eq 'native') 'NSP update was redirected to legacy.'
+    Assert-Runner ($capture.Process.ExeFs -eq $patchedExeFs) 'Patched ExeFS not forwarded.'
+    Assert-Runner ($capture.Process.RomFsImage -eq $patchedRomFs) 'Patched RomFS not forwarded.'
+    Assert-Runner ($capture.Process.PackageStream -eq '0') 'Cached update was treated as a streaming mount.'
+    foreach ($name in $names) {
+        Assert-Runner ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name, 'Process'))) "Environment leaked after update: $name"
+    }
+
+    Write-Host 'Native runner: default DLC, spaced path, native NSP update, profiler propagation and restoration passed.'
 }
 finally {
     foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $before[$name], 'Process') }
