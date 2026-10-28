@@ -26,7 +26,25 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\scarlet_native_r
 
 KeysPath and AotManifestPath are optional when discoverable from the known
 keys locations and the imported AOT export root. HactoolPath may be passed
-if hactool.exe is installed outside the expected paths.
+if hactool.exe is installed outside the expected paths. The update preparer
+automatically discovers local title.keys (including some emulator key folders).
+For NSPs with common tickets (*.tik), it also extracts their encrypted titlekeys
+locally and supplies both base and update Rights IDs to hactool through a
+temporary HOME/.switch/title.keys file; this file is deleted after each run.
+
+If the NSP has no common ticket, or contains a personalized ticket, the
+encrypted titlekeys cannot always be derived automatically. In this case
+provide a title.keys file obtained from the user's own console with
+-TitleKeysPath, for example:
+
+~~~powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\scarlet_native_run.ps1 -Runtime native -GamePath "D:\Pokemon Scarlet\Pokemon Scarlet.nsp" -UpdatePath "D:\Pokemon Scarlet\Pokemon Scarlet v4.0.0.nsp" -TitleKeysPath "D:\Pokemon Scarlet\title.keys" -Profile -NoLauncher
+~~~
+
+Never paste any key files or unredacted hactool logs in public. All hactool
+invocations in this preparer use --suppresskeys and --disablekeywarns; older
+logs may still contain key values. Tests in tools/test_native_titlekeys.ps1
+use only synthetic fixtures, not Nintendo keys or game assets.
 
 The first run can use significant disk space and time: it extracts two sets
 of NCAs and writes an updated RomFS image. Subsequent runs reuse a validated
