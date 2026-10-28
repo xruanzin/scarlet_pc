@@ -217,8 +217,13 @@ RT_REV_STAMP := $(B)/rt/.rev-$(RT_REV)
 # texture bookkeeping and shader translator can use AVX2/FMA too. -O3 does not
 # enable unsafe fast-math; graphics correctness remains governed by the shader
 # translator and guest code.
-RTFLAGS  := -O3 -g $(GENARCH) -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
-CXXFLAGS := -O3 -g $(GENARCH) -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -I$(FSR_VK_DIR)/include $(DEPINC)
+# Native host builds may have very little free disk space. Keep original
+# debug symbols for developer/CI builds, but allow the D: player build to
+# omit large DWARF sections without changing O3 or gameplay behavior.
+HOST_DEBUG ?= 1
+HOST_DBGFLAGS := $(if $(filter 0,$(HOST_DEBUG)),-g0,-g)
+RTFLAGS  := -O3 $(HOST_DBGFLAGS) $(GENARCH) -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
+CXXFLAGS := -O3 $(HOST_DBGFLAGS) $(GENARCH) -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -I$(FSR_VK_DIR)/include $(DEPINC)
 
 all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))
 
