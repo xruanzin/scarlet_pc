@@ -41,6 +41,8 @@ jobs:
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_titlekeys.ps1 -Raw))
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_nsp_cache.ps1 -Raw))
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_nca_hash.ps1 -Raw))
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_cleanup_legacy_cache.ps1 -Raw))
+          ./tools/test_native_d_only.ps1
           ./tools/test_native_titlekeys.ps1
           ./tools/test_native_nca_hash.ps1
           ./tools/test_native_nsp_cache.ps1
@@ -105,6 +107,8 @@ jobs:
             'tools/scarlet_native_titlekeys.ps1',
             'tools/scarlet_nsp_cache.ps1',
             'tools/scarlet_nca_hash.ps1',
+            'tools/scarlet_cleanup_legacy_cache.ps1',
+            'tools/test_native_d_only.ps1',
             'tools/test_native_nca_hash.ps1',
             'tools/test_native_titlekeys.ps1',
             'tools/test_native_nsp_cache.ps1'
@@ -121,6 +125,10 @@ jobs:
       - name: Test NSP/PFS0 cache integrity and targeted recovery
         shell: powershell
         run: ./tools/test_native_nsp_cache.ps1
+
+      - name: Guard D-only cache and C cleanup policy
+        shell: powershell
+        run: ./tools/test_native_d_only.ps1
 
       - name: Test same-size NCA corruption and safe recovery
         shell: powershell
