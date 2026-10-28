@@ -95,7 +95,7 @@ try {
     # user environment on exit (including when other graphics flags are set).
     & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -GraphicsReference -Upscaler fsr31 -NoLauncher
     Assert-Runner ($capture.Process.GraphicsReference -eq '1') 'Guest reference presentation option not propagated.'
-    Assert-Runner ($capture.Process.Upscaler -eq 'fsr31') 'Reference mode must not mutate the user's upscaler selection.'
+    Assert-Runner ($capture.Process.Upscaler -eq 'fsr31') 'Reference mode must not mutate the user''s upscaler selection.'
     Assert-Runner ([Environment]::GetEnvironmentVariable('SCARLET_GRAPHICS_REFERENCE', 'Process') -eq 'test-before') 'Graphics reference mode leaked to parent.'
     & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -NoLauncher
     Assert-Runner ($capture.Process.GraphicsReference -eq 'test-before') 'Default run must honor previous reference-mode state.'
