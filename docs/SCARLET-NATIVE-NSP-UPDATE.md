@@ -90,16 +90,30 @@ the new redacted diagnostic for the last written file and check filesystem
 permissions/drive errors; an alternate cache volume is not a guarantee.
 
 
-## Implementation
+## Implementation: modern NCA update fallback
 
-1. Prepare tool finds the base Program NCA by main.npdm Title ID.
-2. It finds the updated Program NCA by the Scarlet 4.0.0 main NSO Build ID.
-3. Hactool applies --basenca to reconstruct updated ExeFS and patched RomFS.
-4. Preflight validates the Title ID and main Build ID. When available, the
-   AOT source manifest supplies expected SDK/subsdk0 Build IDs too.
-5. The native runner supplies the prepared ExeFS and RomFS image via
-   LARECOMP_EXEFS_DIR and LARECOMP_ROMFS_IMAGE to ScarletPC.exe.
-6. There is no implicit fallback to suyu for base + update alone.
+1. The preparer checks NCA sizes against the original NSP PFS0 index and
+   verifies SHA-256 content IDs when hactool cannot read the NCA.
+2. It identifies the base Program NCA by main.npdm Title ID.
+3. It attempts the update ExeFS with hactool 1.4.0. If that fails on an
+   integrity-verified NCA, it tries official **NSTool v1.9.2**, downloaded on
+   demand to `D:\ScarletNativeCache\tools\nstool\nstool.exe`.
+   The official release is https://github.com/jakcron/nstool/releases/tag/v1.9.2.
+   To use an existing copy, pass `-NstoolPath "D:\tools\nstool.exe"`.
+4. Both tools require the real base NCA to reconstruct patch BKTR data.
+   A fake-base probe is only diagnostic and is never used as game content.
+5. The patched ExeFS must match Scarlet **4.0.0** main NSO Build ID
+   `421c5411b487eb4d` and expected SDK/subsdk0 IDs when provided.
+6. Hactool writes a patched RomFS image. NSTool extracts the patched RomFS
+   directory; the native runtime already supports building its own image
+   from that directory, on the D: cache volume.
+7. There is no implicit fallback to suyu for base + update alone.
+
+NSTool is not guaranteed to decode every recent NCA. If it reports missing
+key generations or fails to produce the proper ExeFS, stop with its local
+diagnostics and supply an up-to-date `prod.keys` from your own console.
+Do not post keys, decrypted content or unredacted tool logs. The new fallback
+has CI/mock tests but has **not** been verified on the real 4.0.0 game dump.
 
 The existing explicit -DlcPath legacy route remains until native DLC
 overlays are implemented. This feature was not tested against the user's
