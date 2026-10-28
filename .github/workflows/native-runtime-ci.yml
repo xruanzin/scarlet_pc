@@ -35,7 +35,9 @@ jobs:
       - name: Parse and exercise the native runner
         shell: powershell
         run: |
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_paths.ps1 -Raw))
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_build.ps1 -Raw))
+          ./tools/test_native_build_root.ps1
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_run.ps1 -Raw))
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_prepare_update.ps1 -Raw))
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_titlekeys.ps1 -Raw))
@@ -108,6 +110,8 @@ jobs:
         run: |
           $scripts = @(
             'tools/scarlet_native_build.ps1',
+            'tools/scarlet_native_paths.ps1',
+            'tools/test_native_build_root.ps1',
             'tools/scarlet_native_run.ps1',
             'tools/scarlet_prepare_update.ps1',
             'tools/scarlet_native_titlekeys.ps1',
@@ -140,6 +144,10 @@ jobs:
       - name: Test same-size NCA corruption and safe recovery
         shell: powershell
         run: ./tools/test_native_nca_hash.ps1
+
+      - name: Test Windows native build paths on D or an explicit build root
+        shell: powershell
+        run: ./tools/test_native_build_root.ps1
 
       - name: Test native Windows runner without game files
         shell: powershell
