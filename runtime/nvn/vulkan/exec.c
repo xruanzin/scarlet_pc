@@ -834,7 +834,8 @@ VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align) {
 
 // Per-draw constants that usually repeat the previous draw's (scale table, tint, driver constants): reuse that copy
 // while it's identical, within one submission. slot: one per kind of data.
-enum { DEDUPE_RSCALE_V, DEDUPE_RSCALE_F, DEDUPE_TINT, DEDUPE_DRV_V, DEDUPE_DRV_F, DEDUPE_DRV_C, DEDUPE_SLOTS };
+enum { DEDUPE_RSCALE_V, DEDUPE_RSCALE_F, DEDUPE_TINT, DEDUPE_DRV_V, DEDUPE_DRV_F, DEDUPE_DRV_C,
+       DEDUPE_STORAGE_V, DEDUPE_STORAGE_F, DEDUPE_STORAGE_C, DEDUPE_SLOTS };
 static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t align) {
     static struct { uint64_t seq, size; uint8_t data[0x800]; VkSpan span; } last[DEDUPE_SLOTS];
     uint64_t seq = vk_pending_seq();
@@ -847,15 +848,28 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 
 // Guest memory copied once per submission: draws binding the same range share the copy.
 #define GCOPY_TAB 4096
-static struct { uint64_t addr, size, seq; VkSpan span; } gcopy[GCOPY_TAB];
+static struct { uint64_t addr, size, seq, generation; VkSpan span; } gcopy[GCOPY_TAB];
+static uint32_t gcopy_replace;
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
 static void guest_copy_flush(void) { gcopy_gen++; }
 static VkSpan guest_copy(uint64_t addr, uint64_t size) {
-    uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
+    uint64_t seq = vk_pending_seq(), h = (addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
     uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (GCOPY_TAB - 1);
-    if (gcopy[slot].seq == seq && gcopy[slot].addr == addr && gcopy[slot].size == size) return gcopy[slot].span;
+    // Bounded probes retain colliding vertex/constant ranges. Keep submission
+    // and guest-write generations separate so their epochs cannot alias.
+    uint32_t victim = GCOPY_TAB;
+    for (uint32_t i = 0; i < 4; ++i) {
+        uint32_t p = (slot + i) & (GCOPY_TAB - 1);
+        if (gcopy[p].seq != seq || gcopy[p].generation != gcopy_gen) {
+            if (victim == GCOPY_TAB) victim = p;
+        } else if (gcopy[p].addr == addr && gcopy[p].size == size) {
+            return gcopy[p].span;
+        }
+    }
+    slot = victim != GCOPY_TAB ? victim : (slot + (gcopy_replace++ & 3)) & (GCOPY_TAB - 1);
     VkSpan s = vk_transient_copy((const void *)(uintptr_t)addr, size, 256);
-    gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].seq = seq; gcopy[slot].span = s;
+    gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].seq = seq;
+    gcopy[slot].generation = gcopy_gen; gcopy[slot].span = s;
     return s;
 }
 
@@ -2923,7 +2937,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     int idx = k - 3;  // cbuf_base
     Range r = (idx >= 0 && idx < 18) ? st.ubuf[stage][idx] : (Range){0, 0};
     uint64_t size = si->cbuf_size[k] ? si->cbuf_size[k] : 256;
-    if (!r.addr) return ubo_span(vk_transient_copy(zeros, size, 256), size);
+    if (!r.addr) return ubo_span(guest_copy((uint64_t)(uintptr_t)zeros, size), size);
     if ((si->cbuf_dynamic & (1u << k)) && r.size) size = r.size > 0x10000 ? 0x10000 : r.size;
     if (size > r.size && r.size) size = r.size;
     if (size < 16) size = 16;
@@ -3508,7 +3522,8 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             }
             w[n].pImageInfo = &ii[n];
         } else if (si->storage_buffers && b->binding == 17 && b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
-            bi[n] = ubo_span(vk_transient_copy(storage_map, si->storage_buffers * 16, 256), si->storage_buffers * 16);
+            bi[n] = ubo_span(copy_dedupe(stage == 5 ? DEDUPE_STORAGE_C : stage == 1 ? DEDUPE_STORAGE_F : DEDUPE_STORAGE_V,
+                                       storage_map, si->storage_buffers * 16, 256), si->storage_buffers * 16);
             w[n].pBufferInfo = &bi[n];
         } else if (si->storage_buffers && b->binding >= 64 && b->binding < 64u + si->storage_buffers && b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
             bi[n] = storage[b->binding - 64];
