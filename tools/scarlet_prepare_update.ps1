@@ -254,15 +254,22 @@ if (-not (Test-Path -LiteralPath $log -PathType Leaf)) {
  Add-Content -LiteralPath $log -Value "[native-update] Retry/resume $(Get-Date -Format o)"
 }
 
-function Run-Hactool([string[]]$arguments, [bool]$allowFailure=$false) {
+function Run-Hactool([string[]]$arguments, [bool]$allowFailure=$false, [string]$capturePath='') {
  $safe = ($arguments | ForEach-Object { if ($_ -eq $keys) { '<keys-file>' } else { $_ } }) -join ' '
  Add-Content -LiteralPath $log -Value ([Environment]::NewLine + '> hactool ' + $safe)
  $old = $ErrorActionPreference
  try {
   $ErrorActionPreference = 'Continue'
-  & $hactool @arguments 2>&1 | Out-File -LiteralPath $log -Append -Encoding UTF8
+  $output = @(& $hactool @arguments 2>&1)
   $code = $LASTEXITCODE
  } finally { $ErrorActionPreference = $old }
+ if ($output.Count -gt 0) {
+  $output | Out-File -LiteralPath $log -Append -Encoding UTF8
+ }
+ if ($capturePath) {
+  # The command always has --suppresskeys: no decrypted key material in logs.
+  $output | Out-File -LiteralPath $capturePath -Encoding UTF8
+ }
  if ($code -ne 0 -and -not $allowFailure) { throw "hactool falhou (exit $code). Log: $log" }
  return $code
 }
@@ -293,6 +300,9 @@ function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
  $type = if ($baseNca) { 'update' } else { 'base' }
  $ncaFailed = 0
  $missingNpdm = 0
+ $missingTitlekeys = 0
+ $programCandidates = 0
+ $invalidHeaders = 0
  $wrongId = @{}
  $missingMain = 0
  Write-Host ("[native-update] Analisando {0} NCA(s) de {1}..." -f $ncas.Count,$type) -ForegroundColor Cyan
@@ -302,10 +312,22 @@ function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
   $hactoolArgs = @('-k',$keys,'--disablekeywarns','--suppresskeys','-t','nca','--xcontenttype=program')
   if ($baseNca) { $hactoolArgs += "--basenca=$baseNca" }
   $hactoolArgs += @("--exefsdir=$probe",$nca.FullName)
-  $code = Run-Hactool -arguments $hactoolArgs -allowFailure $true
+  $probeOutput = Join-Path $work 'last-hactool-probe.log'
+  $code = Run-Hactool -arguments $hactoolArgs -allowFailure $true -capturePath $probeOutput
+  $info = Get-Content -LiteralPath $probeOutput -Raw -ErrorAction SilentlyContinue
+  $kind = if ($info -match '(?m)^Content Type:\s+([a-zA-Z0-9]+)') { $Matches[1] } else { 'unknown' }
+  if ($kind -eq 'Program') { $programCandidates++ }
+  $titleKeyMissing = [bool]($info -match '(?m)^Titlekey:\s+Unknown\b')
+  if ($titleKeyMissing) { $missingTitlekeys++ }
+  if ($info -match 'Invalid NCA header!') { $invalidHeaders++ }
   if ($code -ne 0) { $ncaFailed++; continue }
   if (-not (Test-Path -LiteralPath (Join-Path $probe 'main.npdm') -PathType Leaf)) {
-   $missingNpdm++; continue
+   $missingNpdm++
+   if ($kind -eq 'Program' -or $titleKeyMissing) {
+    $hint = if ($titleKeyMissing) { 'Titlekey ausente (NCA protegido por Rights ID)' } else { 'ExeFS nao extraido' }
+    Write-Warning ("[native-update] {0}: Content Type={1}; {2}; hactool exit={3}" -f $nca.Name,$kind,$hint,$code)
+   }
+   continue
   }
   $programId = Get-ProgramId $probe
   if ($programId -ne $titleId) {
@@ -323,9 +345,16 @@ function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
   Write-Host ("[native-update] Program NCA: {0} / main {1}" -f $nca.Name,$got.Substring(0,16)) -ForegroundColor Green
   return $nca.FullName
  }
- $details = "NCA(s)=$($ncas.Count); hactool exit nao-zero=$ncaFailed; sem main.npdm=$missingNpdm; sem main NSO=$missingMain"
+ $details = "NCA(s)=$($ncas.Count); tipo Program=$programCandidates; titlekeys ausentes=$missingTitlekeys; headers invalidos=$invalidHeaders; hactool exit nao-zero=$ncaFailed; sem main.npdm=$missingNpdm; sem main NSO=$missingMain"
  if ($wrongId.Count) { $details += '; title IDs divergentes=' + (($wrongId.Keys | Sort-Object) -join ',') }
  Write-Warning "[native-update] Nenhum Program NCA valido ($type). $details"
+ if ($missingTitlekeys -gt 0) {
+  Write-Warning '[native-update] Pelo menos um NCA usa titlekey nao localizada. Verifique suas chaves locais de console e title.keys; nao envie chaves no chat.'
+ } elseif ($programCandidates -eq 0 -and $invalidHeaders -gt 0) {
+  Write-Warning '[native-update] Hactool nao validou o cabecalho dos NCAs. Verifique prod.keys e a integridade do pacote.'
+ } elseif ($programCandidates -gt 0 -and $missingNpdm -gt 0) {
+  Write-Warning '[native-update] Program NCA identificado, mas ExeFS nao foi extraido. Consulte as mensagens do ultimo probe no log.'
+ }
  Add-Content -LiteralPath $log -Value ("[native-update] NCA scan summary for {0}: {1}" -f $type,$details)
  return ''
 }
