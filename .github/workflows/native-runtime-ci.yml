@@ -39,7 +39,9 @@ jobs:
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_run.ps1 -Raw))
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_prepare_update.ps1 -Raw))
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_titlekeys.ps1 -Raw))
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_nsp_cache.ps1 -Raw))
           ./tools/test_native_titlekeys.ps1
+          ./tools/test_native_nsp_cache.ps1
           ./tools/test_native_runner.ps1
 
   syntax:
@@ -99,7 +101,9 @@ jobs:
             'tools/scarlet_native_run.ps1',
             'tools/scarlet_prepare_update.ps1',
             'tools/scarlet_native_titlekeys.ps1',
-            'tools/test_native_titlekeys.ps1'
+            'tools/scarlet_nsp_cache.ps1',
+            'tools/test_native_titlekeys.ps1',
+            'tools/test_native_nsp_cache.ps1'
           )
           foreach ($script in $scripts) {
             [void][ScriptBlock]::Create((Get-Content -LiteralPath $script -Raw))
@@ -109,6 +113,10 @@ jobs:
       - name: Test native titlekey ticket parser without game files
         shell: powershell
         run: ./tools/test_native_titlekeys.ps1
+
+      - name: Test NSP/PFS0 cache integrity and targeted recovery
+        shell: powershell
+        run: ./tools/test_native_nsp_cache.ps1
 
       - name: Test native Windows runner without game files
         shell: powershell
