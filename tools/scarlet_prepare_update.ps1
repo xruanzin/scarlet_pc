@@ -397,30 +397,30 @@ function Get-HactoolSafeErrors([string]$message) {
  return $safeLines
 }
 
-# hactool 1.4.0 uses "Failed to write file!" when fwrite() returns a
-# short write; this is not proof of bad titlekeys or a corrupted NSP.
-# Inspect only the output filesystem and partial file metadata.
+# hactool 1.4.0 emits this error when fwrite returns a short write.
+# Check storage space before assuming the decrypted NCA content is wrong.
 function Show-NativeWriteFailure([string]$hactoolOutput, [string]$targetDirectory) {
- if (-not $hactoolOutput -or $hactoolOutput -notmatch '(?i)Failed to write file!') { return }
+ if (-not $hactoolOutput -or $hactoolOutput -notmatch 'Failed to write file!') { return }
  $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($targetDirectory))
- Write-Warning ("[native-update] hactool nao conseguiu gravar um arquivo do ExeFS em {0}. Possiveis causas: unidade cheia, cota de disco ou erro de E/S." -f $root)
+ Write-Warning ("[native-update] Falha de gravacao na unidade {0}; confira espaco livre e erros de E/S." -f $root)
  try {
   $drive = [IO.DriveInfo]::new($root)
   if ($drive.IsReady) {
    $freeGiB = [math]::Round($drive.AvailableFreeSpace / 1GB, 2)
-   Write-Warning ("[native-update] Espaco livre em {0}: {1} GiB." -f $root,$freeGiB)
-   if ($drive.AvailableFreeSpace -lt (4GB)) {
-    Write-Warning '[native-update] Pouco espaco para extrair ExeFS. Use -UpdateCacheRoot em outra unidade com espaco livre e mova o cache .work existente para nao reextrair NCAs.'
-   }
+   Write-Warning ("[native-update] Espaco livre na unidade {0}: {1} GiB." -f $root,$freeGiB)
   }
  } catch {
-  Write-Warning '[native-update] Nao foi possivel consultar o espaco disponivel na unidade de destino.'
+  Write-Warning '[native-update] Nao foi possivel consultar o espaco livre.'
  }
- # Hactool says "Saving main to ..."; never print full output or key material.
- $saveLines = @($hactoolOutput -split '\r?\n' | Where-Object { $_ -match '(?i)Saving [^\r\n]+ to [^\r\n]+' })
+ $saveLines = @($hactoolOutput -split '\r?\n' | Where-Object { $_ -match 'Saving ' -and $_ -match ' to ' })
  if ($saveLines.Count -gt 0) {
   $lastSave = [string]$saveLines[-1]
-  if ($lastSave -match '(?i)^\s*Saving\s+([^\r\n]+?)\s+to\s+(.+?)\.\.\.\s*
+  if ($lastSave.Length -gt 240) { $lastSave = $lastSave.Substring(0,240) }
+  Write-Host ("[native-update] Ultimo arquivo informado: {0}" -f $lastSave) -ForegroundColor DarkGray
+ }
+}
+
+function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
  $ncas = @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.nca' | Sort-Object Length -Descending)
  $type = if ($baseNca) { 'update' } else { 'base' }
  $ncaFailed = 0
