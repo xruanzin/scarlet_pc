@@ -10,6 +10,7 @@ param(
     [string]$KeysPath,
     [string]$TitleKeysPath,
     [string]$HactoolPath,
+    [string]$NstoolPath,
     [string]$AotManifestPath,
     [string]$UpdateCacheRoot,
 
@@ -74,13 +75,16 @@ if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
     if ($KeysPath) { $prepareArgs.KeysPath = $KeysPath }
     if ($TitleKeysPath) { $prepareArgs.TitleKeysPath = $TitleKeysPath }
     if ($HactoolPath) { $prepareArgs.HactoolPath = $HactoolPath }
+    if ($NstoolPath) { $prepareArgs.NstoolPath = $NstoolPath }
     if ($AotManifestPath) { $prepareArgs.AotManifestPath = $AotManifestPath }
     if ($UpdateCacheRoot) { $prepareArgs.OutputRoot = $UpdateCacheRoot }
     $prepareJson = & (Join-Path $PSScriptRoot 'scarlet_prepare_update.ps1') @prepareArgs
     if (-not $prepareJson) { throw 'The native update preparation did not return an ExeFS/RomFS result.' }
     $packageMount = ($prepareJson | Select-Object -Last 1 | ConvertFrom-Json)
+    $romFsImageReady = $packageMount.RomFsImage -and (Test-Path -LiteralPath $packageMount.RomFsImage -PathType Leaf)
+    $romFsDirReady = $packageMount.RomFsDir -and (Test-Path -LiteralPath $packageMount.RomFsDir -PathType Container)
     if (-not (Test-Path -LiteralPath $packageMount.ExeFs -PathType Container) -or
-        -not (Test-Path -LiteralPath $packageMount.RomFsImage -PathType Leaf)) {
+        -not ($romFsImageReady -or $romFsDirReady)) {
         throw 'The native update preparation returned invalid ExeFS/RomFS paths.'
     }
     $resolvedRoot = $repoRoot
@@ -131,7 +135,11 @@ try {
     if ($packageMount) {
         $env:LARECOMP_EXEFS_DIR = [string]$packageMount.ExeFs
         $env:LARECOMP_ROMFS_DIR = [string]$packageMount.RomFsDir
-        $env:LARECOMP_ROMFS_IMAGE = [string]$packageMount.RomFsImage
+        if ([string]::IsNullOrEmpty([string]$packageMount.RomFsImage)) {
+            Remove-Item Env:LARECOMP_ROMFS_IMAGE -ErrorAction SilentlyContinue
+        } else {
+            $env:LARECOMP_ROMFS_IMAGE = [string]$packageMount.RomFsImage
+        }
         if ($packageMount.PSObject.Properties.Name -contains 'CacheRoot') {
             # An extracted/patched image can be memory-mapped; existence of this
             # variable (even '0') forces the native FS into streaming mode.
