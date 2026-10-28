@@ -235,14 +235,24 @@ if (Test-Path -LiteralPath $OutputRoot) {
  if (-not $Force) { throw "Cache invalido em $OutputRoot. Confira antes de usar -Force." }
  Remove-Item -LiteralPath $OutputRoot -Recurse -Force
 }
-if (Test-Path -LiteralPath $work) { throw "Preparacao anterior presente em $work. Verifique antes de remover." }
-New-Item -ItemType Directory -Force -Path (Split-Path $OutputRoot -Parent),$work | Out-Null
+# Failed probes leave a .work directory. Keep already-extracted NCAs and retry
+# only the scanning/patching steps. Never delete an existing work directory.
+$resume = Test-Path -LiteralPath $work -PathType Container
+if ($resume) {
+ Write-Host "[native-update] Reutilizando NCAs da tentativa anterior: $work" -ForegroundColor Cyan
+} else {
+ New-Item -ItemType Directory -Force -Path (Split-Path $OutputRoot -Parent),$work | Out-Null
+}
 $baseDir = Join-Path $work 'base'
 $updateDir = Join-Path $work 'update'
 $probe = Join-Path $work 'probe'
 $assembled = Join-Path $work 'assembled'
 New-Item -ItemType Directory -Force -Path $baseDir,$updateDir,$assembled | Out-Null
-Set-Content -LiteralPath $log -Value '[native-update] hactool diagnostics' -Encoding UTF8
+if (-not (Test-Path -LiteralPath $log -PathType Leaf)) {
+ Set-Content -LiteralPath $log -Value '[native-update] hactool diagnostics' -Encoding UTF8
+} else {
+ Add-Content -LiteralPath $log -Value "[native-update] Retry/resume $(Get-Date -Format o)"
+}
 
 function Run-Hactool([string[]]$arguments, [bool]$allowFailure=$false) {
  $safe = ($arguments | ForEach-Object { if ($_ -eq $keys) { '<keys-file>' } else { $_ } }) -join ' '
@@ -257,35 +267,74 @@ function Run-Hactool([string[]]$arguments, [bool]$allowFailure=$false) {
  return $code
 }
 
-Write-Host '[native-update] Extraindo NCAs para cache temporario (primeiro boot)...' -ForegroundColor Cyan
-if ([IO.Path]::GetExtension($base).ToLowerInvariant() -eq '.xci') {
- $null = Run-Hactool -arguments @('-k',$keys,'--suppresskeys','-t','xci',"--securedir=$baseDir",$base)
-} else {
- $null = Run-Hactool -arguments @('-k',$keys,'--suppresskeys','-t','pfs0',"--outdir=$baseDir",$base)
+Write-Host '[native-update] Conferindo NCAs de base e update...' -ForegroundColor Cyan
+$baseFiles = @(Get-ChildItem -LiteralPath $baseDir -Recurse -File -Filter '*.nca')
+if ($baseFiles.Count -eq 0) {
+ Write-Host '[native-update] Extraindo NCAs base (primeira execucao)...' -ForegroundColor Cyan
+ if ([IO.Path]::GetExtension($base).ToLowerInvariant() -eq '.xci') {
+  $null = Run-Hactool -arguments @('-k',$keys,'--suppresskeys','-t','xci',"--securedir=$baseDir",$base)
+ } else {
+  $null = Run-Hactool -arguments @('-k',$keys,'--suppresskeys','-t','pfs0',"--outdir=$baseDir",$base)
+ }
+ $baseFiles = @(Get-ChildItem -LiteralPath $baseDir -Recurse -File -Filter '*.nca')
 }
-$null = Run-Hactool -arguments @('-k',$keys,'--suppresskeys','-t','pfs0',"--outdir=$updateDir",$update)
+if ($baseFiles.Count -eq 0) { throw "NSP base sem NCAs apos extracao: $base. Confira o pacote. Log: $log" }
+$updateFiles = @(Get-ChildItem -LiteralPath $updateDir -Recurse -File -Filter '*.nca')
+if ($updateFiles.Count -eq 0) {
+ Write-Host '[native-update] Extraindo NCAs da atualizacao...' -ForegroundColor Cyan
+ $null = Run-Hactool -arguments @('-k',$keys,'--suppresskeys','-t','pfs0',"--outdir=$updateDir",$update)
+ $updateFiles = @(Get-ChildItem -LiteralPath $updateDir -Recurse -File -Filter '*.nca')
+}
+if ($updateFiles.Count -eq 0) { throw "Update sem NCAs apos extracao: $update. Confira o pacote. Log: $log" }
+Write-Host ("[native-update] Encontrados: {0} NCA(s) base; {1} NCA(s) update." -f $baseFiles.Count,$updateFiles.Count) -ForegroundColor DarkGray
 
 function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
  $ncas = @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.nca' | Sort-Object Length -Descending)
+ $type = if ($baseNca) { 'update' } else { 'base' }
+ $ncaFailed = 0
+ $missingNpdm = 0
+ $wrongId = @{}
+ $missingMain = 0
+ Write-Host ("[native-update] Analisando {0} NCA(s) de {1}..." -f $ncas.Count,$type) -ForegroundColor Cyan
  foreach ($nca in $ncas) {
   if (Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe -Recurse -Force }
   New-Item -ItemType Directory -Force -Path $probe | Out-Null
-  $hactoolArgs = @('-k',$keys,'--suppresskeys','-t','nca','--xcontenttype=program')
+  $hactoolArgs = @('-k',$keys,'--disablekeywarns','--suppresskeys','-t','nca','--xcontenttype=program')
   if ($baseNca) { $hactoolArgs += "--basenca=$baseNca" }
   $hactoolArgs += @("--exefsdir=$probe",$nca.FullName)
   $code = Run-Hactool -arguments $hactoolArgs -allowFailure $true
-  if ($code -ne 0 -or (Get-ProgramId $probe) -ne $titleId) { continue }
+  if ($code -ne 0) { $ncaFailed++; continue }
+  if (-not (Test-Path -LiteralPath (Join-Path $probe 'main.npdm') -PathType Leaf)) {
+   $missingNpdm++; continue
+  }
+  $programId = Get-ProgramId $probe
+  if ($programId -ne $titleId) {
+   $id = $programId.ToString('x16')
+   if (-not $wrongId.ContainsKey($id)) { $wrongId[$id] = 0 }
+   $wrongId[$id]++
+   continue
+  }
   $got = Get-BuildId (Join-Path $probe 'main')
-  if (-not $got -or ($mainId -and -not $got.StartsWith($mainId))) { continue }
+  if (-not $got) { $missingMain++; continue }
+  if ($mainId -and -not $got.StartsWith($mainId)) {
+   Write-Host ("[native-update] Program NCA {0}: main {1}, esperado {2}" -f $nca.Name,$got.Substring(0,16),$mainId) -ForegroundColor Yellow
+   continue
+  }
   Write-Host ("[native-update] Program NCA: {0} / main {1}" -f $nca.Name,$got.Substring(0,16)) -ForegroundColor Green
   return $nca.FullName
  }
+ $details = "NCA(s)=$($ncas.Count); hactool exit nao-zero=$ncaFailed; sem main.npdm=$missingNpdm; sem main NSO=$missingMain"
+ if ($wrongId.Count) { $details += '; title IDs divergentes=' + (($wrongId.Keys | Sort-Object) -join ',') }
+ Write-Warning "[native-update] Nenhum Program NCA valido ($type). $details"
+ Add-Content -LiteralPath $log -Value ("[native-update] NCA scan summary for {0}: {1}" -f $type,$details)
  return ''
 }
 $baseNca = Find-ProgramNca $baseDir
-if (-not $baseNca) { throw "Program NCA da base nao encontrado. Log: $log" }
+if (-not $baseNca) {
+ throw "Program NCA do Scarlet na base nao identificado. Confira o final do log $log: falhas de NCA normalmente indicam chaves insuficientes (prod.keys/title.keys), arquivo NSP incompleto ou incompatibilidade do hactool."
+}
 $patchNca = Find-ProgramNca $updateDir $baseNca $expectedMain
-if (-not $patchNca) { throw "Update 4.0.0 (main $expectedMain) nao encontrado. Log: $log" }
+if (-not $patchNca) { throw "Update 4.0.0 (main $expectedMain) nao encontrado. Verifique build IDs e log: $log" }
 
 Write-Host '[native-update] Aplicando patch BKTR com --basenca...' -ForegroundColor Cyan
 $exeFs = Join-Path $assembled 'exefs'
