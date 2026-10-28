@@ -71,8 +71,23 @@ $log = $OutputRoot + '.hactool.log'
 
 $expected = @{main=$expectedMain}
 if (-not $AotManifestPath -and $env:SCARLET_AOT_MANIFEST) { $AotManifestPath = $env:SCARLET_AOT_MANIFEST }
+if (-not $AotManifestPath) {
+ # Prebuilt imports retain their source export_root; prefer its original
+ # manifest (which carries the NSO build IDs) over the DLL-only copy manifest.
+ foreach ($p in @(
+  (Join-Path $repo 'build\aot\modules\scarlet-aot-manifest.json'),
+  (Join-Path $repo 'dist\ScarletPC-Independent\aot\scarlet-aot-manifest.json')
+ )) {
+  if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { continue }
+  $copiedManifest = Get-Content -LiteralPath $p -Raw | ConvertFrom-Json
+  if ($copiedManifest.PSObject.Properties.Name -notcontains 'export_root') { continue }
+  $origin = Join-Path ([string]$copiedManifest.export_root) 'aot_cache\aot_manifest.json'
+  if (Test-Path -LiteralPath $origin -PathType Leaf) { $AotManifestPath = $origin; break }
+ }
+}
 if ($AotManifestPath) {
  $manifest = Get-Content -LiteralPath (Resolve-Required $AotManifestPath 'Manifesto AOT') -Raw | ConvertFrom-Json
+ if ($manifest.PSObject.Properties.Name -contains 'modules') {
  foreach ($entry in @($manifest.modules)) {
   if (-not $entry) { continue }
   $name = [string]$entry.name
@@ -85,6 +100,8 @@ if ($AotManifestPath) {
    if ($id -match '^[0-9a-f]{16,64}$') { $expected[$name] = $id }
   }
  }
+ }
+ Write-Host ("[native-update] Build IDs expected from source manifest: {0}" -f ($expected.Keys -join ', ')) -ForegroundColor DarkGray
 }
 if (-not $expected.main.StartsWith($expectedMain)) { throw 'Manifesto AOT nao e da versao 4.0.0.' }
 
