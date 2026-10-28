@@ -99,10 +99,12 @@ $root = Split-Path $PSScriptRoot -Parent
 if ($OutputRoot) { Set-Content -LiteralPath (Join-Path $root 'received-cache-root.txt') -Value $OutputRoot }
 if ($NstoolPath) { Set-Content -LiteralPath (Join-Path $root 'received-nstool-path.txt') -Value $NstoolPath }
 $directoryMode = Test-Path -LiteralPath (Join-Path $root 'directory-mode.txt')
+$image = if ($directoryMode) { '' } else { Join-Path $root 'patched\romfs.bin' }
+$directory = if ($directoryMode) { Join-Path $root 'patched\romfs' } else { '' }
 [PSCustomObject]@{
     ExeFs = (Join-Path $root 'patched\exefs')
-    RomFsImage = if ($directoryMode) { '' } else { Join-Path $root 'patched\romfs.bin' }
-    RomFsDir = if ($directoryMode) { Join-Path $root 'patched\romfs' } else { '' }
+    RomFsImage = $image
+    RomFsDir = $directory
     CacheRoot = 'synthetic-update-cache'
 } | ConvertTo-Json -Compress
 '@ | Set-Content -LiteralPath $fakePrepare -Encoding UTF8
