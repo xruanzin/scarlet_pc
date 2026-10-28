@@ -44,6 +44,7 @@ function Start-Process {
         FrameCsv = $env:LARECOMP_FRAME_CSV
         ExeFs = $env:LARECOMP_EXEFS_DIR
         RomFsImage = $env:LARECOMP_ROMFS_IMAGE
+        RomFsDir = $env:LARECOMP_ROMFS_DIR
         PackageStream = $env:LARECOMP_PACKAGE_STREAM
     }
     return [pscustomobject]@{ ExitCode = 0 }
@@ -93,12 +94,15 @@ try {
     New-Item -ItemType File -Force -Path $patchedRomFs | Out-Null
     $fakePrepare = Join-Path $temp 'tools\scarlet_prepare_update.ps1'
     @'
-param([string]$BasePath,[string]$UpdatePath,[string]$KeysPath,[string]$TitleKeysPath,[string]$HactoolPath,[string]$AotManifestPath,[string]$OutputRoot)
-if ($OutputRoot) { Set-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'received-cache-root.txt') -Value $OutputRoot }
+param([string]$BasePath,[string]$UpdatePath,[string]$KeysPath,[string]$TitleKeysPath,[string]$HactoolPath,[string]$NstoolPath,[string]$AotManifestPath,[string]$OutputRoot)
+$root = Split-Path $PSScriptRoot -Parent
+if ($OutputRoot) { Set-Content -LiteralPath (Join-Path $root 'received-cache-root.txt') -Value $OutputRoot }
+if ($NstoolPath) { Set-Content -LiteralPath (Join-Path $root 'received-nstool-path.txt') -Value $NstoolPath }
+$directoryMode = Test-Path -LiteralPath (Join-Path $root 'directory-mode.txt')
 [PSCustomObject]@{
-    ExeFs = (Join-Path (Split-Path $PSScriptRoot -Parent) 'patched\exefs')
-    RomFsImage = (Join-Path (Split-Path $PSScriptRoot -Parent) 'patched\romfs.bin')
-    RomFsDir = ''
+    ExeFs = (Join-Path $root 'patched\exefs')
+    RomFsImage = if ($directoryMode) { '' } else { Join-Path $root 'patched\romfs.bin' }
+    RomFsDir = if ($directoryMode) { Join-Path $root 'patched\romfs' } else { '' }
     CacheRoot = 'synthetic-update-cache'
 } | ConvertTo-Json -Compress
 '@ | Set-Content -LiteralPath $fakePrepare -Encoding UTF8
@@ -120,6 +124,23 @@ if ($OutputRoot) { Set-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot
     Assert-Runner ($capture.Process.Runtime -eq 'native') 'Relocated NSP update switched runtime.'
     foreach ($name in $names) {
         Assert-Runner ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name, 'Process'))) "Environment leaked after relocated update: $name"
+    }
+
+    # NSTool may extract a patched RomFS directory instead of a raw image.
+    # The native runtime must receive the directory, leaving image unset so
+    # the existing native RomFS builder can generate its own cache on D:.
+    $extractedDir = Join-Path $temp 'patched\romfs'
+    New-Item -ItemType Directory -Path $extractedDir -Force | Out-Null
+    New-Item -ItemType File -Path (Join-Path $temp 'directory-mode.txt') -Force | Out-Null
+    $nstoolFixture = Join-Path $temp 'nstool.exe'
+    & $runner -Runtime native -GamePath $baseNsp -UpdatePath $updateNsp -NstoolPath $nstoolFixture -NoLauncher
+    Assert-Runner ($capture.Process.Runtime -eq 'native') 'NSTool directory mode switched to legacy runtime.'
+    Assert-Runner ($capture.Process.RomFsDir -eq $extractedDir) 'NSTool patched RomFS directory not forwarded.'
+    Assert-Runner ([string]::IsNullOrEmpty($capture.Process.RomFsImage)) 'NSTool directory mode incorrectly forced a raw RomFS image.'
+    $receivedNstool = Get-Content -LiteralPath (Join-Path $temp 'received-nstool-path.txt') -Raw
+    Assert-Runner ($receivedNstool.Trim() -eq $nstoolFixture) 'NSTool executable override not passed to preparer.'
+    foreach ($name in $names) {
+        Assert-Runner ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name, 'Process'))) "Environment leaked after NSTool directory mode: $name"
     }
 
     Write-Host 'Native runner: default DLC, spaced path, native NSP update, profiler propagation and restoration passed.'
