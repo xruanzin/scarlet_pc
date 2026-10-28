@@ -379,6 +379,25 @@ GuestFn dispatch_lookup(uint64_t addr) {
     return NULL;
 }
 
+// Cheap address-only preflight for the native AOT dispatcher. The old path
+// marshalled all GPR/SIMD registers to Cpu before *every* AOT slice just to
+// discover that no HLE/override existed. A true result is only a candidate:
+// the caller still invokes rt_dispatch_host_lookup with a real Cpu, preserving
+// HLE profiling, recent-call diagnostics and override semantics.
+bool rt_dispatch_host_has_pc(uint64_t pc) {
+    if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE &&
+        (pc - HLE_BASE) / 16 < (uint64_t)hle_count)
+        return true;
+    if (!pc) return false;
+    unsigned h = override_hash(pc);
+    for (;;) {
+        uint64_t addr = override_table[h].addr;
+        if (addr == pc) return true;
+        if (!addr) return false;
+        h = (h + 1) & (OVERRIDE_TABLE - 1);
+    }
+}
+
 GuestFn rt_dispatch_host_lookup(Cpu *c, uint64_t pc) {
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
         rt_unwind_point();
