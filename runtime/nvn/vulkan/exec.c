@@ -20,6 +20,7 @@
 #include "vk.h"
 #include "scarlet_temporal.h"
 #include "scarlet_post_policy.h"
+#include "scarlet_rt_targets.h"
 #include "../renderer.h"
 #include "../../settings.h"
 
@@ -947,15 +948,7 @@ static void wait_built(_Atomic int *state, const char *kind, uint64_t code0, uin
 }
 
 // ================================================================== state
-typedef struct {
-    NvnTexture *color[8];
-    NvnTextureView cview[8];
-    uint8_t has_cview[8];
-    int ncolor;
-    NvnTexture *depth;
-    NvnTextureView dview;
-    uint8_t has_dview;
-} RtState;
+typedef ScarletRtState RtState;
 
 typedef struct { uint64_t addr, size; } Range;
 
@@ -5276,7 +5269,15 @@ static void exec_list(uint64_t handle, int depth) {
 
             static int always = -1;
             if (always < 0) always = getenv("LARECOMP_VK_PASS_RESTART") != NULL;
-            if (always || memcmp(&prev, &st.rt, sizeof prev)) st.rt_dirty = true;
+            if (always || !scarlet_rt_targets_equal(&prev, &st.rt)) {
+                st.rt_dirty = true;
+            } else if (memcmp(&prev, &st.rt, sizeof prev)) {
+                // Diagnostic proof that opaque/inactive view bytes would have
+                // restarted an otherwise identical Vulkan render target.
+                static unsigned redundant_view_updates;
+                if (++redundant_view_updates == 1)
+                    LOG("[vk] ignoring inactive NVN render-target view bytes (prevent redundant passes)\n");
+            }
             break;
         }
         case CMD_SET_VIEWPORTS:
