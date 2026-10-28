@@ -3427,9 +3427,50 @@ static void storage_stage_buffers(int stage, ShaderInfo *si, VkDescriptorBufferI
                         stage, si->storage_buffers, nm, si->writes_gmem);
 }
 
+// Reuse immutable descriptor sets for consecutive draws with identical bindings.
+// Scope to the recording slot AND timeline value: pools are reset on slot reuse.
+// Arrays (bindless surfaces) retain the existing path until keyed explicitly.
+typedef struct {
+    uint32_t binding, type, image;
+    uint64_t a, b, c;
+} ScarletDescriptorKey;
+typedef struct {
+    uint64_t seq;
+    int slot, count;
+    VkDescriptorSetLayout layout;
+    VkDescriptorSet ds;
+    ScarletDescriptorKey key[MAX_BIND];
+} ScarletStageDescriptors;
+static ScarletStageDescriptors stage_descriptors[3];
+
+static bool stage_descriptor_key(const VkWriteDescriptorSet *w, int n,
+                                  ScarletDescriptorKey key[MAX_BIND]) {
+    memset(key, 0, sizeof(ScarletDescriptorKey) * MAX_BIND);
+    for (int i = 0; i < n; ++i) {
+        if (w[i].descriptorCount != 1 || w[i].pNext ||
+            w[i].dstArrayElement || w[i].pTexelBufferView)
+            return false;
+        key[i].binding = w[i].dstBinding;
+        key[i].type = w[i].descriptorType;
+        if (w[i].pImageInfo) {
+            const VkDescriptorImageInfo *v = w[i].pImageInfo;
+            key[i].image = 1;
+            key[i].a = (uint64_t)(uintptr_t)v->sampler;
+            key[i].b = (uint64_t)(uintptr_t)v->imageView;
+            key[i].c = v->imageLayout;
+        } else if (w[i].pBufferInfo) {
+            const VkDescriptorBufferInfo *v = w[i].pBufferInfo;
+            key[i].a = (uint64_t)(uintptr_t)v->buffer;
+            key[i].b = v->offset;
+            key[i].c = v->range;
+        } else return false;
+    }
+    return true;
+}
+
 static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t set, int stage, ShaderInfo *si, const float *rscale_row0,
                                  const float tint[8], uint32_t gx, uint32_t gy, uint32_t gz, const VkDescriptorImageInfo *pre_ii) {
-    VkDescriptorSet ds = vk_alloc_set(layout);
+    VkDescriptorSet ds = VK_NULL_HANDLE;
     VkWriteDescriptorSet w[MAX_BIND];
     VkDescriptorBufferInfo bi[MAX_BIND];
     VkDescriptorImageInfo ii[MAX_BIND];
@@ -3498,7 +3539,31 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         w[n].pBufferInfo = &bi[n];
         n++;
     }
+    ScarletDescriptorKey key[MAX_BIND];
+    static int reuse = -1;
+    if (reuse < 0) {
+        const char *e = getenv("SCARLET_DESCRIPTOR_REUSE");
+        reuse = !e || atoi(e) != 0;
+    }
+    bool cacheable = reuse && stage_descriptor_key(w, n, key);
+    ScarletStageDescriptors *cached = &stage_descriptors[stage == 5 ? 2 : stage == 1 ? 1 : 0];
+    uint64_t seq = vk_pending_seq();
+    if (cacheable && cached->ds && cached->seq == seq &&
+        cached->slot == cur_sub && cached->layout == layout &&
+        cached->count == n && !memcmp(cached->key, key, (size_t)n * sizeof key[0]))
+        return cached->ds;
+
+    ds = vk_alloc_set(layout);
+    for (int i = 0; i < n; ++i) w[i].dstSet = ds;
     if (n) vkUpdateDescriptorSets(g_vk.dev, (uint32_t)n, w, 0, NULL);
+    if (cacheable) {
+        cached->seq = seq;
+        cached->slot = cur_sub;
+        cached->layout = layout;
+        cached->count = n;
+        cached->ds = ds;
+        memcpy(cached->key, key, (size_t)n * sizeof key[0]);
+    }
     return ds;
 }
 
