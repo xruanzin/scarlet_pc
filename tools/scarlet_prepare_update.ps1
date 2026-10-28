@@ -119,10 +119,22 @@ $hash = [Security.Cryptography.SHA256]::Create()
 try {
  $tag = ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity)))).Replace('-','').Substring(0,16).ToLowerInvariant()
 } finally { $hash.Dispose() }
-if (-not $OutputRoot) { $OutputRoot = Join-Path $repo ('build\native-update-cache\scarlet-' + $tag) }
+# Prefer D: for all native base+update builds on Windows. Keep a portable
+# fallback on hosts without D:, and continue honoring explicit -OutputRoot.
+$legacyOutputRoot = Join-Path $repo ('build\native-update-cache\scarlet-' + $tag)
+$usingDefaultD = $false
+if (-not $OutputRoot) {
+ if ($env:OS -eq 'Windows_NT' -and (Test-Path -LiteralPath 'D:\' -PathType Container)) {
+  $OutputRoot = Join-Path 'D:\ScarletNativeCache' ('scarlet-' + $tag)
+  $usingDefaultD = $true
+ } else {
+  $OutputRoot = $legacyOutputRoot
+ }
+}
 $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
 $work = $OutputRoot + '.work'
 $log = $OutputRoot + '.hactool.log'
+Write-Host "[native-update] Cache de preparacao: $OutputRoot" -ForegroundColor Cyan
 
 $expected = @{main=$expectedMain}
 if (-not $AotManifestPath -and $env:SCARLET_AOT_MANIFEST) { $AotManifestPath = $env:SCARLET_AOT_MANIFEST }
@@ -236,6 +248,31 @@ if (-not $Force -and (Test-Path -LiteralPath $metaPath -PathType Leaf)) {
 if (Test-Path -LiteralPath $OutputRoot) {
  if (-not $Force) { throw "Cache invalido em $OutputRoot. Confira antes de usar -Force." }
  Remove-Item -LiteralPath $OutputRoot -Recurse -Force
+}
+# If this is the first run after switching to D:, copy the previously
+# extracted NCAs from C: instead of extracting two NSPs again. Do not delete
+# the source: it remains a recovery copy until the user confirms success.
+# robocopy can resume a partially copied directory after interruption.
+if ($usingDefaultD -and (Test-Path -LiteralPath ($legacyOutputRoot + '.work') -PathType Container)) {
+ $oldWork = $legacyOutputRoot + '.work'
+ if (-not (Test-Path -LiteralPath $work -PathType Container)) {
+  $size = (Get-ChildItem -LiteralPath $oldWork -File -Recurse | Measure-Object -Property Length -Sum).Sum
+  if ($null -eq $size) { $size = 0 }
+  $drive = [IO.DriveInfo]::new('D:\')
+  if (-not $drive.IsReady) { throw 'A unidade D: nao esta pronta para receber o cache.' }
+  $needed = [long]$size + [long](8GB)
+  if ($drive.AvailableFreeSpace -lt $needed) {
+   throw ("Espaco insuficiente em D: para transferir o cache e extrair o RomFS: livre={0:N1} GiB, minimo estimado={1:N1} GiB. O cache original em C: foi preservado." -f ($drive.AvailableFreeSpace / 1GB),($needed / 1GB))
+  }
+ }
+ New-Item -ItemType Directory -Force -Path $work | Out-Null
+ Write-Host '[native-update] Transferindo NCAs existentes de C: para D: (preservando a copia original)...' -ForegroundColor Cyan
+ & robocopy.exe $oldWork $work /E /R:1 /W:1 /XJ /NFL /NDL /NJH /NJS /NP | Out-Null
+ $copyStatus = $LASTEXITCODE
+ if ($copyStatus -ge 8) {
+  throw "Transferencia do cache para D: falhou (robocopy exit $copyStatus). Copia em C: preservada. Verifique espaco livre/permissoes e execute novamente."
+ }
+ Write-Host '[native-update] NCAs reutilizados em D:.' -ForegroundColor Green
 }
 # Failed probes leave a .work directory. Keep already-extracted NCAs and retry
 # only the scanning/patching steps. Never delete an existing work directory.
