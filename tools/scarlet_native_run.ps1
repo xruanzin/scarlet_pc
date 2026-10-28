@@ -11,6 +11,7 @@ param(
     [string]$TitleKeysPath,
     [string]$HactoolPath,
     [string]$AotManifestPath,
+    [string]$UpdateCacheRoot,
 
     [ValidateRange(1, 32)]
     [int]$Jobs = 4,
@@ -74,6 +75,7 @@ if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
     if ($TitleKeysPath) { $prepareArgs.TitleKeysPath = $TitleKeysPath }
     if ($HactoolPath) { $prepareArgs.HactoolPath = $HactoolPath }
     if ($AotManifestPath) { $prepareArgs.AotManifestPath = $AotManifestPath }
+    if ($UpdateCacheRoot) { $prepareArgs.OutputRoot = $UpdateCacheRoot }
     $prepareJson = & (Join-Path $PSScriptRoot 'scarlet_prepare_update.ps1') @prepareArgs
     if (-not $prepareJson) { throw 'The native update preparation did not return an ExeFS/RomFS result.' }
     $packageMount = ($prepareJson | Select-Object -Last 1 | ConvertFrom-Json)
