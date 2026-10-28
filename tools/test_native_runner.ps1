@@ -19,7 +19,7 @@ if (-not $preparer.Contains('"--basenca=$baseNca","--exefsdir=$exeFs"')) {
 }
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('Scarlet Runner Test ' + [guid]::NewGuid())
 $capture = @{ Process = $null }
-$names = @('SCARLET_RUNTIME','SCARLET_UPSCALER','SCARLET_NATIVE_PROFILE','LARECOMP_NO_LAUNCHER',
+$names = @('SCARLET_RUNTIME','SCARLET_UPSCALER','SCARLET_GRAPHICS_REFERENCE','SCARLET_NATIVE_PROFILE','LARECOMP_NO_LAUNCHER',
     'LARECOMP_DATA_ROOT','SCARLET_AOT_DIR',
     'LARECOMP_HLE_PROF','LARECOMP_EXEFS_DIR','LARECOMP_ROMFS_DIR','LARECOMP_ROMFS_IMAGE',
     'LARECOMP_PACKAGE_STREAM','LARECOMP_PROF_SVC','LARECOMP_VK_PROF',
@@ -43,6 +43,7 @@ function Start-Process {
         DataRoot = $env:LARECOMP_DATA_ROOT
         AotDir = $env:SCARLET_AOT_DIR
         Upscaler = $env:SCARLET_UPSCALER
+        GraphicsReference = $env:SCARLET_GRAPHICS_REFERENCE
         Profile = $env:SCARLET_NATIVE_PROFILE
         Hle = $env:LARECOMP_HLE_PROF
         FrameCsv = $env:LARECOMP_FRAME_CSV
@@ -89,6 +90,15 @@ try {
     Assert-Runner ([Environment]::GetEnvironmentVariable('SCARLET_UPSCALER', 'Process') -eq 'test-before') 'Spatial mode leaked to parent.'
     & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -Upscaler current -NoLauncher
     Assert-Runner ($capture.Process.Upscaler -eq 'test-before') 'Current mode must honor the user''s existing setting.'
+
+    # A reference render must be isolated from the usual run and not change
+    # user environment on exit (including when other graphics flags are set).
+    & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -GraphicsReference -Upscaler fsr31 -NoLauncher
+    Assert-Runner ($capture.Process.GraphicsReference -eq '1') 'Guest reference presentation option not propagated.'
+    Assert-Runner ($capture.Process.Upscaler -eq 'fsr31') 'Reference mode must not mutate the user's upscaler selection.'
+    Assert-Runner ([Environment]::GetEnvironmentVariable('SCARLET_GRAPHICS_REFERENCE', 'Process') -eq 'test-before') 'Graphics reference mode leaked to parent.'
+    & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -NoLauncher
+    Assert-Runner ($capture.Process.GraphicsReference -eq 'test-before') 'Default run must honor previous reference-mode state.'
 
     # Explicit DLC support must be a declared array parameter, even with none supplied.
     $parameters = (Get-Command $runner).Parameters
