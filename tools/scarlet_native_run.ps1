@@ -6,6 +6,11 @@ param(
 
     [string]$GamePath,
     [string]$UpdatePath,
+    [string]$KeysPath,
+    [string]$HactoolPath,
+    [string]$CacheRoot,
+    [string]$AotManifest,
+    [string[]]$DlcPath = @(),
 
     [ValidateRange(1, 32)]
     [int]$Jobs = 4,
@@ -31,26 +36,15 @@ if ($Runtime -eq 'legacy') {
     exit $LASTEXITCODE
 }
 
-# The native loader already owns base ExeFS/RomFS, but Nintendo update NSPs
-# require BKTR/patch overlay semantics that have not been migrated yet. Never
-# ignore an explicitly requested update: preserve the known-working legacy
-# path until the native overlay service replaces it.
-if (-not [string]::IsNullOrWhiteSpace($UpdatePath) -or $DlcPath.Count) {
-    if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
-        Write-Warning 'Native BKTR/update overlay is not migrated yet; preserving update support through the legacy runtime for this launch.'
-    }
-    if ($DlcPath.Count) {
-        Write-Warning 'Native DLC content overlay is not migrated yet; preserving DLC support through the legacy runtime for this launch.'
-    }
-    $legacy = Join-Path $PSScriptRoot 'scarlet_independent_run.ps1'
-    $args = @{}
-    if (-not [string]::IsNullOrWhiteSpace($GamePath)) { $args.GamePath = $GamePath }
-    if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) { $args.UpdatePath = $UpdatePath }
-    if ($DlcPath.Count) { $args.DlcPath = $DlcPath }
-    & $legacy @args
+# DLC remains an explicit legacy fallback; base + update now prepares native content.
+if ($DlcPath.Count) {
+    Write-Warning 'DLC still uses the legacy runtime.'
+    $legacyArgs = @{ DlcPath=$DlcPath }
+    if ($GamePath) { $legacyArgs.GamePath=$GamePath }
+    if ($UpdatePath) { $legacyArgs.UpdatePath=$UpdatePath }
+    & (Join-Path $PSScriptRoot 'scarlet_independent_run.ps1') @legacyArgs
     exit $LASTEXITCODE
 }
-
 
 $exe = Join-Path $repoRoot 'build\native\ScarletPC.exe'
 if ($Build -or -not (Test-Path $exe -PathType Leaf)) {
@@ -64,7 +58,23 @@ $resolvedRoot = $GameRoot
 $packageMount = $null
 $packageMountPid = $null
 
-if (-not [string]::IsNullOrWhiteSpace($GamePath)) {
+if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
+    if (-not $GamePath) { throw 'Base + update requires -GamePath.' }
+    $prepareArgs=@{ PackagePath=$GamePath; UpdatePath=$UpdatePath }
+    if ($KeysPath) { $prepareArgs.KeysPath=$KeysPath }
+    if ($HactoolPath) { $prepareArgs.HactoolPath=$HactoolPath }
+    if ($CacheRoot) { $prepareArgs.CacheRoot=$CacheRoot }
+    if ($AotManifest) { $prepareArgs.AotManifest=$AotManifest }
+    $prepared=@(& (Join-Path $PSScriptRoot 'scarlet_prepare_update.ps1') @prepareArgs)
+    if (-not $prepared.Count) { throw 'Update preparation did not return a filesystem.' }
+    $resolvedRoot=[string]$prepared[-1]
+    $packageMount=[pscustomobject]@{
+        ExeFs=(Join-Path $resolvedRoot 'exefs')
+        RomFsDir=''
+        RomFsImage=(Join-Path $resolvedRoot 'romfs.bin')
+    }
+}
+elseif (-not [string]::IsNullOrWhiteSpace($GamePath)) {
     $resolvedGame = (Resolve-Path -LiteralPath $GamePath).Path
     if (Test-Path -LiteralPath $resolvedGame -PathType Container) {
         $resolvedRoot = $resolvedGame
@@ -75,7 +85,9 @@ if (-not [string]::IsNullOrWhiteSpace($GamePath)) {
             throw "Native runtime GamePath must be an extracted game directory, .nsp, or .xci: $resolvedGame"
         }
         Write-Host '[package] mounting base game directly (zero extraction)...' -ForegroundColor Cyan
-        $mountJson = & (Join-Path $PSScriptRoot 'scarlet_mount_package.ps1') -PackagePath $resolvedGame
+        $mountArgs=@{ PackagePath=$resolvedGame }
+        if ($KeysPath) { $mountArgs.KeysPath=$KeysPath }
+        $mountJson = & (Join-Path $PSScriptRoot 'scarlet_mount_package.ps1') @mountArgs
         if (-not $mountJson) {
             throw 'Base package mount failed.'
         }
@@ -94,6 +106,7 @@ elseif (Test-Path (Join-Path $repoRoot $GameRoot) -PathType Container) {
 $oldRuntime = $env:SCARLET_RUNTIME
 $oldProfile = $env:SCARLET_NATIVE_PROFILE
 $oldLauncher = $env:LARECOMP_NO_LAUNCHER
+$oldHleProfile = $env:LARECOMP_HLE_PROF
 $oldExeFs = $env:LARECOMP_EXEFS_DIR
 $oldRomFsDir = $env:LARECOMP_ROMFS_DIR
 $oldRomFsImage = $env:LARECOMP_ROMFS_IMAGE
@@ -130,7 +143,10 @@ try {
 
     $launch = @()
     if ($NoLauncher) { $launch += '--play' }
-    $launch += $resolvedRoot
+    # Start-Process joins ArgumentList; keep the selected path as one argument.
+    if ($resolvedRoot.Contains('"')) { throw 'Invalid quote in game path.' }
+    $quotedRoot = [regex]::Replace($resolvedRoot, '(\\+)$', '$1$1')
+    $launch += ('"' + $quotedRoot + '"')
 
     $p = Start-Process -FilePath $exe -ArgumentList $launch -WorkingDirectory $repoRoot -PassThru -Wait
     if ($p.ExitCode -ne 0) {
@@ -153,5 +169,5 @@ finally {
         Stop-Process -Id $packageMountPid -Force -ErrorAction SilentlyContinue
         try { Wait-Process -Id $packageMountPid -Timeout 5 -ErrorAction SilentlyContinue } catch {}
     }
-    if (-not $Profile) { Remove-Item Env:LARECOMP_HLE_PROF -ErrorAction SilentlyContinue }
+    if ($null -eq $oldHleProfile) { Remove-Item Env:LARECOMP_HLE_PROF -ErrorAction SilentlyContinue } else { $env:LARECOMP_HLE_PROF = $oldHleProfile }
 }

@@ -84,6 +84,17 @@ static void host_store_fast(void *user, uint64_t address, uint32_t size, uint64_
     scarlet_aot_note_store(address, size);
 }
 
+// Opt-in ABI diagnostics: select this callback once, never branch in normal loads.
+static uint64_t host_load_traced(void *user, uint64_t address, uint32_t size) {
+    static _Atomic unsigned samples;
+    uint64_t result = host_load_fast(user, address, size);
+    if (atomic_fetch_add_explicit(&samples, 1, memory_order_relaxed) < 32)
+        LOG("[native-memory] load va=%llx size=%u in-window=%d result=%llx\n",
+            (unsigned long long)address, size, guest_span(address, size),
+            (unsigned long long)result);
+    return result;
+}
+
 static uint64_t host_load_profiled(void *user, uint64_t address, uint32_t size) {
     atomic_fetch_add_explicit(&g_prof.loads, 1, memory_order_relaxed);
     return host_load_fast(user, address, size);
@@ -197,7 +208,8 @@ static ScarletAotHostMem host_bridge(Cpu *cpu) {
     ScarletAotHostMem h = {0};
     h.user = cpu;
     const bool prof = profile_enabled();
-    h.load = prof ? host_load_profiled : host_load_fast;
+    h.load = getenv("SCARLET_AOT_TRACE_MEMORY") ? host_load_traced :
+             (prof ? host_load_profiled : host_load_fast);
     h.store = prof ? host_store_profiled : host_store_fast;
     h.excl_load = host_excl_load;
     h.excl_store = host_excl_store;

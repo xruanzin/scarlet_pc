@@ -25,10 +25,13 @@ enum {
     SETUP_FAIL_COPY,        // disk full / unreadable files
     SETUP_FAIL_BUILD,       // the game code didn't build
     SETUP_FAIL_TOOLS,       // the generator / compiler are missing from this copy
+    SETUP_FAIL_AOT,         // native mode: the four existing AOT images are missing
 };
 
 // The game files in <data root>/extracted: ready to play (exefs, romfs.bin and game code built for this version).
 bool setup_ready(void);
+// Also used for an explicitly selected extracted root or mounted package.
+bool setup_ready_at(const char *root);
 // The game in that exefs/ folder: "Scarlet" or NULL.
 const char *game_name(const char *exefs);
 // Scarlet address-specific hooks are not enabled yet, so Scarlet currently reports GAME_BUILD_OTHER.

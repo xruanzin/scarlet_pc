@@ -141,7 +141,7 @@ static bool take(char *slot, char *out, size_t n) {
 // ------------------------------------------------------------------ the game files section
 static const ImVec4 k_green(0.45f, 0.85f, 0.50f, 1), k_red(1.0f, 0.45f, 0.40f, 1);
 
-static void game_files_section(SDL_Window *win) {
+static void game_files_section(SDL_Window *win, const char *root) {
     ImGui::SeparatorText(T("Game files", "Arquivos do jogo"));
     int st = setup_state();
     if (setup_running()) {
@@ -157,35 +157,33 @@ static void game_files_section(SDL_Window *win) {
                                     "Isso demora (de 10 a 30 minutos), só uma vez. O jogo fica liberado quando terminar."));
         return;
     }
-    bool ready = setup_ready();
+    bool ready = setup_ready_at(root);
     if (ready) {
-        const char *name = game_name("extracted/exefs");
-        ImGui::TextColored(k_green, g_pt ? "Pokémon: Let's Go, %s! - pronto para jogar" : "Pokémon: Let's Go, %s! - ready to play",
-                           name ? name : "Eevee");
+        ImGui::TextColored(k_green, "%s", T("Pokémon Scarlet - ready to play", "Pokémon Scarlet - pronto para jogar"));
         ImGui::SameLine();
         if (ImGui::SmallButton(T("Change...", "Trocar..."))) SDL_ShowOpenFolderDialog(picked_game, NULL, win, NULL, false);
         return;
     }
     if (st >= SETUP_FAIL_NOT_FOUND) {
         static const char *const en[] = {"No game files found in that folder.", "Those are packed game files (.xci / .nsp).",
-                                         "That's not Pokémon: Let's Go, Eevee! or Pikachu!.", "The files couldn't be copied.",
-                                         "The game code didn't build.", "The game code builder is missing from this copy."};
+                                         "That's not Pokémon Scarlet.", "The files couldn't be copied.",
+                                         "The game code didn't build.", "The game code builder is missing from this copy.", "The native AOT modules are missing."};
         static const char *const pt[] = {"Nenhum arquivo do jogo nessa pasta.", "Esses são arquivos do jogo empacotados (.xci / .nsp).",
-                                         "Isso não é o Pokémon: Let's Go, Eevee! nem o Pikachu!.", "Os arquivos não puderam ser copiados.",
-                                         "O código do jogo não compilou.", "O compilador do código do jogo não está nesta cópia."};
+                                         "Isso não é Pokémon Scarlet.", "Os arquivos não puderam ser copiados.",
+                                         "O código do jogo não compilou.", "O compilador do código do jogo não está nesta cópia.", "Os módulos AOT nativos não foram encontrados."};
         static const char *const en_h[] = {"Choose the folder that holds exefs and romfs.", "Extract them first (exefs and romfs).",
-                                           "Pick the folder of your own extracted Let's Go, Eevee! or Pikachu!.", "Check there are about 6 GB free and try again.",
-                                           "Check there are about 2 GB free and try again; details in lasrecomp.log.", "Download the release again."};
+                                           "Pick the folder of your own extracted Scarlet.", "Check there are about 6 GB free and try again.",
+                                           "Check there are about 2 GB free and try again; details in lasrecomp.log.", "Download the release again.", "Put scarlet-main/rtld/multimedia/sdk.dll in aot/ or set SCARLET_AOT_DIR."};
         static const char *const pt_h[] = {"Escolha a pasta que tem exefs e romfs.", "Extraia antes (exefs e romfs).",
-                                           "Escolha a pasta do seu Let's Go, Eevee! ou Pikachu! extraído.", "Confira se há uns 6 GB livres e tente de novo.",
-                                           "Confira se há uns 2 GB livres e tente de novo; detalhes no lasrecomp.log.", "Baixe a release de novo."};
+                                           "Escolha a pasta do seu Scarlet extraído.", "Confira se há uns 6 GB livres e tente de novo.",
+                                           "Confira se há uns 2 GB livres e tente de novo; detalhes no lasrecomp.log.", "Baixe a release de novo.", "Coloque scarlet-main/rtld/multimedia/sdk.dll em aot/ ou configure SCARLET_AOT_DIR."};
         int k = st - SETUP_FAIL_NOT_FOUND;
         ImGui::TextColored(k_red, "%s", T(en[k], pt[k]));
         ImGui::TextDisabled("%s", T(en_h[k], pt_h[k]));
     } else {
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
-        ImGui::TextUnformatted(T("Select the folder with your own extracted Pokémon: Let's Go, Eevee! or Pikachu! (exefs and romfs).",
-                                 "Selecione a pasta com o seu Pokémon: Let's Go, Eevee! ou Pikachu! extraído (exefs e romfs)."));
+        ImGui::TextUnformatted(T("Select the folder with your own extracted Pokémon: Scarlet (exefs and romfs).",
+                                 "Selecione a pasta com o seu Pokémon: Scarlet extraído (exefs e romfs)."));
         ImGui::PopTextWrapPos();
     }
     if (ImGui::Button(T("Select game folder...", "Selecionar pasta do jogo..."), ImVec2(-FLT_MIN, 0)))
@@ -194,7 +192,6 @@ static void game_files_section(SDL_Window *win) {
 
 // ------------------------------------------------------------------ the start screen
 extern "C" void launcher_lg_run(const char *root) {
-    (void)root;
     pick_language();
     ui_window_init();
     SDL_Window *win = ui_window();
@@ -249,7 +246,8 @@ extern "C" void launcher_lg_run(const char *root) {
             for (int i = 0; i < nmods; i++) if (!strcmp(mods[i], mod_install_name())) mod = i + 1;
         }
         last_install = inst;
-        bool ready = !setup_running() && setup_ready();
+        if (setup_state() == SETUP_DONE) root = "extracted";
+        bool ready = !setup_running() && setup_ready_at(root);
         if (autoplay && ready && inst != MOD_INSTALL_RUNNING) play = true;
         if (!vk_frame_begin(bg)) { SDL_Delay(16); continue; }
         if (keys_test && strchr(keys_test, ':') && frame == 5) {  // "<slot>:<key name>": the key pressed for the test
@@ -265,7 +263,7 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x / 2, io.DisplaySize.y / 2), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         ImGui::Begin(RT_APP_NAME, NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
                                             ImGuiWindowFlags_NoSavedSettings);
-        game_files_section(win);
+        game_files_section(win, root);
         ImGui::SeparatorText(T("Settings", "Configurações"));
         ImGui::PushItemWidth(420);
         ImGui::Combo(T("Resolution", "Resolução"), &res, g_pt ? res_pt : res_en, 5);

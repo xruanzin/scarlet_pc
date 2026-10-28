@@ -4,9 +4,16 @@ on:
   push:
     branches:
       - native/scarlet-runtime-migration
+      - native/aot-launcher-validation
   pull_request:
     paths:
       - 'runtime/scarlet_native/**'
+      - 'runtime/gamesetup.*'
+      - 'runtime/ui/**'
+      - 'tools/test_native_*'
+      - 'tools/fixtures/native_aot_dll.c'
+      - 'runtime/main.c'
+      - 'tools/gen.py'
       - 'runtime/nvn/vulkan/**'
       - 'runtime/kernel.c'
       - 'runtime/dispatch.c'
@@ -14,9 +21,27 @@ on:
       - 'runtime/rt.h'
       - 'Makefile'
       - 'tools/scarlet_native_*.ps1'
+      - 'tools/scarlet_prepare_update.ps1'
       - '.github/workflows/native-runtime-ci.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
+  windows-scripts:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse and exercise the native runner
+        shell: powershell
+        run: |
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_build.ps1 -Raw))
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_run.ps1 -Raw))
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_prepare_update.ps1 -Raw))
+          ./tools/test_native_runner.ps1
+          ./tools/test_native_update.ps1
+
   syntax:
     runs-on: ubuntu-latest
     steps:
@@ -36,6 +61,10 @@ jobs:
             runtime/scarlet_native/aot_execute.c \
             runtime/dispatch.c \
             runtime/kernel.c
+      - name: Execute native AOT loader and boundary regression tests
+        run: |
+          python3 tools/test_native_aot_loader.py
+          python3 tools/test_native_setup.py
       - name: Check pinned AOT layout header by itself
         run: |
           printf '#include "runtime/scarlet_native/aot_abi.h"\nint main(void){return 0;}\n' > /tmp/aot_abi_check.c
@@ -45,8 +74,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Initialize the native FidelityFX provider
+        run: git submodule update --init --recursive -- third_party/FSR-Vulkan
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -74,7 +103,36 @@ jobs:
             Write-Host "parsed $script"
           }
 
+      - name: Test native Windows runner without game files
+        shell: powershell
+        run: ./tools/test_native_runner.ps1
+
       - name: Build and link ScarletPC native runtime
         shell: msys2 {0}
         run: |
           make -j2 B=build/native-ci EXE_NAME=ScarletPC build/native-ci/ScarletPC.exe
+
+      - name: Exercise actual Windows DLL loading without game assets or GPU
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          mkdir -p build/native-ci/test-aot
+          clang -std=c11 -shared tools/fixtures/native_aot_dll.c -o build/native-ci/test-aot/fixture.dll
+          for module in rtld main multimedia sdk; do
+            cp build/native-ci/test-aot/fixture.dll "build/native-ci/test-aot/scarlet-${module}.dll"
+          done
+          export SCARLET_AOT_DIR="$(cygpath -aw build/native-ci/test-aot)"
+          ./build/native-ci/ScarletPC.exe --check-aot
+          clang -std=c11 -shared -DFIXTURE_ABI=5 tools/fixtures/native_aot_dll.c -o build/native-ci/test-aot/scarlet-main.dll
+          set +e
+          ./build/native-ci/ScarletPC.exe --check-aot
+          result=$?
+          set -e
+          test "$result" -eq 2
+          cp build/native-ci/test-aot/fixture.dll build/native-ci/test-aot/scarlet-main.dll
+          rm build/native-ci/test-aot/scarlet-sdk.dll
+          set +e
+          ./build/native-ci/ScarletPC.exe --check-aot
+          result=$?
+          set -e
+          test "$result" -eq 2
