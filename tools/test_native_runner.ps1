@@ -92,7 +92,7 @@ param([string]$BasePath,[string]$UpdatePath,[string]$KeysPath,[string]$HactoolPa
     Assert-Runner ($capture.Process.Runtime -eq 'native') 'NSP update was redirected to legacy.'
     Assert-Runner ($capture.Process.ExeFs -eq $patchedExeFs) 'Patched ExeFS not forwarded.'
     Assert-Runner ($capture.Process.RomFsImage -eq $patchedRomFs) 'Patched RomFS not forwarded.'
-    Assert-Runner ($capture.Process.PackageStream -eq '0') 'Cached update was treated as a streaming mount.'
+    Assert-Runner ([string]::IsNullOrEmpty($capture.Process.PackageStream)) 'Cached update should permit memory mapping.'
     foreach ($name in $names) {
         Assert-Runner ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name, 'Process'))) "Environment leaked after update: $name"
     }
