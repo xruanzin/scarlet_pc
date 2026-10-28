@@ -6,6 +6,7 @@ param(
  [string]$KeysPath = '',
  [string]$TitleKeysPath = '',
  [string]$HactoolPath = '',
+ [string]$NstoolPath = '',
  [string]$AotManifestPath = '',
  [string]$OutputRoot = '',
  [switch]$Force
@@ -111,6 +112,43 @@ function Find-Hactool([string]$requested) {
 }
 $keys = Find-Keys $KeysPath
 $hactool = Find-Hactool $HactoolPath
+
+# NSTool is a newer NCA reader with BKTR support. It is only obtained if
+# hactool fails on verified update NCAs. The release binary stays on D:.
+function Find-Nstool([string]$requested) {
+ $list = @($requested,$env:SCARLET_NSTOOL,
+  'D:\ScarletNativeCache\tools\nstool\nstool.exe',
+  (Join-Path $repo 'build\tools\nstool\nstool.exe'))
+ foreach ($p in $list) {
+  if ($p -and (Test-Path -LiteralPath $p -PathType Leaf)) {
+   return (Resolve-Path -LiteralPath $p).Path
+  }
+ }
+ $cmd = Get-Command 'nstool.exe' -ErrorAction SilentlyContinue
+ if ($cmd) { return $cmd.Source }
+ if ($env:OS -ne 'Windows_NT' -or -not (Test-Path -LiteralPath 'D:\' -PathType Container)) {
+  throw 'NSTool nao encontrado. Informe -NstoolPath para habilitar o fallback.'
+ }
+ $dir = 'D:\ScarletNativeCache\tools\nstool'
+ $zip = Join-Path $dir 'nstool-v1.9.2-win_x64.zip'
+ $unpacked = Join-Path $dir '.unpack'
+ $official = 'https://github.com/jakcron/nstool/releases/download/v1.9.2/nstool-v1.9.2-win_x64.zip'
+ try {
+  Write-Host '[native-update] Instalando NSTool v1.9.2 oficial no cache D: (fallback do hactool)...' -ForegroundColor Cyan
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  Invoke-WebRequest -UseBasicParsing -Uri $official -OutFile $zip -ErrorAction Stop
+  Expand-Archive -LiteralPath $zip -DestinationPath $unpacked -Force -ErrorAction Stop
+  $binary = Get-ChildItem -LiteralPath $unpacked -Recurse -File -Filter 'nstool.exe' | Select-Object -First 1
+  if (-not $binary) { throw 'A release oficial nao contem nstool.exe.' }
+  Copy-Item -LiteralPath $binary.FullName -Destination (Join-Path $dir 'nstool.exe') -Force
+  return (Join-Path $dir 'nstool.exe')
+ }
+ finally {
+  Remove-Item -LiteralPath $unpacked -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+ }
+}
 
 function File-Identity([string]$p) {
  $f = Get-Item -LiteralPath $p
