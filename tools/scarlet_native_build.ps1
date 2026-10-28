@@ -63,8 +63,19 @@ $args += (($exe -replace '\\','/'))
 
 Write-Host '=== Scarlet Native Runtime build ===' -ForegroundColor Magenta
 Write-Host ('make {0}' -f ($args -join ' ')) -ForegroundColor DarkGray
+# The compiler and linker may use TEMP/TMP independently of the -o path.
+# Keep their scratch files on the same D: volume as B=, and restore the
+# caller's environment even when an incremental build fails.
+$scratch = Join-Path $buildDir '.tmp'
+New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+$oldTemp = $env:TEMP
+$oldTmp = $env:TMP
+$oldTmpDir = $env:TMPDIR
 Push-Location $repoRoot
 try {
+    $env:TEMP = $scratch
+    $env:TMP = $scratch
+    $env:TMPDIR = ($scratch -replace '\\','/')
     & $make.Source @args
     if ($LASTEXITCODE -ne 0) {
         throw "Native runtime build failed with exit code $LASTEXITCODE"
@@ -72,6 +83,9 @@ try {
 }
 finally {
     Pop-Location
+    if ($null -eq $oldTemp) { Remove-Item Env:TEMP -ErrorAction SilentlyContinue } else { $env:TEMP = $oldTemp }
+    if ($null -eq $oldTmp) { Remove-Item Env:TMP -ErrorAction SilentlyContinue } else { $env:TMP = $oldTmp }
+    if ($null -eq $oldTmpDir) { Remove-Item Env:TMPDIR -ErrorAction SilentlyContinue } else { $env:TMPDIR = $oldTmpDir }
 }
 
 if (-not (Test-Path $exe -PathType Leaf)) {
