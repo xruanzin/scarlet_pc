@@ -47,6 +47,7 @@ jobs:
           ./tools/test_native_nca_hash.ps1
           ./tools/test_native_nsp_cache.ps1
           ./tools/test_native_runner.ps1
+          ./tools/test_native_prepared_boot.ps1
 
   syntax:
     runs-on: ubuntu-latest
@@ -111,7 +112,8 @@ jobs:
             'tools/test_native_d_only.ps1',
             'tools/test_native_nca_hash.ps1',
             'tools/test_native_titlekeys.ps1',
-            'tools/test_native_nsp_cache.ps1'
+            'tools/test_native_nsp_cache.ps1',
+            'tools/test_native_prepared_boot.ps1'
           )
           foreach ($script in $scripts) {
             [void][ScriptBlock]::Create((Get-Content -LiteralPath $script -Raw))
@@ -137,6 +139,10 @@ jobs:
       - name: Test native Windows runner without game files
         shell: powershell
         run: ./tools/test_native_runner.ps1
+
+      - name: Verify prepared native game boots without keys or NCA tools
+        shell: powershell
+        run: ./tools/test_native_prepared_boot.ps1
 
       - name: Build and link ScarletPC native runtime
         shell: msys2 {0}
