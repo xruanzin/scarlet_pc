@@ -68,6 +68,11 @@ jobs:
             runtime/scarlet_native/aot_execute.c \
             runtime/dispatch.c \
             runtime/kernel.c
+      - name: Verify fidelity-oriented Vulkan post-processing policy
+        run: |
+          clang -std=c11 -Wall -Wextra -Werror -o /tmp/scarlet-post-policy tools/test_native_post_policy.c
+          /tmp/scarlet-post-policy
+
       - name: Execute native AOT loader and boundary regression tests
         run: |
           python3 tools/test_native_aot_loader.py
