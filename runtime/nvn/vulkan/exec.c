@@ -19,6 +19,7 @@
 #include "../indirect.h"
 #include "vk.h"
 #include "scarlet_temporal.h"
+#include "scarlet_post_policy.h"
 #include "../renderer.h"
 #include "../../settings.h"
 
@@ -4956,17 +4957,19 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
 // size in the window (its crop is drawn into the viewport).
 static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, double oh_d, bool temporal_output) {
     VkImageView v = raw_view(b);
-    // FSR3/FSR4/DLSS already reconstructed and anti-aliased the guest image.
-    // Applying our post-SMAA or spatial FSR1 again destroys temporal detail,
-    // sharpness and can alter material colours. Only skip them when the
-    // native temporal path returned a real output surface; on failure the
-    // old SMAA/FSR1 fallback remains available unchanged.
-    bool smaa = !temporal_output && g_settings.antialias == AA_SMAA && getenv("LARECOMP_NO_SMAA") == NULL;
+    // The policy is shared with a standalone regression test. A temporal
+    // frame bypasses both spatial passes; a returned source texture keeps
+    // SMAA/FSR1 intact even if temporal reconstruction was requested.
     uint32_t ow = (uint32_t)lround(ow_d), oh = (uint32_t)lround(oh_d);
     if (ow > 16384) ow = 16384;
     if (oh > 16384) oh = 16384;
-    bool fsr = !temporal_output && g_settings.upscaler == UPSCALE_FSR1 &&
-               (ow > b->width + 1 || oh > b->height + 1); // upscale only
+    ScarletPostPasses post = scarlet_post_passes(
+        temporal_output,
+        g_settings.antialias == AA_SMAA && getenv("LARECOMP_NO_SMAA") == NULL,
+        g_settings.upscaler == UPSCALE_FSR1,
+        ow > b->width + 1 || oh > b->height + 1);
+    bool smaa = post.smaa;
+    bool fsr = post.fsr1;
     if (temporal_output) {
         static bool logged;
         if (!logged) {
