@@ -90,7 +90,8 @@ if ($AotManifestPath) {
  if ($manifest.PSObject.Properties.Name -contains 'modules') {
  foreach ($entry in @($manifest.modules)) {
   if (-not $entry) { continue }
-  $name = [string]$entry.name
+  $name = ''
+  if ($entry.PSObject.Properties.Name -contains 'name') { $name = [string]$entry.name }
   if ($entry.PSObject.Properties.Name -contains 'module') { $name = [string]$entry.module }
   $name = $name.ToLowerInvariant()
   if ($name -eq 'image') { $name='main' }
