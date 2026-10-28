@@ -128,7 +128,13 @@ try {
         $env:LARECOMP_EXEFS_DIR = [string]$packageMount.ExeFs
         $env:LARECOMP_ROMFS_DIR = [string]$packageMount.RomFsDir
         $env:LARECOMP_ROMFS_IMAGE = [string]$packageMount.RomFsImage
-        $env:LARECOMP_PACKAGE_STREAM = if ($packageMount.PSObject.Properties.Name -contains 'CacheRoot') { '0' } else { '1' }
+        if ($packageMount.PSObject.Properties.Name -contains 'CacheRoot') {
+            # An extracted/patched image can be memory-mapped; existence of this
+            # variable (even '0') forces the native FS into streaming mode.
+            Remove-Item Env:LARECOMP_PACKAGE_STREAM -ErrorAction SilentlyContinue
+        } else {
+            $env:LARECOMP_PACKAGE_STREAM = '1'
+        }
         Write-Host ("[package] ExeFS: {0}" -f $env:LARECOMP_EXEFS_DIR) -ForegroundColor DarkGray
         Write-Host ("[package] RomFS: {0}" -f $env:LARECOMP_ROMFS_IMAGE) -ForegroundColor DarkGray
     }
