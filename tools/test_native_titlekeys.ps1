@@ -79,6 +79,15 @@ try {
  $generated = Join-Path $tempHome '.switch\title.keys'
  Assert-TitleKeys (Test-Path -LiteralPath $generated -PathType Leaf) 'Expected hactool HOME/.switch/title.keys.'
  Assert-TitleKeys ((Get-Content -LiteralPath $generated -Raw) -match $rights) 'Temporary keys file malformed.'
+ # On a full C: system drive, the native preparer keeps its ephemeral key HOME
+ # on the same volume as the D: NCA cache.
+ $cacheHome = New-ScarletTemporaryKeyHome -Keys $local -BaseDirectory $testRoot
+ try {
+  Assert-TitleKeys ($cacheHome.StartsWith($testRoot,[StringComparison]::OrdinalIgnoreCase)) 'Key HOME was not relocated.'
+  Assert-TitleKeys (Test-Path -LiteralPath (Join-Path $cacheHome '.switch\title.keys') -PathType Leaf) 'Relocated keys not written.'
+ } finally {
+  Remove-Item -LiteralPath $cacheHome -Recurse -Force -ErrorAction SilentlyContinue
+ }
 
  # Personalized ticket type=1: do not try to use its RSA title key block.
  $ticket[0x281] = 1
