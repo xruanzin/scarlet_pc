@@ -84,9 +84,9 @@ try {
     & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -Upscaler fsr31 -NoLauncher
     Assert-Runner ($capture.Process.Upscaler -eq 'fsr31') 'FSR 3.1 mode not propagated.'
     Assert-Runner ([Environment]::GetEnvironmentVariable('SCARLET_UPSCALER', 'Process') -eq 'test-before') 'FSR upscaler leaked to parent.'
-    & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -Upscaler off -NoLauncher
-    Assert-Runner ($capture.Process.Upscaler -eq 'off') 'Native upscaler off mode not propagated.'
-    Assert-Runner ([Environment]::GetEnvironmentVariable('SCARLET_UPSCALER', 'Process') -eq 'test-before') 'Off mode leaked to parent.'
+    & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -Upscaler spatial -NoLauncher
+    Assert-Runner ($capture.Process.Upscaler -eq 'spatial') 'Native spatial mode not propagated.'
+    Assert-Runner ([Environment]::GetEnvironmentVariable('SCARLET_UPSCALER', 'Process') -eq 'test-before') 'Spatial mode leaked to parent.'
     & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -Upscaler current -NoLauncher
     Assert-Runner ($capture.Process.Upscaler -eq 'test-before') 'Current mode must honor the user's existing setting.'
 
@@ -112,7 +112,7 @@ try {
     New-Item -ItemType Directory -Force -Path $patchedExeFs | Out-Null
     New-Item -ItemType File -Force -Path $patchedRomFs | Out-Null
     $fakePrepare = Join-Path $temp 'tools\scarlet_prepare_update.ps1'
-    @'
+    $fixturePrepare = @'
 param([string]$BasePath,[string]$UpdatePath,[string]$KeysPath,[string]$TitleKeysPath,[string]$HactoolPath,[string]$NstoolPath,[string]$AotManifestPath,[string]$OutputRoot)
 $root = Split-Path $PSScriptRoot -Parent
 if ($OutputRoot) { Set-Content -LiteralPath (Join-Path $root 'received-cache-root.txt') -Value $OutputRoot }
@@ -126,7 +126,8 @@ $directory = if ($directoryMode) { Join-Path $root 'patched\romfs' } else { '' }
     RomFsDir = $directory
     CacheRoot = 'synthetic-update-cache'
 } | ConvertTo-Json -Compress
-'@ | Set-Content -LiteralPath $fakePrepare -Encoding UTF8
+'@
+    $fixturePrepare | Set-Content -LiteralPath $fakePrepare -Encoding UTF8
 
     & $runner -BuildRoot $mockBuild -Runtime native -GamePath $baseNsp -UpdatePath $updateNsp -NoLauncher
     Assert-Runner ($capture.Process.Runtime -eq 'native') 'NSP update was redirected to legacy.'
