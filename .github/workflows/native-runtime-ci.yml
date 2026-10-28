@@ -37,6 +37,7 @@ jobs:
         run: |
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_build.ps1 -Raw))
           [void][ScriptBlock]::Create((Get-Content tools/scarlet_native_run.ps1 -Raw))
+          [void][ScriptBlock]::Create((Get-Content tools/scarlet_prepare_update.ps1 -Raw))
           ./tools/test_native_runner.ps1
 
   syntax:
@@ -93,7 +94,8 @@ jobs:
         run: |
           $scripts = @(
             'tools/scarlet_native_build.ps1',
-            'tools/scarlet_native_run.ps1'
+            'tools/scarlet_native_run.ps1',
+            'tools/scarlet_prepare_update.ps1'
           )
           foreach ($script in $scripts) {
             [void][ScriptBlock]::Create((Get-Content -LiteralPath $script -Raw))
