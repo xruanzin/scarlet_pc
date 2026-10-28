@@ -343,7 +343,32 @@ function Run-Hactool([string[]]$arguments, [bool]$allowFailure=$false, [string]$
  try {
   $ErrorActionPreference = 'Continue'
   if ($script:ticketHome) { $env:HOME = $script:ticketHome }
-  $output = @(& $hactool @arguments 2>&1)
+  # hactool 1.4 accepts scalar AES keys, not the console RSA blobs.
+  # Normalize a private per-call copy; never rewrite the user's key file.
+  $compatKeys = Join-Path $work ('hactool-keys-' + [guid]::NewGuid() + '.keys')
+  $compatLines = @()
+  foreach ($line in (Get-Content -LiteralPath $keys)) {
+   if ($line -match '^\s*([^#;=\s]+)\s*=\s*([^#;]*)') {
+    $keyName=$Matches[1]; $keyValue=$Matches[2].Trim()
+    $keyValue=$keyValue -replace '^0[xX]', ''
+    if ($keyValue -match '^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{64})$') {
+     $compatLines += "$keyName = $keyValue"
+    }
+   }
+  }
+  if (-not $compatLines.Count) { throw 'Nenhuma chave AES valida encontrada no prod.keys informado.' }
+  try {
+   [IO.File]::WriteAllLines($compatKeys, [string[]]$compatLines, [Text.Encoding]::ASCII)
+   $compatArguments=@($arguments)
+   for ($ki=0; $ki -lt $compatArguments.Count-1; $ki++) {
+    if ($compatArguments[$ki] -eq '-k') { $compatArguments[$ki+1]=$compatKeys }
+   }
+   $output = @(& $hactool @compatArguments 2>&1)
+   $nativeKeyExit=$LASTEXITCODE
+  } finally {
+   Remove-Item -LiteralPath $compatKeys -Force -ErrorAction SilentlyContinue
+  }
+  $global:LASTEXITCODE=$nativeKeyExit
   $code = $LASTEXITCODE
  } finally {
   $ErrorActionPreference = $old
