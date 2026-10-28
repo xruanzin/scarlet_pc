@@ -53,6 +53,21 @@ void scarlet_temporal_observe(NvnTexture *const color[8],
         df != VK_FORMAT_D32_SFLOAT_S8_UINT)
         return;
 
+    // Observe the actual depth and MRT formats before claiming temporal
+    // reconstruction is available. Native NVN can map the game's D24S8
+    // attachment to Vulkan D32_SFLOAT_S8_UINT on some host formats.
+    // An unknown format must *not* be guessed to contain motion.
+    static unsigned diagnostic_count;
+    if (diagnostic_count < 12 && ncolor >= 2 && color[0] && color[1] &&
+        same_extent(depth, color[0]) && same_extent(depth, color[1])) {
+        VkFormat f0 = vk_attachment_format(color[0], &cview[0], has_cview[0] != 0);
+        VkFormat f1 = vk_attachment_format(color[1], &cview[1], has_cview[1] != 0);
+        LOG("[scarlet-temporal] candidate depth=%d (NVN %#x) RT0=%d (NVN %#x) RT1=%d (NVN %#x) size=%ux%u\n",
+            (int)df, depth->format, (int)f0, color[0]->format, (int)f1, color[1]->format,
+            depth->width, depth->height);
+        diagnostic_count++;
+    }
+
     // Observed Scarlet scene path: D24S8 + RT0/RT1 RGBA16F, same guest
     // extent. RT1 is the temporal/velocity target. Keep this rule ahead of
     // generic RG motion-vector formats because Scarlet's velocity buffer is
@@ -61,7 +76,12 @@ void scarlet_temporal_observe(NvnTexture *const color[8],
         same_extent(depth, color[0]) && same_extent(depth, color[1])) {
         VkFormat f0 = vk_attachment_format(color[0], &cview[0], has_cview[0] != 0);
         VkFormat f1 = vk_attachment_format(color[1], &cview[1], has_cview[1] != 0);
-        if (df == VK_FORMAT_D24_UNORM_S8_UINT &&
+        // 0x35/0x36 guest D24S8 attachments are converted to D32S8 by
+        // textures.c, so the strict D24-only check silently missed the exact
+        // Scarlet signature needed by FSR3 on AMD Vulkan.
+        const bool depth_stencil = df == VK_FORMAT_D24_UNORM_S8_UINT ||
+                                   df == VK_FORMAT_D32_SFLOAT_S8_UINT;
+        if (depth_stencil &&
             f0 == VK_FORMAT_R16G16B16A16_SFLOAT &&
             f1 == VK_FORMAT_R16G16B16A16_SFLOAT) {
             select_pair(depth, color[1], "scarlet-rgba16-rt1");
