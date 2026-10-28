@@ -329,6 +329,10 @@ if ($allTitleKeys.Count -gt 0) {
 if ($tickets.PersonalizedCount -gt 0) {
  Write-Warning "[native-update] $($tickets.PersonalizedCount) ticket(s) personalizado(s) detectado(s); esses tickets nao podem ser importados automaticamente."
 }
+if ($tickets.UnsupportedCount -gt 0) {
+ Write-Warning ("[native-update] {0} arquivo(s) .tik com assinatura nao reconhecida; ignorados com seguranca." -f $tickets.UnsupportedCount)
+}
+Write-Host ("[native-update] Tickets locais analisados: {0}; validos comuns: {1}; personalizados: {2}; assinatura desconhecida: {3}." -f $tickets.TicketCount,$tickets.Keys.Count,$tickets.PersonalizedCount,$tickets.UnsupportedCount) -ForegroundColor DarkGray
 
 function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
  $ncas = @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.nca' | Sort-Object Length -Descending)
