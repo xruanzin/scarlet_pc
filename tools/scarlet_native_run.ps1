@@ -8,6 +8,7 @@ param(
     [string]$UpdatePath,
     [string[]]$DlcPath = @(),
     [string]$KeysPath,
+    [string]$TitleKeysPath,
     [string]$HactoolPath,
     [string]$AotManifestPath,
 
@@ -70,6 +71,7 @@ if (-not [string]::IsNullOrWhiteSpace($UpdatePath)) {
         UpdatePath = $UpdatePath
     }
     if ($KeysPath) { $prepareArgs.KeysPath = $KeysPath }
+    if ($TitleKeysPath) { $prepareArgs.TitleKeysPath = $TitleKeysPath }
     if ($HactoolPath) { $prepareArgs.HactoolPath = $HactoolPath }
     if ($AotManifestPath) { $prepareArgs.AotManifestPath = $AotManifestPath }
     $prepareJson = & (Join-Path $PSScriptRoot 'scarlet_prepare_update.ps1') @prepareArgs
