@@ -20,6 +20,7 @@ if (-not $preparer.Contains('"--basenca=$baseNca","--exefsdir=$exeFs"')) {
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('Scarlet Runner Test ' + [guid]::NewGuid())
 $capture = @{ Process = $null }
 $names = @('SCARLET_RUNTIME','SCARLET_UPSCALER','SCARLET_NATIVE_PROFILE','LARECOMP_NO_LAUNCHER',
+    'LARECOMP_DATA_ROOT','SCARLET_AOT_DIR',
     'LARECOMP_HLE_PROF','LARECOMP_EXEFS_DIR','LARECOMP_ROMFS_DIR','LARECOMP_ROMFS_IMAGE',
     'LARECOMP_PACKAGE_STREAM','LARECOMP_PROF_SVC','LARECOMP_VK_PROF',
     'LARECOMP_COMMAND_COUNTS','LARECOMP_FRAME_CSV')
@@ -39,6 +40,8 @@ function Start-Process {
         Arguments = @($ArgumentList)
         Directory = $WorkingDirectory
         Runtime = $env:SCARLET_RUNTIME
+        DataRoot = $env:LARECOMP_DATA_ROOT
+        AotDir = $env:SCARLET_AOT_DIR
         Upscaler = $env:SCARLET_UPSCALER
         Profile = $env:SCARLET_NATIVE_PROFILE
         Hle = $env:LARECOMP_HLE_PROF
@@ -59,11 +62,14 @@ try {
     New-Item -ItemType File -Path (Join-Path $temp 'build\native\ScarletPC.exe') | Out-Null
     $runner = Join-Path $temp 'tools\scarlet_native_run.ps1'
     Copy-Item -LiteralPath $source -Destination $runner
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'scarlet_native_paths.ps1') -Destination (Join-Path $temp 'tools\scarlet_native_paths.ps1')
+    $mockBuild = Join-Path $temp 'build\native'
 
     foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, 'test-before', 'Process') }
-    & $runner -Runtime native -GamePath $game -Profile -NoLauncher
+    & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -Profile -NoLauncher
     Assert-Runner ($null -ne $capture.Process) 'Runner did not reach process creation.'
     Assert-Runner ($capture.Process.Runtime -eq 'native') 'Wrong runtime selected.'
+    Assert-Runner ($capture.Process.Directory -eq $mockBuild) 'Native runtime must start from the build directory, not the C checkout.'
     Assert-Runner ($capture.Process.Profile -eq '1' -and $capture.Process.Hle -eq '1') 'Profiling was not enabled in child environment.'
     Assert-Runner ($capture.Process.Arguments.Count -eq 2) 'Unexpected process arguments.'
     Assert-Runner ($capture.Process.Arguments[0] -eq '--play') 'NoLauncher was ignored.'
@@ -75,13 +81,13 @@ try {
 
     # A/B image-quality testing must change the native child configuration
     # without leaking the override into the user's next launch.
-    & $runner -Runtime native -GamePath $game -Upscaler fsr31 -NoLauncher
+    & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -Upscaler fsr31 -NoLauncher
     Assert-Runner ($capture.Process.Upscaler -eq 'fsr31') 'FSR 3.1 mode not propagated.'
     Assert-Runner ([Environment]::GetEnvironmentVariable('SCARLET_UPSCALER', 'Process') -eq 'test-before') 'FSR upscaler leaked to parent.'
-    & $runner -Runtime native -GamePath $game -Upscaler off -NoLauncher
+    & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -Upscaler off -NoLauncher
     Assert-Runner ($capture.Process.Upscaler -eq 'off') 'Native upscaler off mode not propagated.'
     Assert-Runner ([Environment]::GetEnvironmentVariable('SCARLET_UPSCALER', 'Process') -eq 'test-before') 'Off mode leaked to parent.'
-    & $runner -Runtime native -GamePath $game -Upscaler current -NoLauncher
+    & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -Upscaler current -NoLauncher
     Assert-Runner ($capture.Process.Upscaler -eq 'test-before') 'Current mode must honor the user's existing setting.'
 
     # Explicit DLC support must be a declared array parameter, even with none supplied.
@@ -91,7 +97,8 @@ try {
 
     # With no previous value, finally must remove the temporary profiler variables.
     foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }
-    & $runner -Runtime native -GameRoot $game -Profile -NoLauncher
+    & $runner -BuildRoot $mockBuild -Runtime native -GameRoot $game -Profile -NoLauncher
+    Assert-Runner ($capture.Process.DataRoot -eq $mockBuild) 'Native data must default to build volume, not C.'
     foreach ($name in $names) {
         Assert-Runner ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name, 'Process'))) "Environment not removed: $name"
     }
@@ -121,7 +128,7 @@ $directory = if ($directoryMode) { Join-Path $root 'patched\romfs' } else { '' }
 } | ConvertTo-Json -Compress
 '@ | Set-Content -LiteralPath $fakePrepare -Encoding UTF8
 
-    & $runner -Runtime native -GamePath $baseNsp -UpdatePath $updateNsp -NoLauncher
+    & $runner -BuildRoot $mockBuild -Runtime native -GamePath $baseNsp -UpdatePath $updateNsp -NoLauncher
     Assert-Runner ($capture.Process.Runtime -eq 'native') 'NSP update was redirected to legacy.'
     Assert-Runner ($capture.Process.ExeFs -eq $patchedExeFs) 'Patched ExeFS not forwarded.'
     Assert-Runner ($capture.Process.RomFsImage -eq $patchedRomFs) 'Patched RomFS not forwarded.'
@@ -132,7 +139,7 @@ $directory = if ($directoryMode) { Join-Path $root 'patched\romfs' } else { '' }
     # Redirected cache must forward the selected path without changing
     # runtime selection or leaking environment variables.
     $alternateCache = Join-Path $temp 'other drive\scarlet-cache'
-    & $runner -Runtime native -GamePath $baseNsp -UpdatePath $updateNsp -UpdateCacheRoot $alternateCache -NoLauncher
+    & $runner -BuildRoot $mockBuild -Runtime native -GamePath $baseNsp -UpdatePath $updateNsp -UpdateCacheRoot $alternateCache -NoLauncher
     $received = Get-Content -LiteralPath (Join-Path $temp 'received-cache-root.txt') -Raw
     Assert-Runner ($received.Trim() -eq $alternateCache) 'Relocated NSP update cache root was not forwarded.'
     Assert-Runner ($capture.Process.Runtime -eq 'native') 'Relocated NSP update switched runtime.'
@@ -147,7 +154,7 @@ $directory = if ($directoryMode) { Join-Path $root 'patched\romfs' } else { '' }
     New-Item -ItemType Directory -Path $extractedDir -Force | Out-Null
     New-Item -ItemType File -Path (Join-Path $temp 'directory-mode.txt') -Force | Out-Null
     $nstoolFixture = Join-Path $temp 'nstool.exe'
-    & $runner -Runtime native -GamePath $baseNsp -UpdatePath $updateNsp -NstoolPath $nstoolFixture -NoLauncher
+    & $runner -BuildRoot $mockBuild -Runtime native -GamePath $baseNsp -UpdatePath $updateNsp -NstoolPath $nstoolFixture -NoLauncher
     Assert-Runner ($capture.Process.Runtime -eq 'native') 'NSTool directory mode switched to legacy runtime.'
     Assert-Runner ($capture.Process.RomFsDir -eq $extractedDir) 'NSTool patched RomFS directory not forwarded.'
     Assert-Runner ([string]::IsNullOrEmpty($capture.Process.RomFsImage)) 'NSTool directory mode incorrectly forced a raw RomFS image.'
