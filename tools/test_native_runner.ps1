@@ -3,6 +3,20 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $source = Join-Path $PSScriptRoot 'scarlet_native_run.ps1'
+# Regression: update ExeFS identification must not require a base NCA.
+# Use --basenca for the final BKTR RomFS reconstruction only.
+$preparer = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'scarlet_prepare_update.ps1') -Raw
+$scanStart = $preparer.IndexOf('function Find-ProgramNca(')
+$scanEnd = $preparer.IndexOf([Environment]::NewLine + 'try {', $scanStart)
+if ($scanEnd -lt 0) { $scanEnd = $preparer.IndexOf([char]10 + 'try {', $scanStart) }
+if ($scanStart -lt 0 -or $scanEnd -lt 0) { throw 'Native NCA scanner not found.' }
+$scanCode = $preparer.Substring($scanStart, $scanEnd - $scanStart)
+if ($scanCode.Contains('$hactoolArgs += "--basenca=$baseNca"')) {
+    throw 'Do not use --basenca during Program NCA identification.'
+}
+if (-not $preparer.Contains('"--basenca=$baseNca","--exefsdir=$exeFs"')) {
+    throw 'Expected --basenca during final BKTR RomFS assembly.'
+}
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('Scarlet Runner Test ' + [guid]::NewGuid())
 $capture = @{ Process = $null }
 $names = @('SCARLET_RUNTIME','SCARLET_NATIVE_PROFILE','LARECOMP_NO_LAUNCHER',
