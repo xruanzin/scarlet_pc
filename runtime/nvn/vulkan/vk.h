@@ -64,7 +64,14 @@ VkCommandBuffer vk_cmd(void);         // current command buffer (outside any ren
 VkCommandBuffer vk_upload_cmd(void);  // upload command buffer of the pending submission
 uint64_t vk_pending_seq(void);        // number the pending submission will get
 uint64_t vk_completed_seq(void);
+typedef enum {
+    SCARLET_WAIT_EXTERNAL, SCARLET_WAIT_COMMAND_SLOT, SCARLET_WAIT_TRANSIENT,
+    SCARLET_WAIT_READBACK, SCARLET_WAIT_HEAP_IMPORT, SCARLET_WAIT_FRAME_SLOT,
+    SCARLET_WAIT_PRESENT_COPY, SCARLET_WAIT_GUEST_FENCE, SCARLET_WAIT_FINISH,
+    SCARLET_WAIT_TF_DEBUG, SCARLET_WAIT_COUNT
+} ScarletWaitReason;
 void vk_wait_seq(uint64_t seq);
+void vk_wait_seq_for(uint64_t seq, ScarletWaitReason reason);
 void vk_full_barrier(VkCommandBuffer cb);
 void vk_end_pass(void);
 void vk_big_lock(void);    // serializes renderer recording / present across threads (exec.c)

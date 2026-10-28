@@ -18,6 +18,7 @@
 #include "storage_ranges.h"
 #include "../indirect.h"
 #include "vk.h"
+#include "completion_cache.h"
 #include "scarlet_temporal.h"
 #include "scarlet_post_policy.h"
 #include "scarlet_fidelity.h"
@@ -124,22 +125,41 @@ static int queue_batch_limit(void) {
     return n;
 }
 
+static ScarletCompletionCache completed_cache;
+static _Atomic uint64_t wait_calls[SCARLET_WAIT_COUNT], wait_time[SCARLET_WAIT_COUNT];
+static const char *wait_names[SCARLET_WAIT_COUNT] = {
+    "external", "command-slot", "transient", "readback", "heap-import",
+    "frame-slot", "present-copy", "guest-fence", "finish", "tf-debug"
+};
+
 uint64_t vk_completed_seq(void) {
     uint64_t v = 0;
-    vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &v);
+    VK_CHECK(vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &v));
+    scarlet_completion_publish(&completed_cache, v);
     return v;
 }
 
-void vk_wait_seq(uint64_t seq) {
-    if (!seq) return;
-    VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_vk.timeline,
-                              .pValues = &seq};
+void vk_wait_seq_for(uint64_t seq, ScarletWaitReason reason) {
+    if (!seq || scarlet_completion_covers(&completed_cache, seq)) return;
+    VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+        .semaphoreCount = 1, .pSemaphores = &g_vk.timeline, .pValues = &seq};
     uint64_t t0 = SDL_GetTicksNS();
     VkResult r = vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
-    stat_wait_ns += SDL_GetTicksNS() - t0;
-    cum_wait += SDL_GetTicksNS() - t0;
-    if (r == VK_TIMEOUT) LOG("[vk] GPU did not finish submission %llu within 10 s (device lost?)\n", (unsigned long long)seq);
-    else if (r != VK_SUCCESS) {
+    uint64_t elapsed = SDL_GetTicksNS() - t0;
+    stat_wait_ns += elapsed;
+    cum_wait += elapsed;
+    if (prof) {
+        unsigned category = (unsigned)reason < SCARLET_WAIT_COUNT ? (unsigned)reason : 0;
+        atomic_fetch_add_explicit(&wait_calls[category], 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&wait_time[category], elapsed, memory_order_relaxed);
+    }
+    if (r == VK_SUCCESS) {
+        scarlet_completion_publish(&completed_cache, seq);
+    } else {
+        // Resource reuse is unsafe after a timeout as well as device loss.
+        if (r == VK_TIMEOUT)
+            FATAL("GPU timeout waiting submission %llu; resources remain in flight\n",
+                  (unsigned long long)seq);
         extern void vk_devlost_dump(void);
         vk_devlost_dump();
         vk_device_fault_report();
@@ -147,12 +167,14 @@ void vk_wait_seq(uint64_t seq) {
     }
 }
 
+void vk_wait_seq(uint64_t seq) { vk_wait_seq_for(seq, SCARLET_WAIT_EXTERNAL); }
+
 uint64_t vk_pending_seq(void) { return submit_seq + 1; }
 
 static Sub *sub(void) {
     Sub *s = &subs[cur_sub];
     if (s->seq != submit_seq + 1) {  // slot reused: its previous submission must be done
-        vk_wait_seq(s->seq);
+        vk_wait_seq_for(s->seq, SCARLET_WAIT_COMMAND_SLOT);
         if (s->ts) {  // (profiling) GPU time of that submission
             uint64_t t[2];
             if (vkGetQueryPoolResults(g_vk.dev, prof_qp, (uint32_t)cur_sub * 2, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] > t[0])
@@ -544,7 +566,7 @@ void renderer_submit(void) {
 
 void renderer_flush(void) {
     renderer_submit();
-    vk_wait_seq(submit_seq);
+    vk_wait_seq_for(submit_seq, SCARLET_WAIT_FINISH);
 }
 
 void renderer_sync(void) {
@@ -552,7 +574,7 @@ void renderer_sync(void) {
     pthread_mutex_lock(&seq_lock);
     uint64_t s = submit_seq;
     pthread_mutex_unlock(&seq_lock);
-    vk_wait_seq(s);
+    vk_wait_seq_for(s, SCARLET_WAIT_FINISH);
 }
 
 uint64_t renderer_fence_seq(void) {
@@ -573,7 +595,7 @@ void renderer_wait_seq(uint64_t seq) {
         s = submit_seq;
         pthread_mutex_unlock(&seq_lock);
     }
-    vk_wait_seq(seq > s ? s : seq);
+    vk_wait_seq_for(seq > s ? s : seq, SCARLET_WAIT_GUEST_FENCE);
 }
 
 VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
@@ -754,7 +776,7 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
                 LOG("[vk] transient pressure #%llu: %llu MB resident, waiting seq %llu (cap %llu MB)\n",
                     (unsigned long long)n, (unsigned long long)(transient_bytes >> 20),
                     (unsigned long long)oldest_seq, (unsigned long long)(cap >> 20));
-            vk_wait_seq(oldest_seq);
+            vk_wait_seq_for(oldest_seq, SCARLET_WAIT_TRANSIENT);
             done = vk_completed_seq();
             for (int i = 0; i < nchunks && transient_bytes + alloc > cap; i++)
                 if (i != active && chunks[i].buf && chunks[i].seq <= done) drop_chunk(i);
@@ -778,7 +800,7 @@ VkSpan vk_readback(uint64_t size) {
     static uint8_t *ptr;
     static uint64_t cap;
     if (size > cap) {
-        if (buf) { vk_wait_seq(submit_seq); vmaDestroyBuffer(g_vk.vma, buf, mem); }
+        if (buf) { vk_wait_seq_for(submit_seq, SCARLET_WAIT_READBACK); vmaDestroyBuffer(g_vk.vma, buf, mem); }
         cap = (size + (16 << 20) - 1) & ~((16ull << 20) - 1);
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = cap, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
@@ -1389,6 +1411,14 @@ const char *renderer_stats(void) {
         prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = prof_tex_watch_skips = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
+    if (prof) {
+        for (unsigned i = 0; i < SCARLET_WAIT_COUNT; ++i) {
+            uint64_t n = atomic_exchange_explicit(&wait_calls[i], 0, memory_order_relaxed);
+            uint64_t ns = atomic_exchange_explicit(&wait_time[i], 0, memory_order_relaxed);
+            if (n) LOG("[vk-wait] %s calls=%llu time=%.3fms\n",
+                       wait_names[i], (unsigned long long)n, ns / 1e6);
+        }
+    }
     stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = stat_tf_merged = stat_tf_barriers = stat_raster_discard_sets = stat_raster_discard_on = stat_a2c_1x = 0;
     stat_vkbar_full = stat_vkbar_graphics = stat_vkbar_compute = stat_vkbar_transfer = stat_vkbar_upload = 0;
     stat_logical_submits = stat_queue_batches = 0;
@@ -1413,6 +1443,7 @@ static void st_defaults(void) {
 }
 
 void vk_exec_init(void) {
+    scarlet_completion_reset(&completed_cache);
     prof = getenv("LARECOMP_VK_PROF") != NULL;
     if (prof) {
         prof_up_ns = 0;
@@ -2999,7 +3030,7 @@ static bool gmem_import(uint64_t size) {
     if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) { vkFreeMemory(g_vk.dev, mem, NULL); return false; }
     vkBindBufferMemory(g_vk.dev, buf, mem, 0);
     if (gmem_buf) {  // the heap grew: the old import may still be in use by submitted work
-        vk_wait_seq(submit_seq);
+        vk_wait_seq_for(submit_seq, SCARLET_WAIT_HEAP_IMPORT);
         vkDestroyBuffer(g_vk.dev, gmem_buf, NULL);
         vkFreeMemory(g_vk.dev, gmem_mem, NULL);
     }
@@ -5213,7 +5244,7 @@ static void exec_list(uint64_t handle, int depth) {
                     tf_checks++;
                     uint64_t sq = vk_pending_seq();
                     renderer_flush();
-                    vk_wait_seq(sq);
+                    vk_wait_seq_for(sq, SCARLET_WAIT_TF_DEBUG);
                     for (int bi = 0; bi < 3; bi++) {
                         if (!st.tfbuf[bi].addr || !st.tfbuf[bi].size) continue;
                         const float *f = (const float *)(uintptr_t)st.tfbuf[bi].addr;
