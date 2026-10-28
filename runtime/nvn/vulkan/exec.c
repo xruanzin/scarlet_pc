@@ -20,6 +20,7 @@
 #include "vk.h"
 #include "scarlet_temporal.h"
 #include "scarlet_post_policy.h"
+#include "scarlet_fidelity.h"
 #include "scarlet_rt_targets.h"
 #include "../renderer.h"
 #include "../../settings.h"
@@ -2535,6 +2536,7 @@ static uint64_t fragment_code_hash(uint64_t fs) {
 }
 
 static bool sharp_dof_variant(uint64_t hash) {
+    if (scarlet_graphics_reference()) return false; // keep original guest cinematic DOF
     static int enabled = -1;
     if (enabled < 0) {
         const char *e = getenv("LARECOMP_NO_DOF");
@@ -2544,6 +2546,7 @@ static bool sharp_dof_variant(uint64_t hash) {
     return enabled && hash == 0xfbff97881854688eull;
 }
 static bool hair_lighting_variant(uint64_t hash) {
+    if (scarlet_graphics_reference()) return false; // preserve guest anisotropic shader
     // The G-buffer capture proved this compatibility path restores Scarlet's
     // material-3 hair colour. Keep it on by default for the exact deferred
     // lighting shader; LARECOMP_NO_HAIR_FIX=1 is a diagnostic opt-out.
@@ -2584,6 +2587,7 @@ static void scarlet_scene_markers(uint64_t fs_addr) {
     }
 }
 static bool schoolyard_grade_variant(uint64_t fs_addr) {
+    if (scarlet_graphics_reference()) return false; // no port-authored hue/tone adjustment
     static int disabled = -1;
     if (disabled < 0) {
         const char *off = getenv("LARECOMP_NO_RING_GRADE_FIX");
@@ -3607,7 +3611,7 @@ static bool draw_lut_slices(CmdRec *r, bool indexed) {
     for (int i = 1; i < st.rt.ncolor; i++) if (st.rt.color[i]) return false;
     uint32_t base = (uint32_t)r->x[indexed ? 5 : 3];
     uint32_t count = (uint32_t)r->x[indexed ? 6 : 4];
-    const char *compat = getenv("LARECOMP_LUT_IDENTITY");
+    const char *compat = scarlet_graphics_reference() ? NULL : getenv("LARECOMP_LUT_IDENTITY");
     /*
      * Keep the game's own colour cube by default.  The identity cube is only an
      * A/B diagnostic: captures proved that replacing the guest LUT makes Scarlet
@@ -4956,10 +4960,11 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
     uint32_t ow = (uint32_t)lround(ow_d), oh = (uint32_t)lround(oh_d);
     if (ow > 16384) ow = 16384;
     if (oh > 16384) oh = 16384;
+    bool reference = scarlet_graphics_reference();
     ScarletPostPasses post = scarlet_post_passes(
         temporal_output,
-        g_settings.antialias == AA_SMAA && getenv("LARECOMP_NO_SMAA") == NULL,
-        g_settings.upscaler == UPSCALE_FSR1,
+        !reference && g_settings.antialias == AA_SMAA && getenv("LARECOMP_NO_SMAA") == NULL,
+        !reference && g_settings.upscaler == UPSCALE_FSR1,
         ow > b->width + 1 || oh > b->height + 1);
     bool smaa = post.smaa;
     bool fsr = post.fsr1;
