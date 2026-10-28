@@ -331,7 +331,7 @@ function Find-ProgramNca([string]$dir,[string]$baseNca='',[string]$mainId='') {
 }
 $baseNca = Find-ProgramNca $baseDir
 if (-not $baseNca) {
- throw "Program NCA do Scarlet na base nao identificado. Confira o final do log $log: falhas de NCA normalmente indicam chaves insuficientes (prod.keys/title.keys), arquivo NSP incompleto ou incompatibilidade do hactool."
+ throw "Program NCA do Scarlet na base nao identificado. Confira o final do log ${log}: falhas de NCA normalmente indicam chaves insuficientes (prod.keys/title.keys), arquivo NSP incompleto ou incompatibilidade do hactool."
 }
 $patchNca = Find-ProgramNca $updateDir $baseNca $expectedMain
 if (-not $patchNca) { throw "Update 4.0.0 (main $expectedMain) nao encontrado. Verifique build IDs e log: $log" }
