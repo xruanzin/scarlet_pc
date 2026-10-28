@@ -22,6 +22,7 @@ param(
     [switch]$Build,
     [ValidateSet('current','fsr31','fsr4','dlss','spatial')]
     [string]$Upscaler = 'current',
+    [switch]$GraphicsReference,
     [switch]$Profile,
     [switch]$NoLauncher
 )
@@ -130,6 +131,7 @@ $oldRuntime = $env:SCARLET_RUNTIME
 $oldDataRoot = $env:LARECOMP_DATA_ROOT
 $oldAotDir = $env:SCARLET_AOT_DIR
 $oldUpscaler = $env:SCARLET_UPSCALER
+$oldGraphicsReference = $env:SCARLET_GRAPHICS_REFERENCE
 $oldProfile = $env:SCARLET_NATIVE_PROFILE
 $oldLauncher = $env:LARECOMP_NO_LAUNCHER
 $oldHleProfile = $env:LARECOMP_HLE_PROF
@@ -153,6 +155,13 @@ try {
     if ([string]::IsNullOrWhiteSpace($env:SCARLET_AOT_DIR) -and
         (Test-Path -LiteralPath $aotCandidate -PathType Container)) {
         $env:SCARLET_AOT_DIR = [IO.Path]::GetFullPath($aotCandidate)
+    }
+    if ($GraphicsReference) {
+        $env:SCARLET_GRAPHICS_REFERENCE = '1'
+        Write-Host '[graphics] Suyu comparison baseline: original guest shaders, LUT and materials; no extra postprocessing.' -ForegroundColor Cyan
+        if ($Upscaler -ne 'current') {
+            Write-Warning '-GraphicsReference bypasses FSR/DLSS and post-SMAA during comparison even if -Upscaler was supplied.'
+        }
     }
     if ($Upscaler -ne 'current') {
         # 'spatial' selects the existing native SMAA/FSR1 presentation path;
@@ -212,6 +221,7 @@ finally {
     if ($null -eq $oldDataRoot) { Remove-Item Env:LARECOMP_DATA_ROOT -ErrorAction SilentlyContinue } else { $env:LARECOMP_DATA_ROOT = $oldDataRoot }
     if ($null -eq $oldAotDir) { Remove-Item Env:SCARLET_AOT_DIR -ErrorAction SilentlyContinue } else { $env:SCARLET_AOT_DIR = $oldAotDir }
     if ($null -eq $oldUpscaler) { Remove-Item Env:SCARLET_UPSCALER -ErrorAction SilentlyContinue } else { $env:SCARLET_UPSCALER = $oldUpscaler }
+    if ($null -eq $oldGraphicsReference) { Remove-Item Env:SCARLET_GRAPHICS_REFERENCE -ErrorAction SilentlyContinue } else { $env:SCARLET_GRAPHICS_REFERENCE = $oldGraphicsReference }
     if ($null -eq $oldProfile) { Remove-Item Env:SCARLET_NATIVE_PROFILE -ErrorAction SilentlyContinue } else { $env:SCARLET_NATIVE_PROFILE = $oldProfile }
     if ($null -eq $oldLauncher) { Remove-Item Env:LARECOMP_NO_LAUNCHER -ErrorAction SilentlyContinue } else { $env:LARECOMP_NO_LAUNCHER = $oldLauncher }
     if ($null -eq $oldExeFs) { Remove-Item Env:LARECOMP_EXEFS_DIR -ErrorAction SilentlyContinue } else { $env:LARECOMP_EXEFS_DIR = $oldExeFs }
