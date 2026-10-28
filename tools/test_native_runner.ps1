@@ -79,7 +79,8 @@ try {
     New-Item -ItemType File -Force -Path $patchedRomFs | Out-Null
     $fakePrepare = Join-Path $temp 'tools\scarlet_prepare_update.ps1'
     @'
-param([string]$BasePath,[string]$UpdatePath,[string]$KeysPath,[string]$HactoolPath,[string]$AotManifestPath)
+param([string]$BasePath,[string]$UpdatePath,[string]$KeysPath,[string]$TitleKeysPath,[string]$HactoolPath,[string]$AotManifestPath,[string]$OutputRoot)
+if ($OutputRoot) { Set-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'received-cache-root.txt') -Value $OutputRoot }
 [PSCustomObject]@{
     ExeFs = (Join-Path (Split-Path $PSScriptRoot -Parent) 'patched\exefs')
     RomFsImage = (Join-Path (Split-Path $PSScriptRoot -Parent) 'patched\romfs.bin')
@@ -95,6 +96,16 @@ param([string]$BasePath,[string]$UpdatePath,[string]$KeysPath,[string]$HactoolPa
     Assert-Runner ([string]::IsNullOrEmpty($capture.Process.PackageStream)) 'Cached update should permit memory mapping.'
     foreach ($name in $names) {
         Assert-Runner ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name, 'Process'))) "Environment leaked after update: $name"
+    }
+    # Redirected cache must forward the selected path without changing
+    # runtime selection or leaking environment variables.
+    $alternateCache = Join-Path $temp 'other drive\scarlet-cache'
+    & $runner -Runtime native -GamePath $baseNsp -UpdatePath $updateNsp -UpdateCacheRoot $alternateCache -NoLauncher
+    $received = Get-Content -LiteralPath (Join-Path $temp 'received-cache-root.txt') -Raw
+    Assert-Runner ($received.Trim() -eq $alternateCache) 'Relocated NSP update cache root was not forwarded.'
+    Assert-Runner ($capture.Process.Runtime -eq 'native') 'Relocated NSP update switched runtime.'
+    foreach ($name in $names) {
+        Assert-Runner ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name, 'Process'))) "Environment leaked after relocated update: $name"
     }
 
     Write-Host 'Native runner: default DLC, spaced path, native NSP update, profiler propagation and restoration passed.'
