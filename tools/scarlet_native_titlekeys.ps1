@@ -7,6 +7,7 @@ function Get-ScarletTicketTitleKeys {
  param([string[]]$Directories)
  $found = @{}
  $personalized = 0
+ $unsupported = 0
  $tickets = 0
  foreach ($dir in $Directories) {
   if (-not $dir -or -not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
@@ -18,12 +19,21 @@ function Get-ScarletTicketTitleKeys {
     $count = $stream.Read($data, 0, $data.Length)
     if ($count -lt 4) { continue }
     $signature = ([BitConverter]::ToString($data,0,4)).Replace('-','')
+    # 'continue' inside a PowerShell switch does not skip the enclosing
+    # foreach. Explicitly validate the signature before using the offset.
+    $start = -1
     switch ($signature) {
-     '00010000' { $start = 0x240 }
-     '00010003' { $start = 0x240 }
-     '00010001' { $start = 0x140 }
-     '00010004' { $start = 0x140 }
-     default { continue }
+     '00010000' { $start = 0x240 } # RSA-4096 / SHA-1
+     '00010003' { $start = 0x240 } # RSA-4096 / SHA-256
+     '00010001' { $start = 0x140 } # RSA-2048 / SHA-1
+     '00010004' { $start = 0x140 } # RSA-2048 / SHA-256
+     '00010002' { $start = 0x80 }  # ECDSA / SHA-1
+     '00010005' { $start = 0x80 }  # ECDSA / SHA-256
+     '00010006' { $start = 0x40 }  # HMAC-SHA1
+    }
+    if ($start -lt 0) {
+     $unsupported++
+     continue
     }
     if ($count -lt ($start + 0x170)) { continue }
     # Personalized (RSA-encrypted) tickets cannot use --titlekey directly.
@@ -38,7 +48,7 @@ function Get-ScarletTicketTitleKeys {
    } finally { $stream.Dispose() }
   }
  }
- return [PSCustomObject]@{ Keys=$found; TicketCount=$tickets; PersonalizedCount=$personalized }
+ return [PSCustomObject]@{ Keys=$found; TicketCount=$tickets; PersonalizedCount=$personalized; UnsupportedCount=$unsupported }
 }
 
 function Find-ScarletTitleKeysFile {
