@@ -2072,6 +2072,12 @@ static void bind_program_stages(NvnProgram *p, uint32_t mask) {
     st.program = &g_comb_prog;
 }
 
+// PokeZ's exact last-program memo: compare all inputs before the bytewise hash.
+static struct {
+    NvnShaderStage stages[2];
+    ShaderKey vk, fk;
+    Prog *prog;
+} last_program;
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     // A vertex shader without a fragment shader (Let's Go's depth / shadow passes: stages 0x1) gets an empty fragment
     // shader in translate_program - no color output, only depth, as the hardware does. They were all skipped.
@@ -2083,6 +2089,11 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
         }
         return NULL;
     }
+    if (last_program.prog && !memcmp(last_program.stages, np->stages, sizeof last_program.stages) &&
+        !memcmp(&last_program.vk, vkey, sizeof *vkey) && !memcmp(&last_program.fk, fkey, sizeof *fkey))
+        return last_program.prog;
+    memcpy(last_program.stages, np->stages, sizeof last_program.stages);
+    last_program.vk = *vkey; last_program.fk = *fkey;
     uint64_t h = 0xcbf29ce484222325ull;
     for (int i = 0; i < 2; i++) {
         uint64_t values[] = {np->stages[i].code_addr, np->stages[i].const_offset, np->stages[i].const_size};
@@ -2095,7 +2106,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     if (!h) h = 1;
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
-    if (prog_tab[slot].key) return prog_tab[slot].prog;
+    if (prog_tab[slot].key) return last_program.prog = prog_tab[slot].prog;
     Prog *p = calloc(1, sizeof *p);
     prog_tab[slot].key = h;
     prog_tab[slot].prog = p;
@@ -2110,6 +2121,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     p->vkey = *vkey;
     p->fkey = *fkey;
     run_job(translate_program, p);
+    last_program.prog = p;
     return p;
 }
 
@@ -2933,10 +2945,58 @@ static bool tint_like_vec4(const float *v) {
     return hi - lo > 0.12f;
 }
 
+// Adapted from PokeZ-ARecomp's lean constants (MIT; see docs/SCARLET-POKEZA.md).
+// Preserve Scarlet's 65-row scale ABI. Only materialize zero padding on a miss.
+static bool scarlet_lean_constants(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("SCARLET_LEAN_CONSTANTS"); on = !e || atoi(e) != 0; }
+    return on;
+}
+static struct { uint64_t seq; int nt; float data[65][4]; VkSpan span; } lean_scale[2];
+static struct { uint64_t seq, size; int stage; Range sb[16]; VkSpan span; } lean_driver[2];
+static VkSpan scarlet_scale_copy(int sg, const float rs[65][4], int nt) {
+    uint64_t seq = vk_pending_seq();
+    size_t used = (size_t)(nt + 1) * sizeof rs[0];
+    if (lean_scale[sg].span.buf && lean_scale[sg].seq == seq && lean_scale[sg].nt == nt &&
+        !memcmp(lean_scale[sg].data, rs, used)) return lean_scale[sg].span;
+    VkSpan s = vk_transient(65 * 16, 256);
+    memcpy(s.ptr, rs, used);
+    memset((uint8_t *)s.ptr + used, 0, 65 * 16 - used);
+    lean_scale[sg].seq = seq; lean_scale[sg].nt = nt; lean_scale[sg].span = s;
+    memcpy(lean_scale[sg].data, rs, used);
+    return s;
+}
+static VkSpan scarlet_driver_copy(int stage, uint64_t size) {
+    int slot = stage == 1;
+    uint32_t base = 0x110 + (slot ? 0x400 : 0);
+    int ne = size > base ? (int)((size - base + 15) / 16) : 0;
+    if (ne > 16) ne = 16;
+    uint64_t seq = vk_pending_seq();
+    const Range *sb = st.sbuf[stage];
+    if (lean_driver[slot].span.buf && lean_driver[slot].seq == seq && lean_driver[slot].size == size &&
+        lean_driver[slot].stage == stage && !memcmp(lean_driver[slot].sb, sb, (size_t)ne * sizeof *sb))
+        return lean_driver[slot].span;
+    uint32_t drv[0x800 / 4];
+    memset(drv, 0, size);
+    for (int i = 0; i < ne; ++i) {
+        uint32_t *e = &drv[(base + 16 * i) / 4];
+        e[0] = (uint32_t)sb[i].addr; e[1] = (uint32_t)(sb[i].addr >> 32); e[2] = (uint32_t)sb[i].size;
+    }
+    VkSpan s = vk_transient_copy(drv, size, 256);
+    lean_driver[slot].seq = seq; lean_driver[slot].size = size; lean_driver[slot].stage = stage;
+    lean_driver[slot].span = s;
+    memcpy(lean_driver[slot].sb, sb, (size_t)ne * sizeof *sb);
+    return s;
+}
+
 // Constant buffer k of a stage (renderer.m bind_cbufs), copied into transient memory.
 static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t gx, uint32_t gy, uint32_t gz) {
     static const uint8_t zeros[0x10000];
     if (k == 0) {
+        if (stage != 5 && scarlet_lean_constants()) {
+            uint64_t size = si->cbuf_size[0] > 0x800 ? 0x800 : (si->cbuf_size[0] ? si->cbuf_size[0] : 256);
+            return ubo_span(scarlet_driver_copy(stage, size), size);
+        }
         uint32_t drv[0x800 / 4] = {0};
         if (stage == 5) {
             drv[0x200 / 4] = gx; drv[0x204 / 4] = gy; drv[0x208 / 4] = gz;
@@ -3194,6 +3254,9 @@ static void surface_cache_reset(void);
 void vk_exec_reset(void) {
     vk_pipe_history_save();
     memset(prog_tab, 0, sizeof prog_tab);
+    last_program.prog = NULL;
+    memset(lean_scale, 0, sizeof lean_scale);
+    memset(lean_driver, 0, sizeof lean_driver);
     memset(pipe_tab, 0, sizeof pipe_tab);
     last_draw_pipeline = NULL;
     scarlet_draw_state_invalidate(&draw_state_cache);
@@ -3530,7 +3593,10 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     SurfaceBindlessCache *surf = (si->uses_surface_write || si->uses_surface_atomic) ? surface_cache_get(st.tpool) : NULL;
     int n = 0;
     int sg = stage == 1 ? 1 : 0;
-    float rs[65][4] = {{1, 1, 0, 0}};
+    bool lean = scarlet_lean_constants();
+    float rs[65][4];
+    if (!lean) memset(rs, 0, sizeof rs);
+    rs[0][0] = rs[0][1] = 1; rs[0][2] = rs[0][3] = 0;
     if (rscale_row0) memcpy(rs[0], rscale_row0, 16);
     for (int i = 0; i < p->nbinds; i++) {
         VkBindingInfo *b = &p->binds[i];
@@ -3581,8 +3647,9 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
                                       .descriptorCount = 1, .descriptorType = b->type};
         if (b->binding == 18) {
-            for (int t = 0; t < si->ntex && t < 64; t++) { rs[1 + t][0] = tex_sc[sg][t][0]; rs[1 + t][1] = tex_sc[sg][t][1]; }
-            bi[n] = ubo_span(copy_dedupe(sg ? DEDUPE_RSCALE_F : DEDUPE_RSCALE_V, rs, sizeof rs, 256), sizeof rs);
+            for (int t = 0; t < si->ntex && t < 64; t++) { rs[1 + t][0] = tex_sc[sg][t][0]; rs[1 + t][1] = tex_sc[sg][t][1]; rs[1 + t][2] = rs[1 + t][3] = 0; }
+            bi[n] = ubo_span(lean ? scarlet_scale_copy(sg, (const float (*)[4])rs, si->ntex < 64 ? si->ntex : 64) :
+                copy_dedupe(sg ? DEDUPE_RSCALE_F : DEDUPE_RSCALE_V, rs, sizeof rs, 256), sizeof rs);
         } else {
             float zero[8] = {0};
             bi[n] = ubo_span(copy_dedupe(DEDUPE_TINT, tint ? tint : zero, 32, 256), 32);
