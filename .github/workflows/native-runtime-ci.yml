@@ -82,6 +82,8 @@ jobs:
         run: |
           clang -std=c11 -Wall -Wextra -Werror -o /tmp/scarlet-graphics-reference tools/test_native_graphics_reference.c
           /tmp/scarlet-graphics-reference
+      - name: Check synchronized suyu/native frame comparison tool
+        run: python3 -m py_compile tools/scarlet_compare_suyu.py
 
       - name: Execute native AOT loader and boundary regression tests
         run: |
