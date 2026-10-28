@@ -88,7 +88,7 @@ try {
     Assert-Runner ($capture.Process.Upscaler -eq 'spatial') 'Native spatial mode not propagated.'
     Assert-Runner ([Environment]::GetEnvironmentVariable('SCARLET_UPSCALER', 'Process') -eq 'test-before') 'Spatial mode leaked to parent.'
     & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -Upscaler current -NoLauncher
-    Assert-Runner ($capture.Process.Upscaler -eq 'test-before') 'Current mode must honor the user's existing setting.'
+    Assert-Runner ($capture.Process.Upscaler -eq 'test-before') 'Current mode must honor the user''s existing setting.'
 
     # Explicit DLC support must be a declared array parameter, even with none supplied.
     $parameters = (Get-Command $runner).Parameters
