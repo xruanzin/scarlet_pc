@@ -3,6 +3,8 @@ param(
     [int]$Jobs = 4,
 
     [string]$AotDir,
+    [string]$BuildRoot,
+    [switch]$DebugSymbols,
 
     [switch]$Release
 )
@@ -11,7 +13,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
-$buildDir = Join-Path $repoRoot 'build\native'
+. (Join-Path $PSScriptRoot 'scarlet_native_paths.ps1')
+$buildDir = Resolve-ScarletNativeBuildRoot -BuildRoot $BuildRoot
 $exe = Join-Path $buildDir 'ScarletPC.exe'
 $deps = Join-Path $repoRoot 'build\deps-win'
 
@@ -35,11 +38,19 @@ if (-not $clang) {
     throw 'clang was not found in PATH.'
 }
 
+$driveRoot = [IO.Path]::GetPathRoot($buildDir)
+$drive = [IO.DriveInfo]::new($driveRoot)
+if (-not $drive.IsReady -or $drive.AvailableFreeSpace -lt 1GB) {
+    throw ("Espaco insuficiente em {0}: pelo menos 1 GiB livre e necessario para iniciar o build nativo. Nenhum arquivo sera apagado." -f $driveRoot)
+}
 New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+Write-Host ("[native] Objetos, executavel e assets: {0}" -f $buildDir) -ForegroundColor Cyan
+Write-Host ("[native] Espaco livre: {0:N2} GiB" -f ($drive.AvailableFreeSpace / 1GB)) -ForegroundColor DarkGray
 
 $args = @(
     ('B={0}' -f ($buildDir -replace '\\','/')),
     'EXE_NAME=ScarletPC',
+    ('HOST_DEBUG={0}' -f $(if ($DebugSymbols) { '1' } else { '0' })),
     ('-j{0}' -f $Jobs)
 )
 if (Test-Path $deps -PathType Container) {
@@ -69,8 +80,12 @@ if (-not (Test-Path $exe -PathType Leaf)) {
 
 # Reuse the already-built ArmRecomp DLLs. Never rebuild AOT just because the
 # native host changed.
-if ([string]::IsNullOrWhiteSpace($AotDir)) {
+$outAot = Join-Path $buildDir 'aot'
+$aotNames = @('scarlet-main.dll','scarlet-rtld.dll','scarlet-multimedia.dll','scarlet-sdk.dll')
+$readyAot = @($aotNames | Where-Object { Test-Path -LiteralPath (Join-Path $outAot $_) -PathType Leaf }).Count -eq 4
+if (-not $readyAot -and [string]::IsNullOrWhiteSpace($AotDir)) {
     foreach ($candidate in @(
+        (Join-Path $repoRoot 'build\native\aot'),
         (Join-Path $repoRoot 'dist\ScarletPC-Independent\aot'),
         (Join-Path $repoRoot 'build\aot\modules'),
         (Join-Path $repoRoot 'aot')
@@ -90,15 +105,22 @@ foreach ($fsr4Source in @(
     if (Test-Path $fsr4Source -PathType Container) {
         $fsr4Dest = Join-Path $buildDir 'assets\fsr4-v07'
         New-Item -ItemType Directory -Force -Path $fsr4Dest | Out-Null
-        Copy-Item (Join-Path $fsr4Source '*') $fsr4Dest -Recurse -Force
+        Get-ChildItem -LiteralPath $fsr4Source -Force | ForEach-Object {
+            $destination = Join-Path $fsr4Dest $_.Name
+            if (-not (Test-Path -LiteralPath $destination)) {
+                Copy-Item -LiteralPath $_.FullName -Destination $destination -Recurse
+            }
+        }
         Write-Host "[native] Reused FSR4 v07 assets from $fsr4Source" -ForegroundColor DarkGreen
         break
     }
 }
 
-if (-not [string]::IsNullOrWhiteSpace($AotDir)) {
-    $resolvedAot = (Resolve-Path $AotDir).Path
-    $outAot = Join-Path $buildDir 'aot'
+if ($readyAot -and [string]::IsNullOrWhiteSpace($AotDir)) {
+    Write-Host ("[native] Quatro DLLs AOT ja estao no build em D:, sem nova copia.") -ForegroundColor Green
+}
+elseif (-not [string]::IsNullOrWhiteSpace($AotDir)) {
+    $resolvedAot = (Resolve-Path -LiteralPath $AotDir).Path
     New-Item -ItemType Directory -Force -Path $outAot | Out-Null
 
     $map = [ordered]@{
@@ -119,7 +141,14 @@ if (-not [string]::IsNullOrWhiteSpace($AotDir)) {
         if (-not $src) {
             throw "Missing AOT module for $dest in $resolvedAot"
         }
-        Copy-Item $src (Join-Path $outAot $dest) -Force
+        $target = Join-Path $outAot $dest
+        if ([IO.Path]::GetFullPath($src) -ieq [IO.Path]::GetFullPath($target)) { continue }
+        if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
+            Copy-Item -LiteralPath $src -Destination $target
+            Write-Host ("[native] AOT staged uma unica vez: {0}" -f $dest) -ForegroundColor DarkGray
+        } else {
+            Write-Host ("[native] AOT existente mantido sem sobrescrita: {0}" -f $dest) -ForegroundColor DarkGray
+        }
     }
     Write-Host "[native] Reused AOT modules from $resolvedAot" -ForegroundColor Green
 }
@@ -138,7 +167,10 @@ foreach ($dlssStage in @(
         foreach ($name in @('ScarletDlssBridge.dll','nvngx_dlss.dll','NVIDIA-DLSS-LICENSE.txt')) {
             $src = Join-Path $dlssStage $name
             if (Test-Path $src -PathType Leaf) {
-                Copy-Item $src (Join-Path $buildDir $name) -Force
+                $dst = Join-Path $buildDir $name
+                if (-not (Test-Path -LiteralPath $dst -PathType Leaf)) {
+                    Copy-Item -LiteralPath $src -Destination $dst
+                }
             }
         }
         Write-Host "[native] Preserved optional DLSS bridge payload from $dlssStage" -ForegroundColor DarkGreen
@@ -151,7 +183,10 @@ foreach ($dlssStage in @(
 $depBin = Join-Path $deps 'bin'
 if (Test-Path $depBin -PathType Container) {
     Get-ChildItem $depBin -File -Filter '*.dll' | ForEach-Object {
-        Copy-Item $_.FullName (Join-Path $buildDir $_.Name) -Force
+        $dst = Join-Path $buildDir $_.Name
+        if (-not (Test-Path -LiteralPath $dst -PathType Leaf)) {
+            Copy-Item -LiteralPath $_.FullName -Destination $dst
+        }
     }
 }
 
