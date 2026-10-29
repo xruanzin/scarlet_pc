@@ -211,9 +211,27 @@ try {
     $quotedRoot = [regex]::Replace($resolvedRoot, '(\\+)$', '$1$1')
     $launch += ('"' + $quotedRoot + '"')
 
-    $p = Start-Process -FilePath $exe -ArgumentList $launch -WorkingDirectory $buildDir -PassThru -Wait
+    # GUI builds only create lasrecomp.log when stderr has no inherited handle.
+    # Capture the executable itself: redirecting this PowerShell wrapper alone
+    # does not reliably capture a Start-Process child on Windows PowerShell 5.1.
+    # Keep a distinct pair per launch so another run cannot erase a crash log.
+    $logDir = Join-Path $buildDir 'logs'
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $logName = 'native-{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss-fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
+    $stderrLog = Join-Path $logDir ($logName + '.stderr.log')
+    $stdoutLog = Join-Path $logDir ($logName + '.stdout.log')
+    Write-Host ("[log] runtime errors -> {0}" -f $stderrLog) -ForegroundColor DarkGray
+    Write-Host ("[log] runtime output -> {0}" -f $stdoutLog) -ForegroundColor DarkGray
+    $p = Start-Process -FilePath $exe -ArgumentList $launch -WorkingDirectory $buildDir -PassThru -Wait `
+        -RedirectStandardError $stderrLog -RedirectStandardOutput $stdoutLog
     if ($p.ExitCode -ne 0) {
-        throw "Scarlet Native Runtime exited with code $($p.ExitCode)"
+        # A log-read failure must not mask the original process exit status.
+        try {
+            if (Test-Path -LiteralPath $stderrLog -PathType Leaf) {
+                Get-Content -LiteralPath $stderrLog -Tail 120 | ForEach-Object { Write-Host $_ }
+            }
+        } catch { Write-Warning "Could not read runtime log: $stderrLog" }
+        throw "Scarlet Native Runtime exited with code $($p.ExitCode). Runtime log: $stderrLog; stdout: $stdoutLog"
     }
 }
 finally {

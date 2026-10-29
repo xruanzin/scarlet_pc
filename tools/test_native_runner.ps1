@@ -18,7 +18,7 @@ if (-not $preparer.Contains('"--basenca=$baseNca","--exefsdir=$exeFs"')) {
     throw 'Expected --basenca during final BKTR RomFS assembly.'
 }
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('Scarlet Runner Test ' + [guid]::NewGuid())
-$capture = @{ Process = $null }
+$capture = @{ Process = $null; ExitCode = 0 }
 $names = @('SCARLET_RUNTIME','SCARLET_UPSCALER','SCARLET_GRAPHICS_REFERENCE','SCARLET_NATIVE_PROFILE','LARECOMP_NO_LAUNCHER',
     'LARECOMP_DATA_ROOT','SCARLET_AOT_DIR',
     'LARECOMP_HLE_PROF','LARECOMP_EXEFS_DIR','LARECOMP_ROMFS_DIR','LARECOMP_ROMFS_IMAGE',
@@ -34,7 +34,8 @@ function Assert-Runner([bool]$Condition, [string]$Message) {
 # The script under test resolves this function instead of the process cmdlet.
 function Start-Process {
     param([string]$FilePath, [string[]]$ArgumentList, [string]$WorkingDirectory,
-        [switch]$PassThru, [switch]$Wait)
+        [switch]$PassThru, [switch]$Wait,
+        [string]$RedirectStandardError, [string]$RedirectStandardOutput)
     $capture.Process = @{
         File = $FilePath
         Arguments = @($ArgumentList)
@@ -51,8 +52,12 @@ function Start-Process {
         RomFsImage = $env:LARECOMP_ROMFS_IMAGE
         RomFsDir = $env:LARECOMP_ROMFS_DIR
         PackageStream = $env:LARECOMP_PACKAGE_STREAM
+        Stderr = $RedirectStandardError
+        Stdout = $RedirectStandardOutput
     }
-    return [pscustomobject]@{ ExitCode = 0 }
+    if ($RedirectStandardError) { Set-Content -LiteralPath $RedirectStandardError -Value 'FATAL: synthetic runtime failure' }
+    if ($RedirectStandardOutput) { Set-Content -LiteralPath $RedirectStandardOutput -Value 'synthetic runtime stdout' }
+    return [pscustomobject]@{ ExitCode = $capture.ExitCode }
 }
 
 try {
@@ -175,7 +180,24 @@ $directory = if ($directoryMode) { Join-Path $root 'patched\romfs' } else { '' }
         Assert-Runner ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name, 'Process'))) "Environment leaked after NSTool directory mode: $name"
     }
 
-    Write-Host 'Native runner: default DLC, spaced path, native NSP update, profiler propagation and restoration passed.'
+    # The child must be redirected even with inherited console handles. Preserve
+    # each run's diagnostics, report a failing exit, and still restore the env.
+    $priorLog = $capture.Process.Stderr
+    $capture.ExitCode = -1073740791
+    $failure = ''
+    try { & $runner -BuildRoot $mockBuild -Runtime native -GamePath $game -NoLauncher }
+    catch { $failure = $_.Exception.Message }
+    Assert-Runner ($failure.Contains('-1073740791')) 'Original crash exit code was hidden.'
+    Assert-Runner ($failure.Contains($capture.Process.Stderr)) 'Crash report omitted runtime stderr path.'
+    Assert-Runner ($capture.Process.Stderr -ne $capture.Process.Stdout) 'Separate streams must not target the same file.'
+    Assert-Runner ((Split-Path $capture.Process.Stderr -Parent) -eq (Join-Path $mockBuild 'logs')) 'Crash log escaped the build volume.'
+    Assert-Runner ($capture.Process.Stderr -ne $priorLog -and (Test-Path -LiteralPath $priorLog)) 'Another launch erased the previous log.'
+    Assert-Runner ((Get-Content -LiteralPath $capture.Process.Stderr -Raw).Contains('FATAL: synthetic runtime failure')) 'Child stderr was not captured.'
+    foreach ($name in $names) {
+        Assert-Runner ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name, 'Process'))) "Environment leaked after crash: $name"
+    }
+
+    Write-Host 'Native runner: DLC, spaced paths, native NSP update, profiling, crash logs and environment restoration passed.'
 }
 finally {
     foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $before[$name], 'Process') }
