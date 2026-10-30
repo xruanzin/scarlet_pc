@@ -5769,14 +5769,19 @@ if (-not $scarletCondText.Contains('[Scarlet.Perf] CV wait uncontended unlock fa
                 }
             }
 '@
-    if (-not $scarletCondText.Contains($scarletCvWaitOld.Trim())) {
-        throw 'Scarlet runtime overlay: CV wait owner-transfer block missing'
-    }
-    $scarletCondText =
-        $scarletCondText.Replace($scarletCvWaitOld.Trim(), $scarletCvWaitNew.Trim())
+    if ($scarletCondText.Contains($scarletCvWaitOld.Trim())) {
+        $scarletCondText =
+            $scarletCondText.Replace($scarletCvWaitOld.Trim(), $scarletCvWaitNew.Trim())
 
-    [IO.File]::WriteAllText($scarletCondPath, $scarletCondText, $utf8)
-    Write-Host '[Scarlet PC] CV wait fast path skips waiter-list traversal on uncontended mutexes.' -ForegroundColor DarkGray
+        [IO.File]::WriteAllText($scarletCondPath, $scarletCondText, $utf8)
+        Write-Host '[Scarlet PC] CV wait fast path skips waiter-list traversal on uncontended mutexes.' -ForegroundColor DarkGray
+    } else {
+        # FastIncremental intentionally preserves the already-patched runtime tree.
+        # Older Scarlet CPU/sync experiments can leave this semantic block in a
+        # different but valid form. Do not abort the entire quick update merely
+        # because this optional micro-optimization cannot be re-applied literally.
+        Write-Host '[Scarlet PC] Quick overlay: CV wait owner-transfer block already differs; preserving existing runtime path.' -ForegroundColor DarkGray
+    }
 }
 
 Write-Host '[Scarlet PC] Runtime overlay applied.' -ForegroundColor Green
